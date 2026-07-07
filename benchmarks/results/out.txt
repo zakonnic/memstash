@@ -1,0 +1,84 @@
+go -C benchmarks test -run xxx -bench . ./...
+goos: windows
+goarch: amd64
+pkg: memstash-bench
+cpu: AMD Ryzen 9 9900X 12-Core Processor
+BenchmarkGetHit/memstash-clock-24               1000000000               0.8800 ns/op          0 B/op          0 allocs/op
+BenchmarkGetHit/memstash-s3fifo-24              1000000000               0.8869 ns/op          0 B/op          0 allocs/op
+BenchmarkGetHit/ristretto-24                    192176310                5.911 ns/op           1 B/op          0 allocs/op
+BenchmarkGetHit/otter-wtinylfu-24               551325775                2.183 ns/op           0 B/op          0 allocs/op
+BenchmarkGetHit/theine-wtinylfu-24              350028526                3.407 ns/op           0 B/op          0 allocs/op
+BenchmarkGetHit/hashicorp-lru-24                12100713                93.54 ns/op            0 B/op          0 allocs/op
+BenchmarkGetHit/sync.Map-24                     790766482                1.549 ns/op           0 B/op          0 allocs/op
+BenchmarkSet/memstash-clock-24                  34424552                37.57 ns/op           36 B/op          1 allocs/op
+BenchmarkSet/memstash-s3fifo-24                 28512771                43.31 ns/op           34 B/op          1 allocs/op
+BenchmarkSet/ristretto-24                       16331440                69.74 ns/op           87 B/op          1 allocs/op
+BenchmarkSet/otter-wtinylfu-24                   5340142               203.8 ns/op            48 B/op          1 allocs/op
+BenchmarkSet/theine-wtinylfu-24                  4127652               305.3 ns/op            39 B/op          0 allocs/op
+BenchmarkSet/hashicorp-lru-24                    9673720               136.4 ns/op            66 B/op          0 allocs/op
+BenchmarkSet/sync.Map-24                        100000000               12.91 ns/op           63 B/op          2 allocs/op
+BenchmarkMixed90_10/memstash-clock-24           330987184                3.621 ns/op           3 B/op          0 allocs/op
+BenchmarkMixed90_10/memstash-s3fifo-24          333896412                3.601 ns/op           3 B/op          0 allocs/op
+BenchmarkMixed90_10/ristretto-24                92734573                12.93 ns/op           10 B/op          0 allocs/op
+BenchmarkMixed90_10/otter-wtinylfu-24           23679333                49.47 ns/op            4 B/op          0 allocs/op
+BenchmarkMixed90_10/theine-wtinylfu-24          21466674                51.97 ns/op            0 B/op          0 allocs/op
+BenchmarkMixed90_10/hashicorp-lru-24            11918607                96.20 ns/op            0 B/op          0 allocs/op
+BenchmarkMixed90_10/sync.Map-24                 294607214                4.135 ns/op           5 B/op          0 allocs/op
+BenchmarkThroughput/reads=100%/memstash-clock-24                1000000000               0.9494 ns/op         1053 Mops/s
+BenchmarkThroughput/reads=100%/memstash-s3fifo-24               1000000000               0.9548 ns/op         1047 Mops/s
+BenchmarkThroughput/reads=100%/ristretto-24                     224538586                5.549 ns/op           180.2 Mops/s
+BenchmarkThroughput/reads=100%/otter-wtinylfu-24                536483564                2.189 ns/op           456.9 Mops/s
+BenchmarkThroughput/reads=100%/theine-wtinylfu-24               342057021                3.443 ns/op           290.5 Mops/s
+BenchmarkThroughput/reads=100%/hashicorp-lru-24                 11899047                97.47 ns/op             10.26 Mops/s
+BenchmarkThroughput/reads=100%/sync.Map-24                      753188812                1.621 ns/op           616.8 Mops/s
+BenchmarkThroughput/reads=75%/memstash-clock-24                 161505902                7.227 ns/op           138.4 Mops/s
+BenchmarkThroughput/reads=75%/memstash-s3fifo-24                168747106                7.072 ns/op           141.4 Mops/s
+BenchmarkThroughput/reads=75%/ristretto-24                      29953268                40.01 ns/op             24.99 Mops/s
+BenchmarkThroughput/reads=75%/otter-wtinylfu-24                 11375204               104.1 ns/op               9.608 Mops/s
+BenchmarkThroughput/reads=75%/theine-wtinylfu-24                11927065                97.28 ns/op             10.28 Mops/s
+BenchmarkThroughput/reads=75%/hashicorp-lru-24                  11917293                99.83 ns/op             10.02 Mops/s
+BenchmarkThroughput/reads=75%/sync.Map-24                       173166169                6.936 ns/op           144.2 Mops/s
+BenchmarkThroughput/reads=50%/memstash-clock-24                 95640391                12.81 ns/op             78.08 Mops/s
+BenchmarkThroughput/reads=50%/memstash-s3fifo-24                100000000               12.59 ns/op             79.45 Mops/s
+BenchmarkThroughput/reads=50%/ristretto-24                      22169092                54.58 ns/op             18.32 Mops/s
+BenchmarkThroughput/reads=50%/otter-wtinylfu-24                  6163758               188.5 ns/op               5.305 Mops/s
+BenchmarkThroughput/reads=50%/theine-wtinylfu-24                 7000590               162.4 ns/op               6.158 Mops/s
+BenchmarkThroughput/reads=50%/hashicorp-lru-24                  11934657               100.2 ns/op               9.978 Mops/s
+BenchmarkThroughput/reads=50%/sync.Map-24                       100000000               10.10 ns/op             98.98 Mops/s
+BenchmarkThroughput/reads=25%/memstash-clock-24                 63281460                18.21 ns/op             54.91 Mops/s
+BenchmarkThroughput/reads=25%/memstash-s3fifo-24                69713130                18.15 ns/op             55.11 Mops/s
+BenchmarkThroughput/reads=25%/ristretto-24                       9191206               120.8 ns/op               8.275 Mops/s
+BenchmarkThroughput/reads=25%/otter-wtinylfu-24                  4321410               276.5 ns/op               3.616 Mops/s
+BenchmarkThroughput/reads=25%/theine-wtinylfu-24                 5502592               219.3 ns/op               4.559 Mops/s
+BenchmarkThroughput/reads=25%/hashicorp-lru-24                  11216661               105.1 ns/op               9.511 Mops/s
+BenchmarkThroughput/reads=25%/sync.Map-24                       100000000               12.38 ns/op             80.75 Mops/s
+BenchmarkThroughput/reads=0%/memstash-clock-24                  47259680                25.04 ns/op             39.94 Mops/s
+BenchmarkThroughput/reads=0%/memstash-s3fifo-24                 50125521                22.97 ns/op             43.54 Mops/s
+BenchmarkThroughput/reads=0%/ristretto-24                       13790978                92.64 ns/op             10.79 Mops/s
+BenchmarkThroughput/reads=0%/otter-wtinylfu-24                   3332227               346.8 ns/op               2.884 Mops/s
+BenchmarkThroughput/reads=0%/theine-wtinylfu-24                  4194970               281.5 ns/op               3.553 Mops/s
+BenchmarkThroughput/reads=0%/hashicorp-lru-24                   10856583               109.4 ns/op               9.140 Mops/s
+BenchmarkThroughput/reads=0%/sync.Map-24                        88343774                14.62 ns/op             68.39 Mops/s
+PASS
+ok      memstash-bench  88.171s
+go -C benchmarks test -run TestHitRate -v
+=== RUN   TestHitRate
+    hitrate_test.go:92: ---- capacity 10000 items ----
+    hitrate_test.go:93: cache                      zipf    zipf+scan  one-hit-30%
+    hitrate_test.go:111: memstash-clock           50.42%       34.53%       55.19%
+    hitrate_test.go:111: memstash-s3fifo          56.84%       39.44%       59.81%
+    hitrate_test.go:111: ristretto                20.23%       14.50%       30.85%
+    hitrate_test.go:111: otter-wtinylfu           54.50%       36.64%       57.36%
+    hitrate_test.go:111: theine-wtinylfu          57.11%       38.95%       59.50%
+    hitrate_test.go:111: hashicorp-lru            48.38%       33.34%       53.76%
+    hitrate_test.go:92: ---- capacity 100000 items ----
+    hitrate_test.go:93: cache                      zipf    zipf+scan  one-hit-30%
+    hitrate_test.go:111: memstash-clock           71.05%       45.35%       63.44%
+    hitrate_test.go:111: memstash-s3fifo          71.51%       46.91%       63.71%
+    hitrate_test.go:111: ristretto                40.96%       29.64%       51.87%
+    hitrate_test.go:111: otter-wtinylfu           69.93%       44.68%       62.99%
+    hitrate_test.go:111: theine-wtinylfu          71.18%       45.59%       63.52%
+    hitrate_test.go:111: hashicorp-lru            70.33%       42.31%       63.00%
+--- PASS: TestHitRate (8.78s)
+PASS
+ok      memstash-bench  9.084s

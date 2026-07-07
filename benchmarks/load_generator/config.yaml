@@ -1,0 +1,95 @@
+# Per-scenario overrides for the load generator (benchmarks/load_generator).
+#
+# Every field is optional: anything left out - a field, a whole scenario block, or the whole file - keeps the
+# built-in default from buildScenarios() in main.go. If you override `goroutines`, you must also give an `rps` list
+# with the same number of entries (one target requests/sec value per worker goroutine).
+#
+# This file ships pre-filled with the current built-in defaults, so it doubles as documentation of what runs out of
+# the box - edit values in place to change the load. It is copied next to the binary by `make load-generator` and
+# loaded by default from the working directory (override the path with -config).
+
+scenarios:
+  # 10 goroutines, 90% Get / 10% Set, 10k rps total, default cache size. Only half the read key space is ever
+  # written, so ~half of all Gets target keys that were never Set.
+  scenario-1:
+    size: 20000
+    goroutines: 10
+    read_percent: 90
+    key_space: 200000
+    write_key_space: 100000
+    rps:
+      - 1000
+      - 1000
+      - 1000
+      - 1000
+      - 1000
+      - 1000
+      - 1000
+      - 1000
+      - 1000
+      - 1000
+
+  # 5 goroutines, 50% Get / 50% Set, 10k rps total, default cache size. Only 5% of the read key space is ever
+  # written - a small hot write set under heavy churn.
+  scenario-2:
+    size: 20000
+    goroutines: 5
+    read_percent: 50
+    key_space: 200000
+    write_key_space: 10000
+    rps:
+      - 2000
+      - 2000
+      - 2000
+      - 2000
+      - 2000
+
+  # 40 goroutines, 90% Get / 10% Set, all keys are written. One goroutine alone drives 10k rps; the remaining 39
+  # share 30k rps (~769.23 rps each) for 40k rps total.
+  scenario-3:
+    size: 1000000
+    goroutines: 40
+    read_percent: 90
+    key_space: 1000000
+    write_key_space: 1000000
+    rps:
+      - 10000
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769
+      - 769.230769

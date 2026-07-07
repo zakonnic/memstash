@@ -1,0 +1,33 @@
+# --- Binaries ---
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# --- IDE ---
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# --- Other ---
+go.work
+go.work.sum
+*.test
+*.out
+.env
+vendor/
+var/
+bin/
+benchmarks/bin/
+*.log
+
+# --- System ---
+.DS_Store
+Thumbs.db
+*~

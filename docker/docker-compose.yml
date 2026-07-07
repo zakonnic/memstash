@@ -1,0 +1,25 @@
+# Backing services for the integration tests and benchmarks in tests/integration.
+#
+#   docker compose -f docker/docker-compose.yml up -d
+#   go -C tests/integration test ./... -v
+#   go -C tests/integration test -run xxx -bench . -benchtime 3s
+#   docker compose -f docker/docker-compose.yml down
+#
+# The tests read the addresses from MEMSTASH_TEST_REDIS_ADDR / MEMSTASH_TEST_MEMCACHED_ADDR
+# (defaults: localhost:6379 / localhost:11211) and skip themselves when nothing is listening.
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  memcached:
+    image: memcached:1.6-alpine
+    ports:
+      - "11211:11211"
+    # memcached has no built-in healthcheck command; the TCP port opening is the readiness signal.

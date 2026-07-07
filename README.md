@@ -1,0 +1,279 @@
+# Memstash
+
+**A blazing-fast, allocation-free, two-level cache for Go. Yet it's convenient and configurable.**
+
+memstash keeps your hot set in a lock-free in-memory tier (L1). When you need to share state across k8-nodes, or just survive a restart, plug in a second tier (L2) backed by Redis, memcached, or any store you wrap. The memory path stays allocation-free and lock-free: a hit is a single map lookup plus one atomic read. On a miss, memstash fetches from L2, promotes the value into memory, and takes care of writing it back.
+
+```go
+c, _ := memstash.New[string, string]()
+_ = c.Set(ctx, "hello", "world")
+v, ok, err := c.Get(ctx, "hello") // faster than getting from sync.Map
+```
+
+## Why memstash?
+
+- **Very fast.** Outperforms Ristretto by ~5× and Otter by ~2× in our [benchmarks](#benchmarks).
+- **Top-tier hit ratio.** The S3-FIFO policy keeps pace with the best W-TinyLFU caches (Otter, Theine) and leaves Ristretto far behind, holding up especially well under scans and one-hit wonders.
+- **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
+- **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No `interface{}`, no casts.
+- **Easy on the GC.** Inserts reuse memory blocks from a pool, so the steady state allocates nothing beyond the internal map entry.
+- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB, DynamoDB, Badger, Tarantool and Aerospike — each in its own module so the core stays clean.
+- **Singleflight built in.** `GetOrLoad` collapses a stampede of concurrent misses on one key into a single load.
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Usage](#usage)
+  - [In-memory cache](#in-memory-cache)
+  - [Read-through with a loader (singleflight)](#read-through-with-a-loader-singleflight)
+  - [Two-level cache with Redis](#two-level-cache-with-redis)
+- [Advanced Configuration](#advanced-configuration)
+- [L2 Adapters](#l2-adapters)
+- [Benchmarks](#benchmarks)
+- [License](#license)
+
+## Installation
+
+```sh
+go get github.com/zakonnic/memstash
+```
+
+memstash requires Go 1.24+ and has a single core dependency ([xsync](https://github.com/puzpuzpuz/xsync)). Client SDKs are pulled in only by the specific L2 adapter module you import.
+
+## Usage
+
+### In-memory cache
+
+The simplest setup: a bounded, in-process cache with no external dependencies.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/zakonnic/memstash"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// Capacity is measured in weight units; without a cost function every item
+	// weighs 1, so this holds 100k entries. An unconfigured cache defaults to 20k.
+	c, err := memstash.New[string, string](
+		memstash.WithMemoryCapacity(100_000),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	_ = c.Set(ctx, "greeting", "hello")
+	if v, ok := c.GetFromMemory("greeting"); ok { // fastest read path: no locks, no allocations
+		fmt.Println(v) // hello
+	}
+}
+```
+
+> `GetFromMemory` is the hottest, context-free read path. Use `Get` (which takes a `context.Context`) when an L2 is configured — it may hit the network on a memory miss.
+
+### Read-through with a loader (singleflight)
+
+The most common caching pattern: on a miss, load from the source of truth. Concurrent misses on the same key are automatically **coalesced into a single load**.
+
+```go
+c, _ := memstash.New[string, User](
+	memstash.WithMemoryCapacity(100_000),
+	memstash.WithTTL(5*time.Minute),
+)
+
+user, err := c.GetOrLoad(ctx, "user:42", func(ctx context.Context, key string) (User, error) {
+	return db.FindUser(ctx, key) // runs once even under a stampede
+})
+```
+
+Prefer to fix the loader once at construction time? Use `NewLoadable`:
+
+```go
+lc, _ := memstash.NewLoadable(
+	func(ctx context.Context, id string) (User, error) { return db.FindUser(ctx, id) },
+)
+user, err := lc.GetOrLoad(ctx, "user:42")
+```
+
+> Supports batch-loading with `NewBatchLoadable`, `BatchLoaderFunc`, `BatchGet`, etc.
+
+### Two-level cache with Redis
+
+Add a shared L2 in one call. Memory serves the hot set; anything evicted from L1 (or missing after a restart) is fetched from Redis and promoted back into memory. Writes are **write-back by default**: `Set` returns immediately and a background worker flushes to Redis. The example uses rueidis, but every client in the [adapters table](#l2-adapters) works the same way.
+
+```go
+import (
+	"github.com/redis/rueidis"
+
+	"github.com/zakonnic/memstash"
+	rueidis_adapter "github.com/zakonnic/memstash/l2/rueidis_adapter"
+)
+
+client, _ := rueidis.NewClient(rueidis.ClientOption{
+	InitAddress: []string{"127.0.0.1:6379"},
+})
+
+// JSON values, string keys, 10-minute TTL applied to both tiers (L1 uses the default capacity).
+c, _ := rueidis_adapter.NewCacheJSON[string, User](client, memstash.WithTTL(10*time.Minute))
+defer c.Close()
+
+_ = c.Set(ctx, "user:42", user)     // L1 now, Redis shortly after (write-back)
+u, ok, err := c.Get(ctx, "user:42") // L1 hit → returns instantly; L1 miss → Redis, then promoted
+```
+
+## Advanced Configuration
+
+memstash is configured with functional options passed to `New` (or to any adapter's `NewCache*`). Some common setups:
+
+**Weighted / size-bounded cache** — bound by bytes instead of item count:
+
+```go
+c, _ := memstash.New[string, []byte](
+	memstash.WithMemoryCapacity(512<<20), // 512 MiB
+	memstash.WithCostFunc(func(k string, v []byte) uint32 { return uint32(len(k) + len(v)) }),
+)
+```
+
+**Strong consistency to L2** — make writes synchronous (write-through) so the value is durable in the shared tier before `Set` returns:
+
+```go
+c, _ := rueidis_adapter.NewCacheJSON[string, Session](client,
+	memstash.WithMemoryCapacity(50_000),
+	memstash.WithWritePolicy(memstash.WriteThrough),
+)
+```
+
+**Batch operations** — amortize the network round trip; adapters use native pipelining / multi-get where the client supports it:
+
+```go
+found, _ := c.BatchGet(ctx, []string{"a", "b", "c"})            // one round trip to L2 for the misses
+_ = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b", Value: b}})
+```
+
+**Non-string keys with a custom key mapping** — provide a key function for the L2 storage key:
+
+```go
+c, _ := rueidis_adapter.NewCacheJSON[int, User](client,
+	memstash.WithMemoryCapacity(100_000),
+	l2.WithKeyFunc(func(id int) string { return "user:" + strconv.Itoa(id) }),
+)
+```
+
+Full option list:
+
+| Option | Purpose |
+|---|---|
+| `WithMemoryCapacity(n)` | L1 capacity in weight units (required; defaults to 20 000). |
+| `WithCostFunc(fn)` | Per-item weight function (e.g. size in bytes). |
+| `WithTTL(d)` | Item lifetime (1-second resolution); applied to L2 writes too. |
+| `WithPolicy(p)` | `PolicyS3FIFO` (default) or `PolicyClock`. |
+| `WithShards(n)` | Number of eviction shards (default: auto by GOMAXPROCS). |
+| `WithL2Cache(l2)` | Attach a second level directly. |
+| `WithWritePolicy(p)` | `WriteBack` (default), `WriteThrough`, or `WriteDisabled`. |
+| `WithWriteBackBuffer(n)` | Size of the async write-back buffer. |
+| `WithGhostSize(n)` | S3-FIFO ghost-queue capacity. |
+| `WithOnL2Error(fn)` | Handler for background L2 errors. |
+
+## L2 Adapters
+
+Each adapter is a separate module (`memstash/l2/<name>_adapter`) so the core never pulls in a client SDK you don't use. Every adapter offers both an "adapter only" constructor (`New`, `NewJSON`, `NewBytes`) and an all-in-one two-level constructor (`NewCache`, `NewCacheJSON`, `NewCacheBytes`), plus native batch pipelining where the client supports it.
+
+| Module | Backend / client | context |
+|---|---|---|
+| `l2/goredis_adapter` | Redis — [redis/go-redis](https://github.com/redis/go-redis) | ✅ |
+| `l2/rueidis_adapter` | Redis — [redis/rueidis](https://github.com/redis/rueidis) | ✅ |
+| `l2/redispipe_adapter` | Redis — [joomcode/redispipe](https://github.com/joomcode/redispipe) | ✅ |
+| `l2/redigo_adapter` | Redis — [gomodule/redigo](https://github.com/gomodule/redigo) | partial |
+| `l2/gomemcache_adapter` | memcached — [bradfitz/gomemcache](https://github.com/bradfitz/gomemcache) | ❌ |
+| `l2/rainycape_adapter` | memcached — [rainycape/memcache](https://github.com/rainycape/memcache) | ❌ |
+| `l2/mc_adapter` | memcached — [memcachier/mc](https://github.com/memcachier/mc) | ❌ |
+| `l2/valyala_adapter` | memcached — [valyala/ybc](https://github.com/valyala/ybc) (cgo) | ❌ |
+| `l2/sql_adapter` | any [database/sql](https://pkg.go.dev/database/sql) engine (SQLite, MySQL, ...) | ✅ |
+| `l2/pgx_adapter` | PostgreSQL — [jackc/pgx](https://github.com/jackc/pgx) (native, pipelined) | ✅ |
+| `l2/badger_adapter` | embedded — [dgraph-io/badger](https://github.com/dgraph-io/badger) | ❌ |
+| `l2/mongo_adapter` | MongoDB — [mongo-driver](https://github.com/mongodb/mongo-go-driver) | ✅ |
+| `l2/dynamo_adapter` | DynamoDB — [aws-sdk-go-v2](https://github.com/aws/aws-sdk-go-v2) | ✅ |
+| `l2/tarantool_adapter` | Tarantool — [go-tarantool](https://github.com/tarantool/go-tarantool) | ✅ |
+| `l2/aerospike_adapter` | Aerospike — [aerospike-client-go](https://github.com/aerospike/aerospike-client-go) | ❌ |
+
+Each adapter takes an interface rather than a concrete client, so it stays independent of the client library's version, and a few libraries are covered without a separate module: `sql_adapter` accepts any `{QueryContext, ExecContext}` (so pgx via database/sql works too), `badger_adapter` covers [badgerhold](https://github.com/timshannon/badgerhold) via `store.Badger()`, and `dynamo_adapter` covers [guregu/dynamo](https://github.com/guregu/dynamo) via its underlying `*dynamodb.Client`.
+
+SQL, Tarantool and other stores without server-side expiration filter expired entries on read and expose a reaper (`DeleteExpired`) to purge them; the note in each package doc explains the specifics.
+
+Rolling your own is straightforward: implement the `memstash.L2Cache[K, V]` interface (`Get`/`BatchGet`/`Set`/`BatchSet`/`Delete`) and pass it to `WithL2Cache`.
+
+## Benchmarks
+
+[Measured](benchmarks/results/out.txt) on an AMD Ryzen 9 9900X (Go 1.26.4). Reproduce with:
+
+```sh
+# throughput and allocations (Get / Set / mixed 90-10) vs Ristretto, Otter, hashicorp/lru, plain sync.Map
+go -C benchmarks test -run xxx -bench . -benchmem
+
+# hit ratio across Zipf, Zipf+scan, and one-hit-wonder workloads
+go -C benchmarks test -run TestHitRate -v
+```
+
+![Read throughput](benchmarks/results/read_throughput.svg)
+
+### Throughput — ns/op, lower is better
+
+| Cache | GetHit | Set | 90 Get / 10 Set | Set alloc |
+|---|--:|--:|----------------:|--:|
+| **memstash-clock** | **0.88** | 37.6 |            3.62 | 36 B / 1 |
+| **memstash-s3fifo** | **0.89** | 43.3 |            3.60 | 34 B / 1 |
+| otter-wtinylfu | 2.18 | 203.8 |           49.47 | 48 B / 1 |
+| theine-wtinylfu | 3.41 | 305.3 |           51.97 | 39 B / 0 |
+| ristretto | 5.91 | 69.7 |           12.93 | 87 B / 1 |
+| hashicorp-lru | 93.54 | 136.4 |           96.20 | 66 B / 0 |
+| sync.Map\* | 1.55 | 12.9 |            4.14 | 63 B / 2 |
+
+\* `sync.Map` performs no eviction — a lower-bound baseline, not a comparable cache.
+
+### Parallel throughput — millions of ops/s, higher is better
+
+| Cache | 100% reads | 75% reads | 50% reads | 25% reads | 0% (writes only) |
+|---|--:|--:|--:|--:|-----------------:|
+| **memstash-clock** | **1053** | **138** | **78** | **55** |           **40** |
+| **memstash-s3fifo** | **1047** | **141** | **79** | **55** |           **44** |
+| ristretto | 180 | 25 | 18 | 8.3 |               11 |
+| otter-wtinylfu | 457 | 9.6 | 5.3 | 3.6 |              2.9 |
+| theine-wtinylfu | 291 | 10 | 6.2 | 4.6 |              3.6 |
+| hashicorp-lru | 10 | 10 | 10 | 9.5 |              9.1 |
+| sync.Map\* | 617 | 144 | 99 | 81 |               68 |
+
+Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash stays within about 2× of the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **13–15× their throughput.**
+
+### Hit ratio — higher is better
+
+**Capacity = 100k items (10% of the key space):**
+
+| Cache | Zipf | Zipf+scan | One-hit 30% |
+|---|--:|--:|--:|
+| **memstash-s3fifo** | **71.51%** | **46.91%** | **63.71%** |
+| theine-wtinylfu | 71.18% | 45.59% | 63.52% |
+| memstash-clock | 71.05% | 45.35% | 63.44% |
+| hashicorp-lru | 70.33% | 42.31% | 63.00% |
+| otter-wtinylfu | 69.93% | 44.68% | 62.99% |
+| ristretto | 40.96% | 29.64% | 51.87% |
+
+**Capacity = 10k items (1% of the key space):**
+
+| Cache | Zipf | Zipf+scan | One-hit 30% |
+|---|--:|--:|--:|
+| theine-wtinylfu | 57.11% | 38.95% | 59.50% |
+| **memstash-s3fifo** | **56.84%** | **39.44%** | **59.81%** |
+| otter-wtinylfu | 54.50% | 36.64% | 57.36% |
+| memstash-clock | 50.42% | 34.53% | 55.19% |
+| hashicorp-lru | 48.38% | 33.34% | 53.76% |
+| ristretto | 20.23% | 14.50% | 30.85% |
+
+## License
+
+Apache 2.0
