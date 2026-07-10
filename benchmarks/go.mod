@@ -7,6 +7,7 @@ require (
 	github.com/allegro/bigcache/v3 v3.1.0
 	github.com/coocood/freecache v1.2.7
 	github.com/dgraph-io/ristretto/v2 v2.4.0
+	github.com/dustin/go-humanize v1.0.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/maypok86/otter/v2 v2.3.0
 	github.com/puzpuzpuz/xsync/v3 v3.5.1
@@ -18,7 +19,6 @@ require (
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

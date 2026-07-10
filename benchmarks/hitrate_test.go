@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/dustin/go-humanize"
 	"github.com/zakonnic/memstash"
 )
 
@@ -92,7 +93,7 @@ func TestHitRate(t *testing.T) {
 
 	for _, capacity := range capacities {
 		t.Logf("---- capacity %d items ----", capacity)
-		t.Logf("%-18s %12s %12s %12s", "cache", traces[0].name, traces[1].name, traces[2].name)
+		t.Logf("%-18s %12s %12s %12s %12s", "cache", traces[0].name, traces[1].name, traces[2].name, "size estimate")
 		builders := []func() benchCache{
 			func() benchCache { return newMemstash(capacity, memstash.PolicyS3FIFO, "memstash-s3fifo") },
 			func() benchCache { return newMemstash(capacity, memstash.PolicyClock, "memstash-clock") },
@@ -105,14 +106,19 @@ func TestHitRate(t *testing.T) {
 		}
 		for _, build := range builders {
 			var name string
+			var sizeBytes uint64
 			row := make([]float64, len(traces))
 			for i, traceCase := range traces {
 				cache := build()
 				name = cache.Name()
 				row[i] = runTrace(cache, traceCase.trace)
+				if i == len(traces)-1 {
+					sizeBytes = cache.GetSize()
+				}
 				cache.Close()
 			}
-			t.Logf("%-18s %11.2f%% %11.2f%% %11.2f%%", name, row[0], row[1], row[2])
+
+			t.Logf("%-18s %11.2f%% %11.2f%% %11.2f%% %12s", name, row[0], row[1], row[2], humanize.Bytes(sizeBytes))
 		}
 	}
 }

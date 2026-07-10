@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unsafe"
 
 	theine "github.com/Yiling-J/theine-go"
 	"github.com/allegro/bigcache/v3"
@@ -18,14 +19,13 @@ import (
 	"github.com/zakonnic/memstash"
 )
 
-// benchCache is the single contract shared by all comparison participants.
 type benchCache interface {
 	Name() string
 	Get(key uint64) (uint64, bool)
-	// Set stores the value; sync=true asks it to wait until the write is applied (needed only for a fair hit-rate
-	// measurement of caches with an asynchronous Set).
 	Set(key uint64, value uint64, sync bool)
 	Close()
+	Expose() any
+	GetSize() uint64
 }
 
 // --- memstash ---
@@ -51,7 +51,9 @@ func (a *memstashAdapter) Get(key uint64) (uint64, bool) { return a.c.GetFromMem
 func (a *memstashAdapter) Set(key, value uint64, _ bool) {
 	_ = a.c.Set(context.Background(), key, value)
 }
-func (a *memstashAdapter) Close() { a.c.Close() }
+func (a *memstashAdapter) Close()          { a.c.Close() }
+func (a *memstashAdapter) Expose() any     { return a.c }
+func (a *memstashAdapter) GetSize() uint64 { return uint64(a.c.TotalWeight()) }
 
 // --- ristretto ---
 
@@ -79,7 +81,15 @@ func (a *ristrettoAdapter) Set(key, value uint64, sync bool) {
 		a.c.Wait() // ristretto's Set is asynchronous: without Wait the hit-rate measurement is unfair
 	}
 }
-func (a *ristrettoAdapter) Close() { a.c.Close() }
+func (a *ristrettoAdapter) Close()      { a.c.Close() }
+func (a *ristrettoAdapter) Expose() any { return a.c }
+
+// GetSize ristretto has no byte-accounting API (Metrics tracks Set's cost units, which the benchmark always calls
+// with 1 - an item count, not bytes), and its store is a plain mutex-guarded Go map, so reflection sees all of it.
+func (a *ristrettoAdapter) GetSize() uint64 {
+	a.c.Wait()
+	return SizeOf(a.c)
+}
 
 // --- otter (W-TinyLFU) ---
 //
@@ -99,6 +109,25 @@ func (a *otterAdapter) Name() string                  { return "otter-wtinylfu" 
 func (a *otterAdapter) Get(key uint64) (uint64, bool) { return a.c.GetIfPresent(key) }
 func (a *otterAdapter) Set(key, value uint64, _ bool) { a.c.Set(key, value) }
 func (a *otterAdapter) Close()                        { a.c.StopAllGoroutines() }
+func (a *otterAdapter) Expose() any                   { return a.c }
+
+type otterNode[K comparable, V any] struct {
+	key       K
+	value     V
+	prev      unsafe.Pointer
+	next      unsafe.Pointer
+	state     uint32
+	queueType uint8
+}
+
+// GetSize otter reports no byte total, and its hash table is a fork of xsync.MapOf living in an unexported
+// internal package, so we can't call an equivalent of Stats() directly on it. But can simulate this map.
+func (a *otterAdapter) GetSize() uint64 {
+	a.c.StopAllGoroutines()
+	estimatedSize := SizeOf(a.c)
+	count := a.c.EstimatedSize()
+	return estimatedSize + simulateMapBucketBytes[uint64, otterNode[uint64, uint64]](count, func(i int) uint64 { return uint64(i) })
+}
 
 // --- theine (W-TinyLFU) ---
 
@@ -116,6 +145,14 @@ func (a *theineAdapter) Name() string                  { return "theine-wtinylfu
 func (a *theineAdapter) Get(key uint64) (uint64, bool) { return a.c.Get(key) }
 func (a *theineAdapter) Set(key, value uint64, _ bool) { a.c.Set(key, value, 1) }
 func (a *theineAdapter) Close()                        { a.c.Close() }
+func (a *theineAdapter) Expose() any                   { return a.c }
+
+// GetSize theine has no byte-accounting API either, but its store is plain sharded maps (map[K]*Entry) guarded by
+// mutexes, no unsafe.Pointer indirection, so reflection can walk all of it.
+func (a *theineAdapter) GetSize() uint64 {
+	a.c.Wait()
+	return SizeOf(a.c)
+}
 
 // --- hashicorp/golang-lru (classic LRU behind a mutex) ---
 
@@ -133,6 +170,10 @@ func (a *lruAdapter) Name() string                  { return "hashicorp-lru" }
 func (a *lruAdapter) Get(key uint64) (uint64, bool) { return a.c.Get(key) }
 func (a *lruAdapter) Set(key, value uint64, _ bool) { a.c.Add(key, value) }
 func (a *lruAdapter) Close()                        {}
+func (a *lruAdapter) Expose() any                   { return a.c }
+
+// GetSize a plain container/list + map, no native size accounting; reflection covers it fully (no unsafe.Pointer).
+func (a *lruAdapter) GetSize() uint64 { return SizeOf(a.c) }
 
 // --- freecache (shard-local LRU-ish ring buffers over []byte) ---
 //
@@ -163,7 +204,12 @@ func (a *freecacheAdapter) Set(key, value uint64, _ bool) {
 	binary.LittleEndian.PutUint64(buf[:], value)
 	_ = a.c.SetInt(int64(key), buf[:], 0) // expireSeconds=0: never expire, only size-based eviction
 }
-func (a *freecacheAdapter) Close() {}
+func (a *freecacheAdapter) Close()      {}
+func (a *freecacheAdapter) Expose() any { return a.c }
+
+// GetSize freecache pre-allocates one fixed []byte ring buffer per segment at construction and manages entries as
+// raw bytes within it - so reflection already reports the real, mostly load-independent footprint;
+func (a *freecacheAdapter) GetSize() uint64 { return SizeOf(a.c) }
 
 // --- bigcache (sharded, size-bounded, string-keyed) ---
 //
@@ -211,7 +257,12 @@ func (a *bigcacheAdapter) Set(key, value uint64, _ bool) {
 	binary.LittleEndian.PutUint64(buf[:], value)
 	_ = a.c.Set(strconv.FormatUint(key, 10), buf[:])
 }
-func (a *bigcacheAdapter) Close() { _ = a.c.Close() }
+func (a *bigcacheAdapter) Close()      { _ = a.c.Close() }
+func (a *bigcacheAdapter) Expose() any { return a.c }
+
+// GetSize bigcache exposes Capacity(), the exact allocated size of its shards' byte-queue backing arrays - a real
+// number, not an estimate, so it's preferred over SizeOf outright.
+func (a *bigcacheAdapter) GetSize() uint64 { return uint64(a.c.Capacity()) }
 
 // --- sync.Map (no eviction; speed measurements only) ---
 
@@ -229,6 +280,11 @@ func (a *syncMapAdapter) Get(key uint64) (uint64, bool) {
 }
 func (a *syncMapAdapter) Set(key, value uint64, _ bool) { a.m.Store(key, value) }
 func (a *syncMapAdapter) Close()                        {}
+func (a *syncMapAdapter) Expose() any                   { return &a.m }
+
+// GetSize sync.Map has no size accounting of its own, and its internal read/dirty maps use interface{}-boxed
+// entries reached through regular pointers (no unsafe.Pointer), so reflection can walk it.
+func (a *syncMapAdapter) GetSize() uint64 { return SizeOf(&a.m) }
 
 // --- xsync.MapOf (no eviction; lower bound on the cost of map operations) ---
 
@@ -240,3 +296,8 @@ func (a *xsyncMapAdapter) Name() string                  { return "xsync.MapOf" 
 func (a *xsyncMapAdapter) Get(key uint64) (uint64, bool) { return a.m.Load(key) }
 func (a *xsyncMapAdapter) Set(key, value uint64, _ bool) { a.m.Store(key, value) }
 func (a *xsyncMapAdapter) Close()                        {}
+func (a *xsyncMapAdapter) Expose() any                   { return a.m }
+
+// GetSize xsync.MapOf's own buckets sit behind unsafe.Pointer (invisible to reflection), but it exposes Stats(),
+// which gives the exact bucket/entry counts needed to size it properly - same approach memstash's TotalWeight uses.
+func (a *xsyncMapAdapter) GetSize() uint64 { return xsyncMapOfBytes(a.m) }

@@ -666,12 +666,15 @@ func (c *Cache[K, V]) Weight() int64 {
 	return total
 }
 
+const xsyncBucketBytes = 64
+
 // TotalWeight estimates the total memory footprint of the cache's first-level structures.
 func (c *Cache[K, V]) TotalWeight() int64 {
+	stats := c.items.Stats()
 	var zeroKey K
-	mapEntryBytes := int64(c.Len()) * (int64(unsafe.Sizeof(zeroKey)) + int64(unsafe.Sizeof(cacheItem[K, V]{})))
+	entryBytes := int64(unsafe.Sizeof(zeroKey)) + int64(unsafe.Sizeof(cacheItem[K, V]{}))
+	total := int64(stats.TotalBuckets)*xsyncBucketBytes + int64(stats.Size)*entryBytes
 
-	total := c.Weight() + mapEntryBytes
 	for i := range c.shards {
 		sh := &c.shards[i]
 		sh.mu.Lock()
