@@ -28,10 +28,10 @@ const (
 	// Dead marks an item as a tombstone.
 	Dead uint64 = 1 << 63
 
-	SecondChance1 uint64 = 1 << 62
-	SecondChance2 uint64 = 1 << 61
+	SecondChance uint64 = 1 << 62
+	ThirdChance  uint64 = 1 << 61
 	// ChanceMask isolates the unary reference counter (with three states: 00, 10 and 11).
-	ChanceMask uint64 = SecondChance1 | SecondChance2
+	ChanceMask uint64 = SecondChance | ThirdChance
 
 	ExpireShift        = 32
 	ExpireMask  uint64 = (1<<29 - 1) << ExpireShift
@@ -58,20 +58,20 @@ func (s *State[K]) Load() uint64 { return s.meta.Load() }
 // harmless: some other key gets one extra second chance, correctness is not affected.
 func (s *State[K]) TouchWith(metaWord uint64) {
 	switch {
-	case metaWord&SecondChance1 == 0:
-		s.meta.Or(SecondChance1)
-	case metaWord&SecondChance2 == 0:
-		s.meta.Or(SecondChance2)
+	case metaWord&SecondChance == 0:
+		s.meta.Or(SecondChance)
+	case metaWord&ThirdChance == 0:
+		s.meta.Or(ThirdChance)
 	}
 }
 
 // RevokeChance withdraws a single second chance. Called only under the shard mutex.
 func (s *State[K]) RevokeChance(metaWord uint64) {
-	if metaWord&SecondChance2 != 0 {
-		s.meta.And(^SecondChance2)
+	if metaWord&ThirdChance != 0 {
+		s.meta.And(^ThirdChance)
 		return
 	}
-	s.meta.And(^SecondChance1)
+	s.meta.And(^SecondChance)
 }
 
 // ResetChances clears the reference counter (used when promoting an item from small to main in S3-FIFO). Called only

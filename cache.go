@@ -141,10 +141,10 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 			sh.cap++ // spread the capacity remainder over the first shards
 		}
 		switch cfg.Policy {
-		case PolicyClock:
-			sh.policy = eviction.NewClockPolicy[K]()
 		case PolicyS3FIFO:
 			sh.policy = eviction.NewS3FIFO[K](sh.cap, ghostPerShard)
+		case PolicyClock:
+			sh.policy = eviction.NewClockPolicy[K]()
 		}
 	}
 

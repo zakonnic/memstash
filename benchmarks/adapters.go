@@ -3,14 +3,18 @@ package benchmarks
 
 import (
 	"context"
+	"encoding/binary"
+	"strconv"
 	"sync"
+	"time"
 
 	theine "github.com/Yiling-J/theine-go"
+	"github.com/allegro/bigcache/v3"
+	"github.com/coocood/freecache"
 	"github.com/dgraph-io/ristretto/v2"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/maypok86/otter/v2"
 	"github.com/puzpuzpuz/xsync/v3"
-
 	"github.com/zakonnic/memstash"
 )
 
@@ -129,6 +133,85 @@ func (a *lruAdapter) Name() string                  { return "hashicorp-lru" }
 func (a *lruAdapter) Get(key uint64) (uint64, bool) { return a.c.Get(key) }
 func (a *lruAdapter) Set(key, value uint64, _ bool) { a.c.Add(key, value) }
 func (a *lruAdapter) Close()                        {}
+
+// --- freecache (shard-local LRU-ish ring buffers over []byte) ---
+//
+// freecache sizes itself in bytes rather than item count, so capacity is converted using a generous per-entry
+// overhead estimate (header + 8-byte int key + 8-byte value) to make its resident size comparable to the other
+// caches under the same `capacity` items.
+
+type freecacheAdapter struct{ c *freecache.Cache }
+
+func newFreecache(capacity int64, avgKeySize, avgValueSize int) benchCache {
+	const entryOverhead = 24 // bytes, overhead estimate
+	itemSize := entryOverhead + avgKeySize + avgValueSize
+	totalBytes := int(capacity) * itemSize
+	c := freecache.NewCache(totalBytes)
+	return &freecacheAdapter{c: c}
+}
+
+func (a *freecacheAdapter) Name() string { return "freecache" }
+func (a *freecacheAdapter) Get(key uint64) (uint64, bool) {
+	v, err := a.c.GetInt(int64(key))
+	if err != nil {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(v), true
+}
+func (a *freecacheAdapter) Set(key, value uint64, _ bool) {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], value)
+	_ = a.c.SetInt(int64(key), buf[:], 0) // expireSeconds=0: never expire, only size-based eviction
+}
+func (a *freecacheAdapter) Close() {}
+
+// --- bigcache (sharded, size-bounded, string-keyed) ---
+//
+// bigcache has no item-count limit, only a byte budget (HardMaxCacheSize) and a shard count; both are derived from
+// capacity with a generous per-entry overhead estimate so its resident size is comparable to the other caches.
+
+type bigcacheAdapter struct{ c *bigcache.BigCache }
+
+func newBigcache(capacity int64) benchCache {
+	config := bigcache.DefaultConfig(100 * 365 * 24 * time.Hour) // effectively no time-based expiry
+	config.Shards = 64
+	config.MaxEntriesInWindow = int(capacity)
+	config.MaxEntrySize = 64
+	config.HardMaxCacheSize = getBigCacheHardMaxCacheSize(capacity, 8, 8)
+	config.Verbose = false
+	c, err := bigcache.New(context.Background(), config)
+	if err != nil {
+		panic(err)
+	}
+	return &bigcacheAdapter{c: c}
+}
+
+func getBigCacheHardMaxCacheSize(capacity int64, avgKeySize, avgValueSize int) int {
+	const bigcacheEntryOverhead = 8 + 8 + 2 // timestamp + hash + key length
+
+	bytesPerEntry := int64(avgKeySize + avgValueSize + bigcacheEntryOverhead)
+	totalBytes := capacity * bytesPerEntry
+	hardMaxMB := (totalBytes + 1024*1024 - 1) / (1024 * 1024) // MiB
+	if hardMaxMB < 1 {
+		hardMaxMB = 1
+	}
+	return int(hardMaxMB)
+}
+
+func (a *bigcacheAdapter) Name() string { return "bigcache" }
+func (a *bigcacheAdapter) Get(key uint64) (uint64, bool) {
+	v, err := a.c.Get(strconv.FormatUint(key, 10))
+	if err != nil {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(v), true
+}
+func (a *bigcacheAdapter) Set(key, value uint64, _ bool) {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], value)
+	_ = a.c.Set(strconv.FormatUint(key, 10), buf[:])
+}
+func (a *bigcacheAdapter) Close() { _ = a.c.Close() }
 
 // --- sync.Map (no eviction; speed measurements only) ---
 

@@ -4,6 +4,8 @@ go 1.24.0
 
 require (
 	github.com/Yiling-J/theine-go v0.6.2
+	github.com/allegro/bigcache/v3 v3.1.0
+	github.com/coocood/freecache v1.2.7
 	github.com/dgraph-io/ristretto/v2 v2.4.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/maypok86/otter/v2 v2.3.0

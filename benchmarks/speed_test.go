@@ -3,6 +3,8 @@ package benchmarks
 import (
 	"math/rand"
 	"testing"
+
+	"github.com/zakonnic/memstash"
 )
 
 // Speed benchmarks of in-memory operations. The key sequence (Zipf over a hot set) is precomputed so the random number
@@ -26,11 +28,13 @@ var keySeq = func() []uint64 {
 
 func speedContenders() []benchCache {
 	return []benchCache{
-		newMemstash(speedCapacity, 0, "memstash-s3fifo"),
-		newMemstash(speedCapacity, 1, "memstash-clock"),
+		newMemstash(speedCapacity, memstash.PolicyS3FIFO, "memstash-s3fifo"),
+		newMemstash(speedCapacity, memstash.PolicyClock, "memstash-clock"),
 		newRistretto(speedCapacity),
 		newOtter(speedCapacity),
 		newTheine(speedCapacity),
+		newBigcache(speedCapacity),
+		newFreecache(speedCapacity, 8, 8),
 		newLRU(speedCapacity),
 		newSyncMap(),
 	}

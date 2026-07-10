@@ -13,7 +13,7 @@ import (
 // the cache operations under contention, not key generation.
 //
 // All comparison libraries participate: memstash (clock and s3fifo), ristretto, otter (W-TinyLFU), theine (W-TinyLFU),
-// hashicorp/lru, and sync.Map as the no-eviction baseline.
+// hashicorp/lru, freecache, bigcache, and sync.Map as the no-eviction baseline.
 //
 // Run: go -C benchmarks test -run xxx -bench BenchmarkThroughput
 func BenchmarkThroughput(b *testing.B) {

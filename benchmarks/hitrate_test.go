@@ -3,6 +3,8 @@ package benchmarks
 import (
 	"math/rand"
 	"testing"
+
+	"github.com/zakonnic/memstash"
 )
 
 // Workloads for comparing hit rate. Every generator is deterministic (the seed is fixed), so each cache receives
@@ -92,11 +94,13 @@ func TestHitRate(t *testing.T) {
 		t.Logf("---- capacity %d items ----", capacity)
 		t.Logf("%-18s %12s %12s %12s", "cache", traces[0].name, traces[1].name, traces[2].name)
 		builders := []func() benchCache{
-			func() benchCache { return newMemstash(capacity, 0, "memstash-s3fifo") },
-			func() benchCache { return newMemstash(capacity, 1, "memstash-clock") },
+			func() benchCache { return newMemstash(capacity, memstash.PolicyS3FIFO, "memstash-s3fifo") },
+			func() benchCache { return newMemstash(capacity, memstash.PolicyClock, "memstash-clock") },
 			func() benchCache { return newRistretto(capacity) },
 			func() benchCache { return newOtter(capacity) },
 			func() benchCache { return newTheine(capacity) },
+			func() benchCache { return newBigcache(capacity) },
+			func() benchCache { return newFreecache(capacity, 8, 8) },
 			func() benchCache { return newLRU(capacity) },
 		}
 		for _, build := range builders {

@@ -31,10 +31,12 @@ cover-func: cover-gen ## Show coverage by func
 .PHONY: cover
 cover: cover-gen ## Show coverage html
 	go tool cover -html=var/coverage.out
-.PHONY: bench
-bench: ## Run benchmarks
+bench-speed: ## Run speed benchmarks
 	go -C benchmarks test -run xxx -bench . ./...
+bench-hitrate: ## Run hitrate benchmarks
 	go -C benchmarks test -run TestHitRate -v
+.PHONY: bench
+bench: bench-speed bench-hitrate ## Run benchmarks
 
 integration-tests: ## Run integration tests against live redis/memcached (make up first); CGO off so the cgo-only valyala adapter is skipped
 	CGO_ENABLED=0 go -C tests/integration test ./... -v
