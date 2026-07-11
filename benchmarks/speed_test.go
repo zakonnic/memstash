@@ -28,14 +28,14 @@ var keySeq = func() []uint64 {
 
 func speedContenders() []benchCache {
 	return []benchCache{
-		newMemstash(speedCapacity, memstash.PolicyS3FIFO, "memstash-s3fifo"),
-		newMemstash(speedCapacity, memstash.PolicyClock, "memstash-clock"),
-		newRistretto(speedCapacity),
-		newOtter(speedCapacity),
-		newTheine(speedCapacity),
-		newBigcache(speedCapacity),
-		newFreecache(speedCapacity, 8, 8),
-		newLRU(speedCapacity),
+		newMemstash(speedCapacity, memstash.PolicyS3FIFO, "memstash-s3fifo", false),
+		newMemstash(speedCapacity, memstash.PolicyClock, "memstash-clock", false),
+		newRistretto(speedCapacity, false),
+		newOtter(speedCapacity, false),
+		newTheine(speedCapacity, false),
+		newBigcache(speedCapacity, false),
+		newFreecache(speedCapacity, 8, 8, false),
+		newLRU(speedCapacity, false),
 		newSyncMap(),
 	}
 }
