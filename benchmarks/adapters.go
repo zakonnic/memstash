@@ -329,9 +329,8 @@ func (a *bigcacheAdapter) Set(key, value uint64, _ bool) {
 func (a *bigcacheAdapter) Close()      { _ = a.c.Close() }
 func (a *bigcacheAdapter) Expose() any { return a.c }
 
-// GetSize bigcache exposes Capacity(), the exact allocated size of its shards' byte-queue backing arrays - a real
-// number, not an estimate, so it's preferred over SizeOf outright.
-func (a *bigcacheAdapter) GetSize() uint64 { return uint64(a.c.Capacity()) }
+// GetSize bigcache's own Capacity() misses inner hash index, SizeOf walks both.
+func (a *bigcacheAdapter) GetSize() uint64 { return SizeOf(a.c) }
 
 // --- sync.Map (no eviction; speed measurements only) ---
 

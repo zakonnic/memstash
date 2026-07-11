@@ -5,22 +5,26 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
 	"github.com/zakonnic/memstash/internal/itemstate"
 )
 
-// newState is a bare state record for the policy tests: a fresh generation/chance/expiry-free record is all Add and
-// Evict need to exercise the queues.
-func newState(key string) *itemstate.State[string] { return &itemstate.State[string]{Key: key} }
+// addFromPool claims a record for the key from the pool and registers its node with the policy, mirroring what
+// Cache.setMemory does. Returns the node's pool index.
+func addFromPool(p Policy[string], pool *itemstate.Pool[string], key string) uint32 {
+	_, _, idx := pool.Claim(key, 0)
+	p.Add(itemstate.QNode{Idx: idx, Cost: 1})
+	return idx
+}
 
 func TestClockPolicyBytes(t *testing.T) {
-	p := NewClockPolicy[string]()
-	assert.Zero(t, p.Bytes(), "empty policy has no queued chunks")
+	var pool itemstate.Pool[string]
+	p := NewClockPolicy(&pool)
+	emptyBytes := p.Bytes()
 
 	for i := 0; i < 200; i++ {
-		p.Add(itemstate.QNode[string]{State: newState(fmt.Sprintf("k%d", i))})
+		addFromPool(p, &pool, fmt.Sprintf("k%d", i))
 	}
 
-	assert.Equal(t, p.q.Bytes(), p.Bytes(), "ClockPolicy.Bytes must delegate to its queue")
-	assert.Positive(t, p.Bytes(), "the queue must have allocated at least one chunk")
+	assert.Equal(t, emptyBytes+p.q.Bytes(), p.Bytes(), "ClockPolicy.Bytes must be its fixed size plus its queue")
+	assert.Positive(t, p.q.Bytes(), "the queue must have allocated at least one chunk")
 }

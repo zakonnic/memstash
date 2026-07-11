@@ -1,14 +1,12 @@
 package eviction
 
 import (
+	"hash/maphash"
+	"math/bits"
 	"unsafe"
 
 	"github.com/zakonnic/memstash/internal/itemstate"
 )
-
-// ghostEntryOverhead is a rough per-entry estimate for ghost's hit-count map (Go does not expose the real bucket
-// layout of a map to reflect on): one tophash byte per slot plus padding, rounded up.
-const ghostEntryOverhead = 8
 
 // S3FIFOPolicy implements S3-FIFO: a small quarantine (~10% of the shard capacity) for newcomers, a protected main queue
 // for items proven to be reused, and ghost - a memory of keys recently evicted from small.
@@ -18,85 +16,68 @@ const ghostEntryOverhead = 8
 //     is a victim and its key goes to ghost;
 //   - eviction from main: GCLOCK (second-chance by the reference counter).
 //
-// The queues store nodes that reference stable state records, so promotion from small to main is just moving a
-// 16-byte node - the record itself and the map entry stay put.
+// The queues store 8-byte nodes referencing stable pool slots, so promotion from small to main is just moving a node -
+// the record itself and the map entry stay put.
 type S3FIFOPolicy[K comparable] struct {
-	small itemstate.EvictQueue[K]
-	main  itemstate.EvictQueue[K]
-	ghost *ghostRing[K]
+	pool  *itemstate.Pool[K]
+	small itemstate.EvictQueue
+	main  itemstate.EvictQueue
+	ghost ghostTable[K]
 
 	smallWeight int64 // total weight of nodes in small (including tombstones not yet reclaimed)
 	smallCap    int64 // target weight of small: ~10% of the shard capacity
 }
 
-// ghostRing is the S3-FIFO "ghost" queue: a ring buffer of keys recently evicted from small. It stores keys only (no
-// values) and allocates its memory once at creation. Access is under the cache mutex.
-//
-// push keeps an occurrence count because the same key may enter the ring several times before its older entry is
-// evicted.
-type ghostRing[K comparable] struct {
-	ring []K
-	head int
-	size int
-	set  map[K]uint32
-}
-
-// NewS3FIFO creates an S3-FIFO policy for a shard with the given capacity and ghost queue size.
-func NewS3FIFO[K comparable](shardCap int64, ghostSize int) *S3FIFOPolicy[K] {
+// NewS3FIFO creates an S3-FIFO policy for a shard with the given capacity and ghost size (in keys). The pool is the
+// owning shard's record pool, used to resolve queue node indices.
+func NewS3FIFO[K comparable](pool *itemstate.Pool[K], shardCap int64, ghostSize int) *S3FIFOPolicy[K] {
 	smallCap := shardCap / 10
 	if smallCap < 1 {
 		smallCap = 1
 	}
 	return &S3FIFOPolicy[K]{
-		ghost:    newGhostRing[K](ghostSize),
+		pool:     pool,
+		ghost:    newGhostTable[K](ghostSize),
 		smallCap: smallCap,
 	}
 }
 
-func newGhostRing[K comparable](capacity int) *ghostRing[K] {
-	if capacity < 0 {
-		capacity = 0
-	}
-	return &ghostRing[K]{
-		ring: make([]K, capacity),
-		set:  make(map[K]uint32, capacity),
-	}
-}
-
-func (p *S3FIFOPolicy[K]) Add(item itemstate.QNode[K]) {
-	if p.ghost.hit(item.State.Key) {
+func (p *S3FIFOPolicy[K]) Add(node itemstate.QNode) {
+	if p.ghost.hit(p.pool.At(node.Idx).Key) {
 		// The key was recently evicted from small and is needed again - send it straight to the protected queue.
-		p.main.Push(item)
+		p.main.Push(node)
 		return
 	}
-	p.small.Push(item)
-	p.smallWeight += int64(item.Cost)
+	p.small.Push(node)
+	p.smallWeight += int64(node.Cost)
 }
 
 func (p *S3FIFOPolicy[K]) Len() int { return p.small.Len() + p.main.Len() }
 
-func (p *S3FIFOPolicy[K]) Bytes() int64 { return p.small.Bytes() + p.main.Bytes() + p.ghost.bytes() }
-
-func (p *S3FIFOPolicy[K]) Sweep(release func(*itemstate.State[K])) {
-	// Dead nodes leaving small must give their weight back, exactly as evictSmallOnce does.
-	p.small.Sweep(func(node itemstate.QNode[K]) {
-		p.smallWeight -= int64(node.Cost)
-		release(node.State)
-	})
-	p.main.Sweep(func(node itemstate.QNode[K]) { release(node.State) })
+func (p *S3FIFOPolicy[K]) Bytes() int64 {
+	return int64(unsafe.Sizeof(*p)) + p.small.Bytes() + p.main.Bytes() + p.ghost.bytes()
 }
 
-func (p *S3FIFOPolicy[K]) Evict(nowOff uint32) (*itemstate.State[K], bool) {
+func (p *S3FIFOPolicy[K]) Sweep(release func(idx uint32)) {
+	// Dead nodes leaving small must give their weight back, exactly as evictSmallOnce does.
+	itemstate.SweepQueue(&p.small, p.pool, func(node itemstate.QNode) {
+		p.smallWeight -= int64(node.Cost)
+		release(node.Idx)
+	})
+	itemstate.SweepQueue(&p.main, p.pool, func(node itemstate.QNode) { release(node.Idx) })
+}
+
+func (p *S3FIFOPolicy[K]) Evict(nowOff uint32) (uint32, bool) {
 	for {
 		fromSmall := p.smallWeight > p.smallCap && p.small.Len() > 0
 		if !fromSmall && p.main.Len() == 0 {
 			if p.small.Len() == 0 {
-				return nil, false
+				return 0, false
 			}
 			fromSmall = true
 		}
 		var (
-			victim *itemstate.State[K]
+			victim uint32
 			found  bool
 		)
 		if fromSmall {
@@ -110,101 +91,147 @@ func (p *S3FIFOPolicy[K]) Evict(nowOff uint32) (*itemstate.State[K], bool) {
 	}
 }
 
-// evictSmallOnce processes the head of small: (record, true) means the record is reclaimed, (nil, false) means the
-// node was skipped or promoted to main.
-func (p *S3FIFOPolicy[K]) evictSmallOnce(nowOff uint32) (*itemstate.State[K], bool) {
+// evictSmallOnce processes the head of small: (idx, true) means the record is reclaimed, (0, false) means the node
+// was skipped or promoted to main.
+func (p *S3FIFOPolicy[K]) evictSmallOnce(nowOff uint32) (uint32, bool) {
 	candidate, ok := p.small.Pop()
 	if !ok {
-		return nil, false
+		return 0, false
 	}
 	p.smallWeight -= int64(candidate.Cost)
 
-	metaWord := candidate.State.Load()
+	state := p.pool.At(candidate.Idx)
+	metaWord := state.Load()
 	switch {
 	case metaWord&itemstate.Dead != 0:
-		return candidate.State, true
+		return candidate.Idx, true
 	case itemstate.Expired(metaWord, nowOff):
-		candidate.State.Kill()
-		return candidate.State, true
+		state.Kill()
+		return candidate.Idx, true
 	case metaWord&itemstate.ChanceMask != 0:
 		// The item was accessed while in quarantine - it has proven useful and is promoted to main with a clean
 		// counter.
-		candidate.State.ResetChances()
+		state.ResetChances()
 		p.main.Push(candidate)
-		return nil, false
+		return 0, false
 	default:
-		candidate.State.Kill()
-		p.ghost.push(candidate.State.Key)
-		return candidate.State, true
+		state.Kill()
+		p.ghost.push(state.Key)
+		return candidate.Idx, true
 	}
 }
 
 // evictMainOnce performs a single GCLOCK step over main.
-func (p *S3FIFOPolicy[K]) evictMainOnce(nowOff uint32) (*itemstate.State[K], bool) {
+func (p *S3FIFOPolicy[K]) evictMainOnce(nowOff uint32) (uint32, bool) {
 	candidate, ok := p.main.Pop()
 	if !ok {
-		return nil, false
+		return 0, false
 	}
-	metaWord := candidate.State.Load()
+	state := p.pool.At(candidate.Idx)
+	metaWord := state.Load()
 	switch {
 	case metaWord&itemstate.Dead != 0:
-		return candidate.State, true
+		return candidate.Idx, true
 	case itemstate.Expired(metaWord, nowOff):
-		candidate.State.Kill()
-		return candidate.State, true
+		state.Kill()
+		return candidate.Idx, true
 	case metaWord&itemstate.ChanceMask != 0:
-		candidate.State.RevokeChance(metaWord)
+		state.RevokeChance(metaWord)
 		p.main.Push(candidate)
-		return nil, false
+		return 0, false
 	default:
-		candidate.State.Kill()
-		return candidate.State, true
+		state.Kill()
+		return candidate.Idx, true
 	}
 }
 
-// bytes estimates the ring's memory footprint.
-func (g *ghostRing[K]) bytes() int64 {
-	var zeroKey K
-	keySize := int64(unsafe.Sizeof(zeroKey))
-	ringBytes := int64(len(g.ring)) * keySize
-	setBytes := int64(len(g.set)) * (keySize + int64(unsafe.Sizeof(uint32(0))) + ghostEntryOverhead)
-	return ringBytes + setBytes
+// ghostTable is the S3-FIFO "ghost" queue: a memory of keys recently evicted from small. Instead of storing keys (the
+// old design was a ring of keys plus a map[K]uint32 index, ~40+ bytes per slot for uint64 keys), it keeps 32-bit key
+// fingerprints in a fixed 2-way set-associative hash table - 8 bytes per slot, allocated once at construction, no map
+// and no per-operation allocations.
+//
+// Aging: every push stamps its slot with a sequence number; an entry older than ageWindow pushes is treated as absent,
+// which approximates the FIFO expiry of the old ring. Collisions are benign either way: a false hit sends a newcomer
+// straight to main (GCLOCK will still evict it if unused), a lost entry costs one missed promotion.
+type ghostTable[K comparable] struct {
+	seed      maphash.Seed
+	slots     []ghostSlot
+	mask      uint32 // number of 2-slot buckets minus one
+	seq       uint32 // pushes so far; wraparound is handled by uint32 subtraction
+	ageWindow uint32 // entries older than this many pushes are treated as absent
 }
 
-// push adds a key, evicting the oldest one on overflow.
-func (g *ghostRing[K]) push(key K) {
-	ringLen := len(g.ring)
-	if ringLen == 0 {
+// ghostSlot is one fingerprint entry: fp is never 0 for an occupied slot.
+type ghostSlot struct {
+	fp  uint32
+	seq uint32
+}
+
+// newGhostTable creates a ghost table with at least `capacity` slots (rounded up to a power of two).
+func newGhostTable[K comparable](capacity int) ghostTable[K] {
+	if capacity <= 0 {
+		return ghostTable[K]{seed: maphash.MakeSeed()}
+	}
+	slots := 1 << bits.Len(uint(capacity-1)) // pow2 >= capacity, and >= 2 so buckets hold full pairs
+	if slots < 2 {
+		slots = 2
+	}
+	return ghostTable[K]{
+		seed:      maphash.MakeSeed(),
+		slots:     make([]ghostSlot, slots),
+		mask:      uint32(slots/2 - 1),
+		ageWindow: uint32(slots),
+	}
+}
+
+// locate maps a key to its bucket's first slot index and its fingerprint. The seed is the table's own (not the
+// cache's shard seed), so slot selection is uncorrelated with shard selection.
+func (g *ghostTable[K]) locate(key K) (uint32, uint32) {
+	hash := maphash.Comparable(g.seed, key)
+	fp := uint32(hash >> 32)
+	if fp == 0 {
+		fp = 1
+	}
+	return (uint32(hash) & g.mask) * 2, fp
+}
+
+// bytes returns the table's memory footprint.
+func (g *ghostTable[K]) bytes() int64 {
+	return int64(len(g.slots)) * int64(unsafe.Sizeof(ghostSlot{}))
+}
+
+// push records the key, refreshing its entry if present, otherwise replacing the older slot of its bucket.
+func (g *ghostTable[K]) push(key K) {
+	if len(g.slots) == 0 {
 		return
 	}
-	if g.size == ringLen {
-		g.popOldest()
+	first, fp := g.locate(key)
+	g.seq++
+	a, b := &g.slots[first], &g.slots[first+1]
+	target := a
+	switch {
+	case a.fp == fp:
+	case b.fp == fp:
+		target = b
+	case g.seq-b.seq > g.seq-a.seq: // empty slots (seq 0) look maximally old and are taken first
+		target = b
 	}
-	g.ring[(g.head+g.size)%ringLen] = key
-	g.size++
-	g.set[key]++
+	*target = ghostSlot{fp: fp, seq: g.seq}
 }
 
-func (g *ghostRing[K]) popOldest() {
-	key := g.ring[g.head]
-	var zero K
-	g.ring[g.head] = zero
-	g.head = (g.head + 1) % len(g.ring)
-	g.size--
-	// The key may have been removed from set early by a hit() call: the count guards against decrementing into nowhere.
-	if count := g.set[key]; count > 1 {
-		g.set[key] = count - 1
-	} else if count == 1 {
-		delete(g.set, key)
-	}
-}
-
-// hit checks whether the key is present and, on a hit, removes it from the index (stale ring slots are cleaned up
-// later by popOldest). Returns true on a hit.
-func (g *ghostRing[K]) hit(key K) bool {
-	if _, ok := g.set[key]; !ok {
+// hit checks whether the key was pushed within the age window and, on a hit, clears its entry (mirroring the old
+// ring's remove-on-hit semantics). Returns true on a hit.
+func (g *ghostTable[K]) hit(key K) bool {
+	if len(g.slots) == 0 {
 		return false
 	}
-	delete(g.set, key)
-	return true
+	first, fp := g.locate(key)
+	for i := first; i < first+2; i++ {
+		slot := &g.slots[i]
+		if slot.fp == fp && g.seq-slot.seq < g.ageWindow {
+			*slot = ghostSlot{}
+			return true
+		}
+	}
+	return false
 }

@@ -142,9 +142,9 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		}
 		switch cfg.Policy {
 		case PolicyS3FIFO:
-			sh.policy = eviction.NewS3FIFO[K](sh.cap, ghostPerShard)
+			sh.policy = eviction.NewS3FIFO(&sh.pool, sh.cap, ghostPerShard)
 		case PolicyClock:
-			sh.policy = eviction.NewClockPolicy[K]()
+			sh.policy = eviction.NewClockPolicy(&sh.pool)
 		}
 	}
 
@@ -272,8 +272,9 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 	}
 
 	var (
-		claimedState *itemstate.State[K]
-		weightDelta  = weight
+		claimed     bool
+		claimedIdx  uint32
+		weightDelta = weight
 	)
 	sh.mu.Lock()
 	c.items.Compute(key, func(old cacheItem[K, V], loaded bool) (cacheItem[K, V], bool) {
@@ -285,12 +286,12 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 			}
 			return cacheItem[K, V]{value: value, state: old.state, gen: old.gen}, false
 		}
-		newState, gen := sh.pool.Claim(key, c.expireOffset())
-		claimedState = newState
+		newState, gen, idx := sh.pool.Claim(key, c.expireOffset())
+		claimed, claimedIdx = true, idx
 		return cacheItem[K, V]{value: value, state: newState, gen: gen}, false
 	})
-	if claimedState != nil {
-		sh.policy.Add(itemstate.QNode[K]{State: claimedState, Cost: uint32(weight)})
+	if claimed {
+		sh.policy.Add(itemstate.QNode{Idx: claimedIdx, Cost: uint32(weight)})
 	}
 	if sh.weight.Add(weightDelta) > sh.cap {
 		c.evictShard(sh)
@@ -308,12 +309,12 @@ func (c *Cache[K, V]) refreshExpire(state *itemstate.State[K]) {
 func (c *Cache[K, V]) evictShard(sh *shard[K, V]) {
 	nowOff := c.nowOff.Load()
 	for sh.weight.Load() > sh.cap {
-		victim, ok := sh.policy.Evict(nowOff)
+		victimIdx, ok := sh.policy.Evict(nowOff)
 		if !ok {
 			return
 		}
-		c.unlink(sh, victim)
-		sh.pool.Release(victim)
+		c.unlink(sh, sh.pool.At(victimIdx))
+		sh.pool.Release(victimIdx)
 	}
 }
 
@@ -369,7 +370,7 @@ const sweepMinDead = 128
 func (c *Cache[K, V]) noteDead(sh *shard[K, V]) {
 	sh.deadCount++
 	if sh.deadCount >= sweepMinDead && sh.deadCount*2 >= sh.policy.Len() {
-		sh.policy.Sweep(func(state *itemstate.State[K]) { sh.pool.Release(state) })
+		sh.policy.Sweep(func(idx uint32) { sh.pool.Release(idx) })
 		sh.deadCount = 0
 	}
 }
@@ -670,10 +671,16 @@ const xsyncBucketBytes = 64
 
 // TotalWeight estimates the total memory footprint of the cache's first-level structures.
 func (c *Cache[K, V]) TotalWeight() int64 {
+	// for measuring the real struct, include padding.
+	entryBytes := int64(unsafe.Sizeof(struct {
+		key  K
+		item cacheItem[K, V]
+	}{}))
 	stats := c.items.Stats()
-	var zeroKey K
-	entryBytes := int64(unsafe.Sizeof(zeroKey)) + int64(unsafe.Sizeof(cacheItem[K, V]{}))
-	total := int64(stats.TotalBuckets)*xsyncBucketBytes + int64(stats.Size)*entryBytes
+	total := int64(unsafe.Sizeof(*c))
+	total += int64(len(c.shards)) * int64(unsafe.Sizeof(shard[K, V]{}))
+	total += int64(stats.TotalBuckets)*xsyncBucketBytes + int64(stats.Size)*entryBytes
+	total += int64(c.flights.Stats().TotalBuckets) * xsyncBucketBytes
 
 	for i := range c.shards {
 		sh := &c.shards[i]
