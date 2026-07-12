@@ -17,9 +17,9 @@ import (
 //   - eviction from main: GCLOCK (second-chance by the reference counter).
 //
 // The queues store 8-byte nodes referencing stable pool slots, so promotion from small to main is just moving a node -
-// the record itself and the map entry stay put.
-type S3FIFOPolicy[K comparable] struct {
-	pool  *itemstate.Pool[K]
+// the record itself and its table slot stay put.
+type S3FIFOPolicy[K comparable, V any] struct {
+	pool  *itemstate.Pool[K, V]
 	small itemstate.EvictQueue
 	main  itemstate.EvictQueue
 	ghost ghostTable[K]
@@ -30,20 +30,20 @@ type S3FIFOPolicy[K comparable] struct {
 
 // NewS3FIFO creates an S3-FIFO policy for a shard with the given capacity and ghost size (in keys). The pool is the
 // owning shard's record pool, used to resolve queue node indices.
-func NewS3FIFO[K comparable](pool *itemstate.Pool[K], shardCap int64, ghostSize int) *S3FIFOPolicy[K] {
+func NewS3FIFO[K comparable, V any](pool *itemstate.Pool[K, V], shardCap int64, ghostSize int) *S3FIFOPolicy[K, V] {
 	smallCap := shardCap / 10
 	if smallCap < 1 {
 		smallCap = 1
 	}
-	return &S3FIFOPolicy[K]{
+	return &S3FIFOPolicy[K, V]{
 		pool:     pool,
 		ghost:    newGhostTable[K](ghostSize),
 		smallCap: smallCap,
 	}
 }
 
-func (p *S3FIFOPolicy[K]) Add(node itemstate.QNode) {
-	if p.ghost.hit(p.pool.At(node.Idx).Key) {
+func (p *S3FIFOPolicy[K, V]) Add(node itemstate.QNode) {
+	if p.ghost.hit(p.pool.At(node.Idx).Entry().Key) {
 		// The key was recently evicted from small and is needed again - send it straight to the protected queue.
 		p.main.Push(node)
 		return
@@ -52,13 +52,13 @@ func (p *S3FIFOPolicy[K]) Add(node itemstate.QNode) {
 	p.smallWeight += int64(node.Cost)
 }
 
-func (p *S3FIFOPolicy[K]) Len() int { return p.small.Len() + p.main.Len() }
+func (p *S3FIFOPolicy[K, V]) Len() int { return p.small.Len() + p.main.Len() }
 
-func (p *S3FIFOPolicy[K]) Bytes() int64 {
+func (p *S3FIFOPolicy[K, V]) Bytes() int64 {
 	return int64(unsafe.Sizeof(*p)) + p.small.Bytes() + p.main.Bytes() + p.ghost.bytes()
 }
 
-func (p *S3FIFOPolicy[K]) Sweep(release func(idx uint32)) {
+func (p *S3FIFOPolicy[K, V]) Sweep(release func(idx uint32)) {
 	// Dead nodes leaving small must give their weight back, exactly as evictSmallOnce does.
 	itemstate.SweepQueue(&p.small, p.pool, func(node itemstate.QNode) {
 		p.smallWeight -= int64(node.Cost)
@@ -67,7 +67,12 @@ func (p *S3FIFOPolicy[K]) Sweep(release func(idx uint32)) {
 	itemstate.SweepQueue(&p.main, p.pool, func(node itemstate.QNode) { release(node.Idx) })
 }
 
-func (p *S3FIFOPolicy[K]) Evict(nowOff uint32) (uint32, bool) {
+func (p *S3FIFOPolicy[K, V]) Range(f func(itemstate.QNode)) {
+	p.small.Range(f)
+	p.main.Range(f)
+}
+
+func (p *S3FIFOPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	for {
 		fromSmall := p.smallWeight > p.smallCap && p.small.Len() > 0
 		if !fromSmall && p.main.Len() == 0 {
@@ -93,7 +98,7 @@ func (p *S3FIFOPolicy[K]) Evict(nowOff uint32) (uint32, bool) {
 
 // evictSmallOnce processes the head of small: (idx, true) means the record is reclaimed, (0, false) means the node
 // was skipped or promoted to main.
-func (p *S3FIFOPolicy[K]) evictSmallOnce(nowOff uint32) (uint32, bool) {
+func (p *S3FIFOPolicy[K, V]) evictSmallOnce(nowOff uint32) (uint32, bool) {
 	candidate, ok := p.small.Pop()
 	if !ok {
 		return 0, false
@@ -116,13 +121,13 @@ func (p *S3FIFOPolicy[K]) evictSmallOnce(nowOff uint32) (uint32, bool) {
 		return 0, false
 	default:
 		state.Kill()
-		p.ghost.push(state.Key)
+		p.ghost.push(state.Entry().Key)
 		return candidate.Idx, true
 	}
 }
 
 // evictMainOnce performs a single GCLOCK step over main.
-func (p *S3FIFOPolicy[K]) evictMainOnce(nowOff uint32) (uint32, bool) {
+func (p *S3FIFOPolicy[K, V]) evictMainOnce(nowOff uint32) (uint32, bool) {
 	candidate, ok := p.main.Pop()
 	if !ok {
 		return 0, false

@@ -72,7 +72,7 @@ func (q *EvictQueue) Push(item QNode) {
 // and TTL expiry do not pile up when the cache stays below capacity and eviction never runs. The pool is needed to
 // resolve node indices into state records. O(len) pops and pushes; fully drained chunks are released to the GC by Pop
 // as usual. NOT thread-safe: call under the shard mutex.
-func SweepQueue[K comparable](q *EvictQueue, pool *Pool[K], onDrop func(QNode)) {
+func SweepQueue[K comparable, V any](q *EvictQueue, pool *Pool[K, V], onDrop func(QNode)) {
 	for n := q.size; n > 0; n-- {
 		node, ok := q.Pop()
 		if !ok {
@@ -83,6 +83,23 @@ func SweepQueue[K comparable](q *EvictQueue, pool *Pool[K], onDrop func(QNode)) 
 		} else {
 			q.Push(node)
 		}
+	}
+}
+
+// Range calls f for every queued node in FIFO order without disturbing the queue. Every claimed record has exactly
+// one node across its shard's queues, so ranging a policy's queues visits each record once - the cache uses this to
+// rebuild a shard's slot table. NOT thread-safe: call under the shard mutex.
+func (q *EvictQueue) Range(f func(QNode)) {
+	start := q.headIdx
+	for chunk := q.head; chunk != nil; chunk = chunk.next {
+		end := queueChunkSize
+		if chunk == q.tail {
+			end = q.tailIdx
+		}
+		for i := start; i < end; i++ {
+			f(chunk.items[i])
+		}
+		start = 0
 	}
 }
 

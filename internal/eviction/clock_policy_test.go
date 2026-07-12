@@ -10,14 +10,14 @@ import (
 
 // addFromPool claims a record for the key from the pool and registers its node with the policy, mirroring what
 // Cache.setMemory does. Returns the node's pool index.
-func addFromPool(p Policy[string], pool *itemstate.Pool[string], key string) uint32 {
-	_, _, idx := pool.Claim(key, 0)
+func addFromPool(p Policy[string, string], pool *itemstate.Pool[string, string], key string) uint32 {
+	_, _, idx := pool.Claim(key, "v", 0)
 	p.Add(itemstate.QNode{Idx: idx, Cost: 1})
 	return idx
 }
 
 func TestClockPolicyBytes(t *testing.T) {
-	var pool itemstate.Pool[string]
+	var pool itemstate.Pool[string, string]
 	p := NewClockPolicy(&pool)
 	emptyBytes := p.Bytes()
 

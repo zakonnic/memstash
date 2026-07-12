@@ -8,29 +8,31 @@ import (
 
 // ClockPolicy is GCLOCK: a single FIFO queue. When the hand passes a node whose reference counter is non-zero, the node
 // loses one chance and is moved to the tail; a node with a zero counter is evicted.
-type ClockPolicy[K comparable] struct {
-	pool *itemstate.Pool[K]
+type ClockPolicy[K comparable, V any] struct {
+	pool *itemstate.Pool[K, V]
 	q    itemstate.EvictQueue
 }
 
 // NewClockPolicy creates a ClockPolicy policy.
-func NewClockPolicy[K comparable](pool *itemstate.Pool[K]) *ClockPolicy[K] {
-	return &ClockPolicy[K]{pool: pool}
+func NewClockPolicy[K comparable, V any](pool *itemstate.Pool[K, V]) *ClockPolicy[K, V] {
+	return &ClockPolicy[K, V]{pool: pool}
 }
 
-func (p *ClockPolicy[K]) Add(node itemstate.QNode) {
+func (p *ClockPolicy[K, V]) Add(node itemstate.QNode) {
 	p.q.Push(node)
 }
 
-func (p *ClockPolicy[K]) Len() int { return p.q.Len() }
+func (p *ClockPolicy[K, V]) Len() int { return p.q.Len() }
 
-func (p *ClockPolicy[K]) Bytes() int64 { return int64(unsafe.Sizeof(*p)) + p.q.Bytes() }
+func (p *ClockPolicy[K, V]) Bytes() int64 { return int64(unsafe.Sizeof(*p)) + p.q.Bytes() }
 
-func (p *ClockPolicy[K]) Sweep(release func(idx uint32)) {
+func (p *ClockPolicy[K, V]) Sweep(release func(idx uint32)) {
 	itemstate.SweepQueue(&p.q, p.pool, func(node itemstate.QNode) { release(node.Idx) })
 }
 
-func (p *ClockPolicy[K]) Evict(nowOff uint32) (uint32, bool) {
+func (p *ClockPolicy[K, V]) Range(f func(itemstate.QNode)) { p.q.Range(f) }
+
+func (p *ClockPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	// The loop is finite: each step either removes a node from the queue for good or decrements the chance counter of
 	// its item (at most 2 per item).
 	for {
