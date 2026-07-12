@@ -28,6 +28,7 @@ type Option struct {
 // so those options do not have to be generic: they cannot write into Config[K, V] directly without knowing K and V.
 type FieldOverrides struct {
 	memoryCapacity  *int64
+	memoryBudget    *int64
 	ttl             *time.Duration
 	policy          *Policy
 	shards          *int
@@ -56,6 +57,9 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 	}
 	if fields.memoryCapacity != nil {
 		cfg.MemoryCapacity = *fields.memoryCapacity
+	}
+	if fields.memoryBudget != nil {
+		cfg.MemoryBudget = *fields.memoryBudget
 	}
 	if fields.ttl != nil {
 		cfg.TTL = *fields.ttl
@@ -94,6 +98,12 @@ func applyToConfig[K comparable, V any](target any, fill func(*Config[K, V])) er
 // WithMemoryCapacity sets Config.MemoryCapacity: the first-level capacity in weight units.
 func WithMemoryCapacity(capacity int64) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.memoryCapacity = &capacity }}
+}
+
+// WithMemoryBudget sets Config.MemoryBudget: the first-level bound in approximate resident bytes. Mutually exclusive
+// with WithMemoryCapacity; see Config.MemoryBudget for the key/value types the automatic size estimator supports.
+func WithMemoryBudget(bytes int64) Option {
+	return Option{ApplyField: func(f *FieldOverrides) { f.memoryBudget = &bytes }}
 }
 
 // WithCostFunc sets Config.CostFunc: the item weight function.

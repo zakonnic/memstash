@@ -131,16 +131,24 @@ u, ok, err := c.Get(ctx, "user:42") // L1 hit → returns instantly; L1 miss →
 
 memstash is configured with functional options passed to `New` (or to any adapter's `NewCache*`). Some common setups:
 
-**Weighted / size-bounded cache** — bound by bytes instead of item count:
+**Byte-budgeted cache** — bound by approximate resident bytes instead of item count; the per-item size (key, value, and the cache's own overhead) is estimated automatically:
 
 ```go
 c, _ := memstash.New[string, []byte](
-	memstash.WithMemoryCapacity(512<<20), // 512 MiB
-	memstash.WithCostFunc(func(k string, v []byte) uint32 { return uint32(len(k) + len(v)) }),
+	memstash.WithMemoryBudget(512 << 20), // ~512 MiB resident
 )
 ```
 
-**Strong consistency to L2** — make writes synchronous (write-through) so the value is durable in the shared tier before `Set` returns:
+The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For anything more complex construction fails with `ErrBudgetNeedsCostFunc` — provide the byte size yourself:
+
+```go
+c, _ := memstash.New[string, User](
+	memstash.WithMemoryBudget(512<<20),
+	memstash.WithCostFunc(func(k string, u User) uint32 { return uint32(len(k) + u.Bytes()) }),
+)
+```
+
+**Consistency to L2 after Set** — make writes synchronous (write-through) so the value is durable in the shared tier before `Set` returns:
 
 ```go
 c, _ := rueidis_adapter.NewCacheJSON[string, Session](client,
@@ -170,6 +178,7 @@ Full option list:
 | Option | Purpose |
 |---|---|
 | `WithMemoryCapacity(n)` | L1 capacity in weight units (required; defaults to 20 000). |
+| `WithMemoryBudget(bytes)` | L1 bound in approximate resident bytes; derives a size-based cost function automatically (mutually exclusive with `WithMemoryCapacity`). |
 | `WithCostFunc(fn)` | Per-item weight function (e.g. size in bytes). |
 | `WithTTL(d)` | Item lifetime (1-second resolution); applied to L2 writes too. |
 | `WithPolicy(p)` | `PolicyS3FIFO` (default) or `PolicyClock`. |

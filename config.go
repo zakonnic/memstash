@@ -8,11 +8,14 @@ import (
 )
 
 var (
-	ErrBadCapacity      = errors.New("memstash: MemoryCapacity must be positive")
-	ErrCapacityTooLarge = errors.New("memstash: MemoryCapacity exceeds the addressable pool index space (2^32 records)")
-	ErrUnknownPolicy    = errors.New("memstash: unknown eviction policy")
-	ErrNilLoader        = errors.New("memstash: loader must not be nil")
-	ErrBadTTL           = errors.New("memstash: TTL must not be negative")
+	ErrBadCapacity         = errors.New("memstash: MemoryCapacity must be positive")
+	ErrCapacityTooLarge    = errors.New("memstash: MemoryCapacity exceeds the addressable pool index space (2^32 records)")
+	ErrBadBudget           = errors.New("memstash: MemoryBudget must be positive")
+	ErrBudgetAndCapacity   = errors.New("memstash: MemoryBudget and MemoryCapacity are mutually exclusive")
+	ErrBudgetNeedsCostFunc = errors.New("memstash: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly")
+	ErrUnknownPolicy       = errors.New("memstash: unknown eviction policy")
+	ErrNilLoader           = errors.New("memstash: loader must not be nil")
+	ErrBadTTL              = errors.New("memstash: TTL must not be negative")
 	// ErrLoaderPanic resolves the singleflight of a loader that panicked: the panic itself propagates to the caller
 	// that ran the loader, while every waiter joined on that flight receives this error instead of hanging forever.
 	ErrLoaderPanic = errors.New("memstash: loader panicked")
@@ -22,8 +25,12 @@ var (
 // with the With* options of New.
 type Config[K comparable, V any] struct {
 	// MemoryCapacity is the first-level capacity in weight units. When CostFunc == nil every item weighs 1 and the capacity
-	// means the number of items. If CostFunc != nil it is required field, must be > 0.
+	// means the number of items. If CostFunc != nil it is required field, must be > 0. Mutually exclusive with MemoryBudget.
 	MemoryCapacity int64
+
+	// MemoryBudget bounds the cached elements size in bytes. When CostFunc == nil a cost function is derived automatically.
+	// Require CostFunc for complex types.
+	MemoryBudget int64
 
 	// CostFunc is the item weight function. It must be deterministic (the weight is recomputed during eviction) and the
 	// values must be immutable. A result of 0 is treated as 1. nil means weight 1 for every item.

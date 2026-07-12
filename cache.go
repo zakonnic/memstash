@@ -98,6 +98,23 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.MemoryCapacity < 0 {
 		return nil, ErrBadCapacity
 	}
+	if cfg.MemoryBudget < 0 {
+		return nil, ErrBadBudget
+	}
+	if cfg.MemoryBudget > 0 {
+		if cfg.MemoryCapacity != 0 {
+			return nil, ErrBudgetAndCapacity
+		}
+		if cfg.CostFunc == nil {
+			autoCostFunc, err := GetAutoCostFunc[K, V]()
+			if err != nil {
+				return nil, err
+			}
+			cfg.CostFunc = autoCostFunc
+		}
+		// From here on the budget is an ordinary weighted capacity: costs are bytes, the capacity is the byte budget.
+		cfg.MemoryCapacity = cfg.MemoryBudget
+	}
 	if cfg.MemoryCapacity == 0 {
 		if cfg.CostFunc != nil { // must set capacity explicitly - protection from misconfiguration
 			return nil, ErrBadCapacity

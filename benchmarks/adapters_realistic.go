@@ -37,9 +37,8 @@ type memstashBytesAdapter struct {
 
 func newMemstashBytes(budget int64, policy memstash.Policy, name string) benchCacheBytes {
 	c, err := memstash.New[string, []byte](
-		memstash.WithMemoryCapacity(budget),
+		memstash.WithMemoryBudget(budget),
 		memstash.WithPolicy(policy),
-		memstash.WithCostFunc(entryCost),
 	)
 	if err != nil {
 		panic(err)
