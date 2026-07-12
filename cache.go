@@ -37,7 +37,7 @@ const (
 // published table and verify candidates against the records themselves.
 type shard[K comparable, V any] struct {
 	mu        sync.Mutex
-	table     atomic.Pointer[slotTable] // replaced wholesale on growth/purge
+	table     atomic.Pointer[hashSlots] // replaced wholesale on growth/purge
 	policy    eviction.Policy[K, V]
 	pool      itemstate.Pool[K, V]
 	weight    atomic.Int64
@@ -161,7 +161,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 			sh.cap++ // spread the capacity remainder over the first shards
 		}
 		sh.pool = itemstate.NewPool(c.registry)
-		sh.table.Store(newSlotTable(minTableSlots))
+		sh.table.Store(newHashSlots(minTableSlots))
 		switch cfg.Policy {
 		case PolicyS3FIFO:
 			sh.policy = eviction.NewS3FIFO(&sh.pool, sh.cap, ghostPerShard)
@@ -231,8 +231,8 @@ func (c *Cache[K, V]) Wait() {
 // shardAndHash returns the key's shard and hash: the low bits pick the shard, the high bits seed the table probe,
 // so one hash serves both.
 func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
-	h := maphash.Comparable(c.seed, key)
-	return &c.shards[uint32(h)&c.shardMask], h
+	keyHash := maphash.Comparable(c.seed, key)
+	return &c.shards[uint32(keyHash)&c.shardMask], keyHash
 }
 
 // Get returns the value from memory, or - on a miss - from L2 (if configured), promoting the found value into memory. A
@@ -259,20 +259,20 @@ func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 	return c.getMemory(key)
 }
 
-// getMemory is the lock-free memory-hit path. The slot tag is only a prefilter; the record's immutable Entry box
-// gives the exact key match and a value that can never be seen half-written - a racing writer either swaps the whole
-// box or kills the record, both of which the checks below observe.
+// getMemory is the lock-free memory-hit path. The slot's short hash is only a prefilter; the record's immutable
+// Entry box gives the exact key match and a value that can never be seen half-written - a racing writer either
+// swaps the whole box or kills the record, both of which the checks below observe.
 func (c *Cache[K, V]) getMemory(key K) (V, bool) {
-	sh, h := c.shardAndHash(key)
+	sh, keyHash := c.shardAndHash(key)
 	t := sh.table.Load()
-	tag := tagOf(h)
-	for probe := slotHome(h, t.mask); ; probe = (probe + 1) & t.mask {
-		packed := t.slots[probe].Load()
-		slotTag := uint32(packed >> 32)
-		if slotTag == emptyTag {
+	shortHash := shortHashOf(keyHash)
+	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
+		packed := t.slots[pos].Load()
+		slotShortHash := uint32(packed >> 32)
+		if slotShortHash == emptyShortHash {
 			break // end of the probe chain: not present
 		}
-		if slotTag != tag { // covers tombstones too - tombTag never matches a key tag
+		if slotShortHash != shortHash { // covers tombstones too - tombShortHash never matches a key short hash
 			continue
 		}
 		state := c.registry.At(uint32(packed))
@@ -282,7 +282,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 		}
 		entry := state.Entry()
 		if entry == nil || entry.Key != key {
-			continue // tag collision or a recycled record
+			continue // short hash collision or a recycled record
 		}
 		expireOff := uint32((metaWord & itemstate.ExpireMask) >> itemstate.ExpireShift)
 		nowOff := c.nowOff.Load()
@@ -296,7 +296,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 			return entry.Value, true
 		}
 		// TTL has elapsed - drop the item lazily instead of waiting for the eviction queue to reach it.
-		c.dropExpired(sh, h, key, uint32(packed))
+		c.dropExpired(sh, keyHash, key, uint32(packed))
 		break
 	}
 	var zero V
@@ -321,43 +321,43 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 // queue node and its slot stay put); a new key claims a record and a slot. The only allocation is the box itself.
 func (c *Cache[K, V]) setMemory(key K, value V) {
 	weight := c.rawCost(key, value)
-	sh, h := c.shardAndHash(key)
+	sh, keyHash := c.shardAndHash(key)
 	if weight > sh.cap {
 		// Does not fit at all; drop the older value too so it stops serving reads.
 		sh.mu.Lock()
-		c.deleteLocked(sh, h, key)
+		c.deleteLocked(sh, keyHash, key)
 		sh.mu.Unlock()
 		return
 	}
 
 	sh.mu.Lock()
 	t := sh.table.Load()
-	tag := tagOf(h)
+	shortHash := shortHashOf(keyHash)
 	weightDelta := weight
 	reuseAt := -1
-	for probe := slotHome(h, t.mask); ; probe = (probe + 1) & t.mask {
-		packed := t.slots[probe].Load()
-		slotTag := uint32(packed >> 32)
-		if slotTag == emptyTag {
+	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
+		packed := t.slots[pos].Load()
+		slotShortHash := uint32(packed >> 32)
+		if slotShortHash == emptyShortHash {
 			// New key: claim a record and link a slot (reusing the first tombstone seen on the way).
 			_, _, idx := sh.pool.Claim(key, value, c.expireOffset())
 			if reuseAt >= 0 {
-				probe = uint32(reuseAt)
+				pos = uint32(reuseAt)
 				sh.dirty--
 			}
-			t.slots[probe].Store(packSlot(tag, idx))
+			t.slots[pos].Store(packSlot(shortHash, idx))
 			sh.live++
 			sh.policy.Add(itemstate.QNode{Idx: idx, Cost: uint32(weight)})
 			c.maybeRebuild(sh, t)
 			break
 		}
-		if slotTag == tombTag {
+		if slotShortHash == tombShortHash {
 			if reuseAt < 0 {
-				reuseAt = int(probe)
+				reuseAt = int(pos)
 			}
 			continue
 		}
-		if slotTag != tag {
+		if slotShortHash != shortHash {
 			continue
 		}
 		state := c.registry.At(uint32(packed))
@@ -386,7 +386,7 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 // items need the space, same-size otherwise - either way tombstones are purged. Live slots are re-derived from the
 // policy's queues (exactly one node per record); readers finish on the superseded table just fine. Called under the
 // shard mutex.
-func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *slotTable) {
+func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *hashSlots) {
 	if (sh.live+sh.dirty)*4 < len(t.slots)*3 {
 		return
 	}
@@ -394,24 +394,24 @@ func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *slotTable) {
 	if sh.live*2 >= newSize {
 		newSize *= 2
 	}
-	nt := newSlotTable(newSize)
+	hashSlots := newHashSlots(newSize)
 	live := 0
 	sh.policy.Range(func(node itemstate.QNode) {
 		state := sh.pool.At(node.Idx)
 		if state.Load()&itemstate.Dead != 0 {
 			return
 		}
-		hh := maphash.Comparable(c.seed, state.Entry().Key)
-		for probe := slotHome(hh, nt.mask); ; probe = (probe + 1) & nt.mask {
-			if nt.slots[probe].Load() == 0 {
-				nt.slots[probe].Store(packSlot(tagOf(hh), node.Idx))
+		keyHash := maphash.Comparable(c.seed, state.Entry().Key)
+		for pos := homeSlot(keyHash, hashSlots.mask); ; pos = (pos + 1) & hashSlots.mask {
+			if hashSlots.slots[pos].Load() == 0 {
+				hashSlots.slots[pos].Store(packSlot(shortHashOf(keyHash), node.Idx))
 				break
 			}
 		}
 		live++
 	})
 	sh.live, sh.dirty = live, 0
-	sh.table.Store(nt)
+	sh.table.Store(hashSlots)
 }
 
 // refreshExpire extends the item's TTL.
@@ -438,19 +438,19 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V]) {
 func (c *Cache[K, V]) unlink(sh *shard[K, V], victimIdx uint32) {
 	victim := sh.pool.At(victimIdx)
 	entry := victim.Entry()
-	h := maphash.Comparable(c.seed, entry.Key)
+	keyHash := maphash.Comparable(c.seed, entry.Key)
 	t := sh.table.Load()
-	tag := tagOf(h)
-	for probe := slotHome(h, t.mask); ; probe = (probe + 1) & t.mask {
-		packed := t.slots[probe].Load()
-		slotTag := uint32(packed >> 32)
-		if slotTag == emptyTag {
+	shortHash := shortHashOf(keyHash)
+	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
+		packed := t.slots[pos].Load()
+		slotShortHash := uint32(packed >> 32)
+		if slotShortHash == emptyShortHash {
 			return
 		}
-		if slotTag != tag || uint32(packed) != victimIdx {
+		if slotShortHash != shortHash || uint32(packed) != victimIdx {
 			continue // another key's slot, or the key is already backed by a different record
 		}
-		t.slots[probe].Store(tombSlot)
+		t.slots[pos].Store(tombSlot)
 		sh.live--
 		sh.dirty++
 		sh.weight.Add(-c.rawCost(entry.Key, entry.Value))
@@ -479,16 +479,16 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K, idx uint32) 
 
 // findSlot probes the shard's current table for the key's live slot: (slot, pool index, record, true) when found.
 // Called under the shard mutex.
-func (c *Cache[K, V]) findSlot(sh *shard[K, V], h uint64, key K) (*atomic.Uint64, uint32, *itemstate.State[K, V], bool) {
+func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (*atomic.Uint64, uint32, *itemstate.State[K, V], bool) {
 	t := sh.table.Load()
-	tag := tagOf(h)
-	for probe := slotHome(h, t.mask); ; probe = (probe + 1) & t.mask {
-		packed := t.slots[probe].Load()
-		slotTag := uint32(packed >> 32)
-		if slotTag == emptyTag {
+	shortHash := shortHashOf(keyHash)
+	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
+		packed := t.slots[pos].Load()
+		slotShortHash := uint32(packed >> 32)
+		if slotShortHash == emptyShortHash {
 			return nil, 0, nil, false
 		}
-		if slotTag != tag {
+		if slotShortHash != shortHash {
 			continue
 		}
 		state := c.registry.At(uint32(packed))
@@ -496,7 +496,7 @@ func (c *Cache[K, V]) findSlot(sh *shard[K, V], h uint64, key K) (*atomic.Uint64
 			continue
 		}
 		if entry := state.Entry(); entry.Key == key {
-			return &t.slots[probe], uint32(packed), state, true
+			return &t.slots[pos], uint32(packed), state, true
 		}
 	}
 }
@@ -519,8 +519,8 @@ func (c *Cache[K, V]) noteDead(sh *shard[K, V]) {
 
 // deleteLocked tombs the key's table slot, kills its state record and subtracts its weight. Called under the shard
 // mutex; a missing key is a no-op.
-func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], h uint64, key K) {
-	if slot, _, state, ok := c.findSlot(sh, h, key); ok {
+func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K) {
+	if slot, _, state, ok := c.findSlot(sh, keyHash, key); ok {
 		entry := state.Entry()
 		state.Kill()
 		slot.Store(tombSlot)
@@ -534,9 +534,9 @@ func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], h uint64, key K) {
 // Delete removes the key from memory and from L2 (synchronously, unless L2 writes are disabled). The state record
 // returns to the pool on the next eviction pass or tombstone sweep.
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
-	sh, h := c.shardAndHash(key)
+	sh, keyHash := c.shardAndHash(key)
 	sh.mu.Lock()
-	c.deleteLocked(sh, h, key)
+	c.deleteLocked(sh, keyHash, key)
 	sh.mu.Unlock()
 
 	if c.l2WritePolicy != WriteDisabled {
