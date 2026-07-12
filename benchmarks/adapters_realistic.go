@@ -52,8 +52,11 @@ func (a *memstashBytesAdapter) Get(key string) ([]byte, bool) { return a.c.GetFr
 func (a *memstashBytesAdapter) Set(key string, value []byte, _ bool) {
 	_ = a.c.Set(context.Background(), key, value)
 }
-func (a *memstashBytesAdapter) Close()          { a.c.Close() }
-func (a *memstashBytesAdapter) GetSize() uint64 { return uint64(a.c.TotalWeight()) }
+func (a *memstashBytesAdapter) Close() { a.c.Close() }
+
+// GetSize The key/value payload lives in separate heap allocations outside cache. Here the cost function
+// is exactly len(key)+len(value), so Weight() is the payload byte total and the sum is the real footprint.
+func (a *memstashBytesAdapter) GetSize() uint64 { return uint64(a.c.TotalWeight() + a.c.Weight()) }
 
 // --- ristretto ---
 

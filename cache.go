@@ -838,6 +838,9 @@ const xsyncBucketBytes = 64
 // TotalWeight estimates the total memory footprint of the cache's first-level structures: slot tables, pool chunks,
 // live Entry boxes, eviction bookkeeping and the fixed parts (the Cache struct, shards, flights buckets, write-back
 // buffer). Boxes of dead items not yet swept are not counted; the estimate catches up as reclamation runs.
+//
+// An Entry box is counted at unsafe.Sizeof, so heap data referenced by K or V (anything behind a pointer) is not
+// included. When CostFunc measures those bytes, TotalWeight() + Weight() gives the full footprint.
 func (c *Cache[K, V]) TotalWeight() int64 {
 	entryBytes := int64(unsafe.Sizeof(itemstate.Entry[K, V]{}))
 	total := int64(unsafe.Sizeof(*c))
