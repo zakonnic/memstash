@@ -8,16 +8,10 @@ import (
 	"github.com/zakonnic/memstash/internal/itemstate"
 )
 
-// S3FIFOPolicy implements S3-FIFO: a small quarantine (~10% of the shard capacity) for newcomers, a protected main queue
-// for items proven to be reused, and ghost - a memory of keys recently evicted from small.
-//
-//   - a new key goes to small; a key found in ghost goes straight to main;
-//   - eviction from small: reference counter > 0 promotes the item to main (with the counter reset), otherwise the item
-//     is a victim and its key goes to ghost;
-//   - eviction from main: GCLOCK (second-chance by the reference counter).
-//
-// The queues store 8-byte nodes referencing stable pool slots, so promotion from small to main is just moving a node -
-// the record itself and its table slot stay put.
+// S3FIFOPolicy implements S3-FIFO: a small quarantine (~10% of the shard capacity) for newcomers, a protected main
+// queue for items proven to be reused, and ghost - a memory of keys recently evicted from small. A new key goes to
+// small (or straight to main on a ghost hit); eviction from small promotes touched items to main and remembers the
+// rest in ghost; main runs GCLOCK. Promotion just moves an 8-byte node - the record and its table slot stay put.
 type S3FIFOPolicy[K comparable, V any] struct {
 	pool  *itemstate.Pool[K, V]
 	small itemstate.EvictQueue
@@ -28,8 +22,7 @@ type S3FIFOPolicy[K comparable, V any] struct {
 	smallCap    int64 // target weight of small: ~10% of the shard capacity
 }
 
-// NewS3FIFO creates an S3-FIFO policy for a shard with the given capacity and ghost size (in keys). The pool is the
-// owning shard's record pool, used to resolve queue node indices.
+// NewS3FIFO creates an S3-FIFO policy for a shard with the given capacity and ghost size (in keys).
 func NewS3FIFO[K comparable, V any](pool *itemstate.Pool[K, V], shardCap int64, ghostSize int) *S3FIFOPolicy[K, V] {
 	smallCap := shardCap / 10
 	if smallCap < 1 {
@@ -44,7 +37,7 @@ func NewS3FIFO[K comparable, V any](pool *itemstate.Pool[K, V], shardCap int64, 
 
 func (p *S3FIFOPolicy[K, V]) Add(node itemstate.QNode) {
 	if p.ghost.hit(p.pool.At(node.Idx).Entry().Key) {
-		// The key was recently evicted from small and is needed again - send it straight to the protected queue.
+		// Recently evicted and needed again - straight to the protected queue.
 		p.main.Push(node)
 		return
 	}
@@ -59,7 +52,7 @@ func (p *S3FIFOPolicy[K, V]) Bytes() int64 {
 }
 
 func (p *S3FIFOPolicy[K, V]) Sweep(release func(idx uint32)) {
-	// Dead nodes leaving small must give their weight back, exactly as evictSmallOnce does.
+	// Dead nodes leaving small give their weight back, as in evictSmallOnce.
 	itemstate.SweepQueue(&p.small, p.pool, func(node itemstate.QNode) {
 		p.smallWeight -= int64(node.Cost)
 		release(node.Idx)
@@ -114,8 +107,7 @@ func (p *S3FIFOPolicy[K, V]) evictSmallOnce(nowOff uint32) (uint32, bool) {
 		state.Kill()
 		return candidate.Idx, true
 	case metaWord&itemstate.ChanceMask != 0:
-		// The item was accessed while in quarantine - it has proven useful and is promoted to main with a clean
-		// counter.
+		// Touched while in quarantine - promote to main with a clean counter.
 		state.ResetChances()
 		p.main.Push(candidate)
 		return 0, false
@@ -150,20 +142,17 @@ func (p *S3FIFOPolicy[K, V]) evictMainOnce(nowOff uint32) (uint32, bool) {
 	}
 }
 
-// ghostTable is the S3-FIFO "ghost" queue: a memory of keys recently evicted from small. Instead of storing keys (the
-// old design was a ring of keys plus a map[K]uint32 index, ~40+ bytes per slot for uint64 keys), it keeps 32-bit key
-// fingerprints in a fixed 2-way set-associative hash table - 8 bytes per slot, allocated once at construction, no map
-// and no per-operation allocations.
-//
-// Aging: every push stamps its slot with a sequence number; an entry older than ageWindow pushes is treated as absent,
-// which approximates the FIFO expiry of the old ring. Collisions are benign either way: a false hit sends a newcomer
-// straight to main (GCLOCK will still evict it if unused), a lost entry costs one missed promotion.
+// ghostTable is the S3-FIFO "ghost" queue: 32-bit key fingerprints in a fixed 2-way set-associative hash table -
+// 8 bytes per slot, allocated once, no per-operation allocations. Every push stamps its slot with a sequence number;
+// entries older than ageWindow pushes count as absent, approximating FIFO expiry. Collisions are benign both ways: a
+// false hit sends a newcomer straight to main (GCLOCK still evicts it if unused), a lost entry costs one missed
+// promotion.
 type ghostTable[K comparable] struct {
 	seed      maphash.Seed
 	slots     []ghostSlot
 	mask      uint32 // number of 2-slot buckets minus one
-	seq       uint32 // pushes so far; wraparound is handled by uint32 subtraction
-	ageWindow uint32 // entries older than this many pushes are treated as absent
+	seq       uint32 // pushes so far; ages are uint32 differences, so wraparound is fine
+	ageWindow uint32
 }
 
 // ghostSlot is one fingerprint entry: fp is never 0 for an occupied slot.
@@ -189,8 +178,8 @@ func newGhostTable[K comparable](capacity int) ghostTable[K] {
 	}
 }
 
-// locate maps a key to its bucket's first slot index and its fingerprint. The seed is the table's own (not the
-// cache's shard seed), so slot selection is uncorrelated with shard selection.
+// locate maps a key to its bucket's first slot and its fingerprint. The table hashes with its own seed so slot
+// selection is uncorrelated with shard selection.
 func (g *ghostTable[K]) locate(key K) (uint32, uint32) {
 	hash := maphash.Comparable(g.seed, key)
 	fp := uint32(hash >> 32)
@@ -200,12 +189,11 @@ func (g *ghostTable[K]) locate(key K) (uint32, uint32) {
 	return (uint32(hash) & g.mask) * 2, fp
 }
 
-// bytes returns the table's memory footprint.
 func (g *ghostTable[K]) bytes() int64 {
 	return int64(len(g.slots)) * int64(unsafe.Sizeof(ghostSlot{}))
 }
 
-// push records the key, refreshing its entry if present, otherwise replacing the older slot of its bucket.
+// push records the key: refreshes its entry if present, otherwise replaces the older slot of the bucket.
 func (g *ghostTable[K]) push(key K) {
 	if len(g.slots) == 0 {
 		return
@@ -224,8 +212,7 @@ func (g *ghostTable[K]) push(key K) {
 	*target = ghostSlot{fp: fp, seq: g.seq}
 }
 
-// hit checks whether the key was pushed within the age window and, on a hit, clears its entry (mirroring the old
-// ring's remove-on-hit semantics). Returns true on a hit.
+// hit reports whether the key was pushed within the age window, consuming the entry on a hit.
 func (g *ghostTable[K]) hit(key K) bool {
 	if len(g.slots) == 0 {
 		return false

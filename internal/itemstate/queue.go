@@ -2,19 +2,18 @@ package itemstate
 
 import "unsafe"
 
-// poolChunkSize is the number of state records in a single pool chunk. A chunk of 128 records at 16-24 bytes each
-// occupies 2-3 KiB and is allocated as a single object: allocations and GC pressure are amortized to 1/128 of an
-// operation.
+// poolChunkSize is the number of state records in a single pool chunk; allocations are amortized to 1/128 of an
+// insert.
 const poolChunkSize = 128
 
-// queueChunkSize is the number of nodes in a single queue chunk. 127 for optimization, total struct size becomes 1024.
+// queueChunkSize is the number of nodes in a single queue chunk: 127 8-byte nodes plus the next pointer make the
+// chunk exactly 1 KiB.
 const queueChunkSize = 127
 
-// QNode is an eviction-queue element: the pool index of a stable state record plus the item's weight at the time it
-// was enqueued. Indices instead of pointers keep the node at 8 bytes; the owning shard's Pool resolves them. The
-// weight kept in the node lets S3-FIFO balance its small queue without touching the map; after a value is overwritten
-// it may drift slightly, but that drift only affects queue selection - the global weight accounting is always exact
-// (it is recomputed from the live value).
+// QNode is an eviction-queue element: the pool index of a state record plus the item's weight when enqueued (the
+// index instead of a pointer keeps the node at 8 bytes). The weight lets S3-FIFO balance its small queue without
+// touching the record; it may drift after an overwrite, but only queue selection depends on it - the global
+// accounting is recomputed from the live value.
 type QNode struct {
 	Idx  uint32
 	Cost uint32
@@ -26,8 +25,8 @@ type queueChunk struct {
 	next  *queueChunk
 }
 
-// EvictQueue is a FIFO queue built on chunks. NOT thread-safe: access exclusively under the shard mutex. Dead nodes
-// are not spliced out - they are lazily skipped during eviction.
+// EvictQueue is a FIFO queue built on chunks. Dead nodes are not spliced out - they are lazily skipped during
+// eviction. Not thread-safe: guard with the shard mutex.
 type EvictQueue struct {
 	head    *queueChunk
 	tail    *queueChunk
@@ -39,9 +38,7 @@ type EvictQueue struct {
 // Len returns the number of nodes currently queued.
 func (q *EvictQueue) Len() int { return q.size }
 
-// Bytes returns the memory footprint of the queue's currently allocated chunks (dead nodes included - a chunk is
-// only released back to the GC once fully drained by Pop). Not thread-safe: call under the shard mutex, same as
-// every other EvictQueue method.
+// Bytes returns the footprint of the currently allocated chunks (a chunk is only released once fully drained).
 func (q *EvictQueue) Bytes() int64 {
 	var chunks int64
 	for c := q.head; c != nil; c = c.next {
@@ -66,12 +63,9 @@ func (q *EvictQueue) Push(item QNode) {
 	q.size++
 }
 
-// SweepQueue rotates the queue exactly once, dropping the nodes of dead (tombstoned) items and handing each dropped
-// node to onDrop; live nodes are pushed back, so their FIFO order and reference counters are fully preserved. This is
-// the same reclamation the eviction pass performs lazily, just done in bulk: it exists so that tombstones from Delete
-// and TTL expiry do not pile up when the cache stays below capacity and eviction never runs. The pool is needed to
-// resolve node indices into state records. O(len) pops and pushes; fully drained chunks are released to the GC by Pop
-// as usual. NOT thread-safe: call under the shard mutex.
+// SweepQueue rotates the queue once, handing the nodes of dead items to onDrop and pushing live ones back, so their
+// FIFO order and reference counters are preserved. It reclaims in bulk the tombstones that eviction would otherwise
+// only reach under capacity pressure. The pool resolves node indices.
 func SweepQueue[K comparable, V any](q *EvictQueue, pool *Pool[K, V], onDrop func(QNode)) {
 	for n := q.size; n > 0; n-- {
 		node, ok := q.Pop()
@@ -87,8 +81,8 @@ func SweepQueue[K comparable, V any](q *EvictQueue, pool *Pool[K, V], onDrop fun
 }
 
 // Range calls f for every queued node in FIFO order without disturbing the queue. Every claimed record has exactly
-// one node across its shard's queues, so ranging a policy's queues visits each record once - the cache uses this to
-// rebuild a shard's slot table. NOT thread-safe: call under the shard mutex.
+// one node across its shard's queues, so ranging a policy's queues visits each record once - which is what table
+// rebuilds rely on.
 func (q *EvictQueue) Range(f func(QNode)) {
 	start := q.headIdx
 	for chunk := q.head; chunk != nil; chunk = chunk.next {
@@ -103,8 +97,8 @@ func (q *EvictQueue) Range(f func(QNode)) {
 	}
 }
 
-// Pop removes a node from the head. Fully consumed chunks are detached and handed to the GC as a whole; a drained
-// last chunk is reused from the beginning.
+// Pop removes a node from the head. Fully consumed chunks are handed to the GC as a whole; a drained last chunk is
+// reused from the beginning.
 func (q *EvictQueue) Pop() (QNode, bool) {
 	if q.size == 0 {
 		return QNode{}, false

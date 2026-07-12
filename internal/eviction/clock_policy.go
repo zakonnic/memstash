@@ -6,8 +6,8 @@ import (
 	"github.com/zakonnic/memstash/internal/itemstate"
 )
 
-// ClockPolicy is GCLOCK: a single FIFO queue. When the hand passes a node whose reference counter is non-zero, the node
-// loses one chance and is moved to the tail; a node with a zero counter is evicted.
+// ClockPolicy is GCLOCK: a single FIFO queue where a node with a non-zero reference counter loses one chance and
+// moves to the tail, and a node with a zero counter is evicted.
 type ClockPolicy[K comparable, V any] struct {
 	pool *itemstate.Pool[K, V]
 	q    itemstate.EvictQueue
@@ -33,8 +33,7 @@ func (p *ClockPolicy[K, V]) Sweep(release func(idx uint32)) {
 func (p *ClockPolicy[K, V]) Range(f func(itemstate.QNode)) { p.q.Range(f) }
 
 func (p *ClockPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
-	// The loop is finite: each step either removes a node from the queue for good or decrements the chance counter of
-	// its item (at most 2 per item).
+	// Finite: each step removes a node for good or spends one of its at most two chances.
 	for {
 		candidate, ok := p.q.Pop()
 		if !ok {
@@ -44,8 +43,7 @@ func (p *ClockPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 		metaWord := state.Load()
 		switch {
 		case metaWord&itemstate.Dead != 0:
-			// Died earlier (Delete/TTL): its weight is already subtracted, the record goes back to the pool.
-			return candidate.Idx, true
+			return candidate.Idx, true // died earlier (Delete/TTL); weight already subtracted
 		case itemstate.Expired(metaWord, nowOff):
 			state.Kill()
 			return candidate.Idx, true

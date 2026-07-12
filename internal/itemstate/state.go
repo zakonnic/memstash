@@ -1,7 +1,6 @@
-// Package itemstate holds the per-item bookkeeping primitives of the cache's first level: a State record per cached
+// Package itemstate holds the per-item bookkeeping primitives of the cache's first level: a 16-byte State record per
 // item (an immutable key/value box plus eviction metadata), a Pool that recycles those records slab-style, and the
-// chunked FIFO queue of nodes that reference them. A memory hit costs one atomic metadata read and one atomic box
-// load - no locks and no allocations.
+// chunked FIFO queue of nodes that reference them.
 package itemstate
 
 import "sync/atomic"
@@ -10,24 +9,18 @@ import "sync/atomic"
 //
 //	[dead:1][secondChance1:1][secondChance2:1][expireOff:29][gen:32]
 //
-// dead          - tombstone: the item was deleted or evicted, so the eviction queue skips it.
-// secondChance1 - first bit of the "unary" reference counter (reading the item sets this bit, marking it as active).
-// secondChance2 - second bit of the unary reference counter.
-// expireOff     - expiration time in seconds since the cache epoch; 0 means "no TTL".
-// gen           - occupancy generation: bumped every time the state record is handed out to a new key. The lock-free
-// read path identifies items by their immutable Entry box, so gen is not consulted on Get; it remains the cheap
-// occupancy stamp visible in tests and debugging.
+// dead marks a tombstone the eviction queue skips; the two chance bits form a unary reference counter; expireOff is
+// the expiration time in seconds since the cache epoch (0 = no TTL); gen counts the record's occupancies.
 //
-// The unary reference counter is a deliberate choice: increment is an idempotent OR (Go 1.23+ compiles
-// atomic.Uint64.Or into a single LOCK OR instruction) and decrement is an AND. A saturated counter performs no
-// writes at all, so hot keys never bounce the cache line between cores.
+// The unary counter is deliberate: increment is an idempotent OR and decrement an AND, and a saturated counter
+// performs no writes at all, so hot keys never bounce the cache line between cores.
 const (
 	// Dead marks an item as a tombstone.
 	Dead uint64 = 1 << 63
 
 	SecondChance uint64 = 1 << 62
 	ThirdChance  uint64 = 1 << 61
-	// ChanceMask isolates the unary reference counter (with three states: 00, 10 and 11).
+	// ChanceMask isolates the unary reference counter (states 00, 10 and 11).
 	ChanceMask uint64 = SecondChance | ThirdChance
 
 	ExpireShift        = 32
@@ -37,44 +30,40 @@ const (
 
 	// GenMask isolates the occupancy generation.
 	GenMask uint64 = 1<<32 - 1
-	// AliveGenMask Dead|GenMask lets a single mask-and-compare check "alive and still this generation".
+	// AliveGenMask checks "alive and still this generation" with one mask-and-compare.
 	AliveGenMask = Dead | GenMask
 )
 
-// Entry is the immutable key/value box of one cached item. It is allocated once per Set and never mutated after
-// being published, which is what makes the lock-free read path safe for arbitrary key and value types: a reader
-// either sees the whole box or a different (older/newer) whole box - never a torn mix. Overwriting a key swaps the
-// record's box pointer; the record, its queue node and its table slot stay put.
+// Entry is the immutable key/value box of one cached item: allocated once per Set, never mutated after publication.
+// That is what makes lock-free reads safe for arbitrary key and value types - a reader sees a whole box (old or
+// new), never a torn mix. Overwriting a key swaps the record's box pointer; everything else stays put.
 type Entry[K comparable, V any] struct {
 	Key   K
 	Value V
 }
 
-// State is a cached item's bookkeeping record: an atomic pointer to the item's immutable Entry box plus eviction
-// metadata. The record is a fixed 16 bytes for every key/value type, sits by value inside a pool chunk and is reused
-// without allocations.
+// State is a cached item's record: an atomic pointer to its Entry box plus eviction metadata. Fixed 16 bytes for any
+// key/value types; lives by value inside a pool chunk and is reused without allocations.
 type State[K comparable, V any] struct {
 	entry atomic.Pointer[Entry[K, V]]
 	meta  atomic.Uint64
 }
 
-// Entry returns the record's current key/value box: nil only while the record rests on the pool freelist. Safe to
-// call lock-free; the box itself is immutable.
+// Entry returns the record's current box: nil only while the record rests on the pool freelist.
 func (s *State[K, V]) Entry() *Entry[K, V] { return s.entry.Load() }
 
-// SetEntry publishes a new key/value box (an in-place overwrite of the item's value). Called only under the shard
-// mutex; concurrent readers see either the old or the new box.
+// SetEntry publishes a new box (an in-place value overwrite). Called under the shard mutex; concurrent readers see
+// either the old or the new box.
 func (s *State[K, V]) SetEntry(e *Entry[K, V]) { s.entry.Store(e) }
 
 // Gen returns the record's current occupancy generation.
 func (s *State[K, V]) Gen() uint32 { return uint32(s.meta.Load()) }
 
-// Load returns the current meta word. A single atomic load checks tombstone and expiration consistently.
+// Load returns the current meta word.
 func (s *State[K, V]) Load() uint64 { return s.meta.Load() }
 
-// TouchWith sets the next bit of the unary reference counter. It takes an already-loaded meta word and does nothing
-// once the counter is saturated. A false positive on a reused record is possible (Get racing with eviction) and is
-// harmless: some other key gets one extra second chance, correctness is not affected.
+// TouchWith sets the next bit of the reference counter, given an already-loaded meta word; a saturated counter
+// writes nothing. A false positive on a reused record (Get racing eviction) just grants a stranger one extra chance.
 func (s *State[K, V]) TouchWith(metaWord uint64) {
 	switch {
 	case metaWord&SecondChance == 0:
@@ -84,7 +73,7 @@ func (s *State[K, V]) TouchWith(metaWord uint64) {
 	}
 }
 
-// RevokeChance withdraws a single second chance. Called only under the shard mutex.
+// RevokeChance withdraws one second chance. Called under the shard mutex.
 func (s *State[K, V]) RevokeChance(metaWord uint64) {
 	if metaWord&ThirdChance != 0 {
 		s.meta.And(^ThirdChance)
@@ -93,21 +82,19 @@ func (s *State[K, V]) RevokeChance(metaWord uint64) {
 	s.meta.And(^SecondChance)
 }
 
-// ResetChances clears the reference counter (used when promoting an item from small to main in S3-FIFO). Called only
-// under the shard mutex.
+// ResetChances clears the reference counter (S3-FIFO promotion from small to main). Called under the shard mutex.
 func (s *State[K, V]) ResetChances() {
 	s.meta.And(^ChanceMask)
 }
 
-// Kill marks the item as a tombstone; it is wait-free (a single LOCK OR instruction). It returns true if this very
-// call performed the alive -> dead transition. Every kill runs under the shard mutex, so for a live item the result
-// is always true; the return value is kept to document the "whoever kills it accounts for its weight" protocol.
+// Kill marks the item as a tombstone (wait-free) and reports whether this call performed the alive -> dead
+// transition - whoever kills the item accounts for its weight.
 func (s *State[K, V]) Kill() bool {
 	return s.meta.Or(Dead)&Dead == 0
 }
 
-// RefreshExpire extends the item's TTL while preserving its generation and reference counter. A race with a
-// concurrent touch may lose one second chance - that is harmless.
+// RefreshExpire extends the TTL, preserving the generation and reference counter. A race with a concurrent touch may
+// lose one second chance - harmless.
 func (s *State[K, V]) RefreshExpire(expireOff uint32) {
 	metaWord := s.meta.Load()
 	s.meta.Store(metaWord&^ExpireMask | uint64(expireOff)<<ExpireShift)

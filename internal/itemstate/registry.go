@@ -6,32 +6,26 @@ import (
 	"unsafe"
 )
 
-// maxChunks caps the global index space at 2^32 records (maxChunks * poolChunkSize)
-const maxChunks = 1 << 25 // = 32 - 7 for 128 records per poolChunk
+// maxChunks caps the global index space at 2^32 records (maxChunks * poolChunkSize).
+const maxChunks = 1 << 25
 
-// MaxRecords is the largest number of records a Registry can ever address: idx is a uint32 shared by every shard's
-// Pool, so this is a cache-wide ceiling that adding shards cannot raise.
+// MaxRecords is the largest number of records a Registry can address: idx is a uint32 shared by every shard's Pool,
+// a cache-wide ceiling that adding shards cannot raise.
 const MaxRecords = int64(maxChunks) * poolChunkSize
 
 // Registry is the cache-wide directory of pool chunks: every chunk allocated by any shard's Pool is registered here
-// and receives a global 32-bit index range. The directory is published as an atomic pointer to its first element, so
-// At is lock-free and safe concurrently with registration - that is what lets the cache's Get path resolve a table
-// slot's pool index into its state record without taking the shard mutex (and lets the slot hold a 4-byte index
-// instead of a pointer).
-//
-// The zero value is ready to use.
+// and receives a global 32-bit index range. At is lock-free, which lets the Get path resolve a table slot's index
+// without the shard mutex. The zero value is ready to use.
 type Registry[K comparable, V any] struct {
 	mu     sync.Mutex
 	chunks []*poolChunk[K, V]
 	// base is the readers' view: &chunks[0], republished after every append. At indexes off it with raw pointer
-	// arithmetic - no slice header load and no bounds check, which keeps the Get hot path at two dependent loads
-	// (chunk pointer, then the record's meta word in the caller).
+	// arithmetic - no slice header load, no bounds check.
 	//
-	// Safety of the missing bounds check rests on the publication order: a chunk is registered (and base republished)
-	// strictly before any index into it is handed out by Claim, and that index reaches a reader only through a table
-	// slot stored later still - the slot load's acquire semantics therefore guarantee the reader observes both the
-	// directory element and, if append relocated the directory, the new base. Old bases stay valid for stragglers:
-	// a superseded array still holds correct chunk pointers for every index that was in range when it was current.
+	// The missing bounds check is sound because of publication order: a chunk is registered (and base republished)
+	// before any index into it leaves Claim, and that index reaches a reader only through a table slot stored later
+	// still - so the reader observes both the directory element and, if append relocated the directory, the new base.
+	// Old bases stay valid for stragglers: a superseded array still resolves every index that was in range for it.
 	base atomic.Pointer[*poolChunk[K, V]]
 }
 
@@ -49,15 +43,15 @@ func (r *Registry[K, V]) register(chunk *poolChunk[K, V]) uint32 {
 	return base
 }
 
-// At resolves a global pool index into its state record.
-// idx must have been handed out by a Claim (see base for why that makes the unchecked indexing sound).
+// At resolves a global pool index into its state record. Lock-free; idx must have been handed out by a Claim (see
+// base for why that makes the unchecked indexing sound).
 func (r *Registry[K, V]) At(idx uint32) *State[K, V] {
-	basePtr := unsafe.Pointer(r.base.Load()) // r.base.Load() gives atomic load with no locks
+	basePtr := unsafe.Pointer(r.base.Load())
 	chunk := *(**poolChunk[K, V])(unsafe.Add(basePtr, uintptr(idx/poolChunkSize)*unsafe.Sizeof(basePtr)))
 	return &chunk.states[idx%poolChunkSize]
 }
 
-// Bytes returns the memory footprint of every registered chunk plus the directory's backing array.
+// Bytes returns the footprint of every registered chunk plus the directory's backing array.
 func (r *Registry[K, V]) Bytes() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
