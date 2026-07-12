@@ -12,6 +12,10 @@ var (
 	ErrCapacityTooLarge = errors.New("memstash: MemoryCapacity exceeds the addressable pool index space (2^32 records)")
 	ErrUnknownPolicy    = errors.New("memstash: unknown eviction policy")
 	ErrNilLoader        = errors.New("memstash: loader must not be nil")
+	ErrBadTTL           = errors.New("memstash: TTL must not be negative")
+	// ErrLoaderPanic resolves the singleflight of a loader that panicked: the panic itself propagates to the caller
+	// that ran the loader, while every waiter joined on that flight receives this error instead of hanging forever.
+	ErrLoaderPanic = errors.New("memstash: loader panicked")
 )
 
 // Config holds the cache configuration. Pass it to NewWithConfig directly, or configure the cache field by field

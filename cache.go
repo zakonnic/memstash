@@ -119,6 +119,9 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.Policy != PolicyClock && cfg.Policy != PolicyS3FIFO {
 		return nil, ErrUnknownPolicy
 	}
+	if cfg.TTL < 0 {
+		return nil, ErrBadTTL
+	}
 
 	numShards := cfg.shardCount()
 	c := &Cache[K, V]{
@@ -175,10 +178,23 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 }
 
 // Close stops the background goroutines and waits for the write-back buffer to drain. Repeated calls are safe.
+// A Set that starts strictly after Close returns still reaches L2 (synchronously); a Set racing with Close may
+// lose its asynchronous write.
 func (c *Cache[K, V]) Close() {
 	c.closeOnce.Do(func() {
 		close(c.stop)
 		c.wg.Wait()
+		if c.writeCh != nil {
+			// Catch writes that slipped into the buffer while the worker was shutting down.
+			for {
+				select {
+				case write := <-c.writeCh:
+					c.flushWrite(write)
+				default:
+					return
+				}
+			}
+		}
 	})
 }
 
@@ -279,6 +295,10 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 	sh := c.shardOf(key)
 	if weight > sh.cap {
 		// The item plainly does not fit - do not let it wreck the cache.
+		// An older value stored under the same key must not keep serving reads: drop it.
+		sh.mu.Lock()
+		c.deleteLocked(sh, key)
+		sh.mu.Unlock()
 		return
 	}
 
@@ -388,16 +408,22 @@ func (c *Cache[K, V]) noteDead(sh *shard[K, V]) {
 	}
 }
 
-// Delete removes the key from memory and from L2 (synchronously, unless L2 writes are disabled). The state record
-// returns to the pool on the next eviction pass or tombstone sweep.
-func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
-	sh := c.shardOf(key)
-	sh.mu.Lock()
+// deleteLocked removes the key's map entry, kills its state record and subtracts its weight. Called under the shard
+// mutex; a missing key is a no-op.
+func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], key K) {
 	if entry, ok := c.items.LoadAndDelete(key); ok {
 		sh.pool.At(entry.idx).Kill()
 		sh.weight.Add(-c.rawCost(key, entry.value))
 		c.noteDead(sh)
 	}
+}
+
+// Delete removes the key from memory and from L2 (synchronously, unless L2 writes are disabled). The state record
+// returns to the pool on the next eviction pass or tombstone sweep.
+func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
+	sh := c.shardOf(key)
+	sh.mu.Lock()
+	c.deleteLocked(sh, key)
 	sh.mu.Unlock()
 
 	if c.l2WritePolicy != WriteDisabled {
@@ -430,7 +456,19 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		}
 	}
 
+	finished := false
+	defer func() {
+		if finished {
+			return
+		}
+		// The loader panicked (or called runtime.Goexit): resolve the flight so waiters are not stuck forever and the
+		// key stays loadable; the panic itself keeps propagating to this caller.
+		call.err = ErrLoaderPanic
+		c.flights.Delete(key)
+		close(call.done)
+	}()
 	value, err := c.doLoad(ctx, key, load)
+	finished = true
 	call.val, call.err, call.ok = value, err, err == nil
 	c.flights.Delete(key) // before close: new calls will start a fresh flight
 	close(call.done)
@@ -553,15 +591,33 @@ func (c *Cache[K, V]) singleflight(ctx context.Context, load BatchLoaderFunc[K, 
 
 	var loadErr error
 	if len(owned) > 0 {
+		finished := false
+		defer func() {
+			if finished {
+				return
+			}
+			// The loader panicked (or called runtime.Goexit): resolve every owned flight so waiters are not stuck
+			// forever and the keys stay loadable; the panic itself keeps propagating to this caller.
+			for _, key := range owned {
+				call := ownedCalls[key]
+				call.err = ErrLoaderPanic
+				c.flights.Delete(key)
+				close(call.done)
+			}
+		}()
 		resolved, err := c.batchLoad(ctx, owned, load)
 		loadErr = err
 
 		// Publish every resolved value to its flight.
 		for _, item := range resolved {
-			call := ownedCalls[item.Key]
+			call, isOwned := ownedCalls[item.Key]
+			if !isOwned {
+				continue // the loader returned a key nobody asked for: cached by batchLoad, but not part of this call
+			}
 			call.val, call.ok = item.Value, true
 			*found = append(*found, item)
 		}
+		finished = true
 		// Close every owned flight; the ones left unresolved carry the (possibly nil) error.
 		for _, key := range owned {
 			call := ownedCalls[key]
@@ -754,40 +810,52 @@ func (c *Cache[K, V]) clockLoop() {
 	}
 }
 
-// enqueueWriteBack puts a write into the worker's buffer; on overflow or when the cache is closed items writes
+// enqueueWriteBack puts a write into the worker's buffer; on overflow or when the cache is closed it writes
 // synchronously so no data is lost.
 func (c *Cache[K, V]) enqueueWriteBack(key K, value V) {
-	select {
-	case c.writeCh <- l2Write[K, V]{key: key, value: value}:
-	default:
+	syncWrite := func() {
 		if err := c.l2Cache.Set(context.Background(), key, value, c.ttl); err != nil {
 			c.reportL2Err(key, err)
 		}
 	}
+	select {
+	case <-c.stop:
+		// The worker is gone (Close was called): a buffered send would park the value in a channel nobody drains.
+		syncWrite()
+		return
+	default:
+	}
+	select {
+	case c.writeCh <- l2Write[K, V]{key: key, value: value}:
+	default:
+		syncWrite()
+	}
 }
 
-// writeBackLoop is the background worker for asynchronous L2 writes. On shutdown items flushes everything left in the
+// flushWrite hands one write-back task to L2; a flush marker releases its Wait checkpoint instead.
+func (c *Cache[K, V]) flushWrite(write l2Write[K, V]) {
+	if write.flush != nil {
+		close(write.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
+		return
+	}
+	if err := c.l2Cache.Set(context.Background(), write.key, write.value, c.ttl); err != nil {
+		c.reportL2Err(write.key, err)
+	}
+}
+
+// writeBackLoop is the background worker for asynchronous L2 writes. On shutdown it flushes everything left in the
 // buffer.
 func (c *Cache[K, V]) writeBackLoop() {
 	defer c.wg.Done()
-	flush := func(write l2Write[K, V]) {
-		if write.flush != nil {
-			close(write.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
-			return
-		}
-		if err := c.l2Cache.Set(context.Background(), write.key, write.value, c.ttl); err != nil {
-			c.reportL2Err(write.key, err)
-		}
-	}
 	for {
 		select {
 		case write := <-c.writeCh:
-			flush(write)
+			c.flushWrite(write)
 		case <-c.stop:
 			for {
 				select {
 				case write := <-c.writeCh:
-					flush(write)
+					c.flushWrite(write)
 				default:
 					return
 				}
