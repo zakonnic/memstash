@@ -100,6 +100,18 @@ func (s *State[K, V]) RefreshExpire(expireOff uint32) {
 	s.meta.Store(metaWord&^ExpireMask | uint64(expireOff)<<ExpireShift)
 }
 
+// TouchAndRefreshExpire extends the TTL and grants the touch in one CAS from the lock-free read path.
+func (s *State[K, V]) TouchAndRefreshExpire(metaWord uint64, expireOff uint32) bool {
+	newWord := metaWord&^ExpireMask | uint64(expireOff)<<ExpireShift
+	switch {
+	case metaWord&SecondChance == 0:
+		newWord |= SecondChance
+	case metaWord&ThirdChance == 0:
+		newWord |= ThirdChance
+	}
+	return s.meta.CompareAndSwap(metaWord, newWord)
+}
+
 // Expired reports whether the TTL has elapsed for the given loaded meta word.
 func Expired(metaWord uint64, nowOff uint32) bool {
 	expireOff := uint32((metaWord & ExpireMask) >> ExpireShift)

@@ -30,6 +30,7 @@ type FieldOverrides struct {
 	memoryCapacity  *int64
 	memoryBudget    *int64
 	ttl             *time.Duration
+	refreshTTLOnGet *bool
 	policy          *Policy
 	shards          *int
 	writePolicy     *WritePolicy
@@ -63,6 +64,9 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 	}
 	if fields.ttl != nil {
 		cfg.TTL = *fields.ttl
+	}
+	if fields.refreshTTLOnGet != nil {
+		cfg.RefreshTTLOnGet = *fields.refreshTTLOnGet
 	}
 	if fields.policy != nil {
 		cfg.Policy = *fields.policy
@@ -116,6 +120,14 @@ func WithCostFunc[K comparable, V any](costFunc func(key K, value V) uint32) Opt
 // WithTTL sets Config.TTL: the lifetime of first-level items.
 func WithTTL(ttl time.Duration) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.ttl = &ttl }}
+}
+
+// WithRefreshTTLOnGet sets Config.RefreshTTLOnGet (sliding expiration).
+func WithRefreshTTLOnGet() Option {
+	return Option{ApplyField: func(f *FieldOverrides) {
+		on := true
+		f.refreshTTLOnGet = &on
+	}}
 }
 
 // WithPolicy sets Config.Policy: the eviction policy.

@@ -214,6 +214,33 @@ func TestOverwriteRefreshesTTL(t *testing.T) {
 	assert.Equal(t, "v2", v)
 }
 
+func TestRefreshTTLOnGet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow TTL test")
+	}
+	ctx := context.Background()
+	c, err := memstash.New[string, string](
+		memstash.WithMemoryCapacity(100),
+		memstash.WithTTL(time.Second),
+		memstash.WithRefreshTTLOnGet(),
+	)
+	require.NoError(t, err)
+	defer c.Close()
+
+	require.NoError(t, c.Set(ctx, "k", "v"))
+	// Keep hitting the key well past the point TestTTLExpiry relies on to call it expired; each hit slides the TTL.
+	for range 6 {
+		time.Sleep(500 * time.Millisecond)
+		_, ok := c.GetFromMemory("k")
+		require.True(t, ok, "a hit did not slide the TTL: the item expired while being read")
+	}
+
+	time.Sleep(3 * time.Second) // no more hits: the slid TTL must still run out
+	_, ok := c.GetFromMemory("k")
+	assert.False(t, ok, "value is still alive after the TTL elapsed without hits")
+	assert.EqualValues(t, 0, c.Weight(), "weight of the expired item was not subtracted")
+}
+
 func TestTotalWeight(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range policies {

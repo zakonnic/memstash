@@ -40,6 +40,9 @@ type Config[K comparable, V any] struct {
 	// on writes.
 	TTL time.Duration
 
+	// RefreshTTLOnGet makes every first-level hit extend the item's lifetime by a full TTL (sliding expiration).
+	RefreshTTLOnGet bool
+
 	// Policy is the eviction policy. Defaults to PolicyClock.
 	Policy Policy
 

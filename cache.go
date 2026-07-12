@@ -60,10 +60,11 @@ type Cache[K comparable, V any] struct {
 
 	// Coarse clock for cheap TTL checks: nowOff is the number of seconds since epoch, refreshed by a background ticker
 	// (started only when TTL > 0).
-	epoch  time.Time
-	nowOff atomic.Uint32
-	ttlSec uint32
-	ttl    time.Duration
+	epoch        time.Time
+	nowOff       atomic.Uint32
+	ttlSec       uint32
+	ttl          time.Duration
+	refreshOnGet bool
 
 	l2Cache       L2Cache[K, V]
 	l2WritePolicy WritePolicy // always WriteDisabled when l2Cache not set
@@ -174,6 +175,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		if c.ttlSec == 0 {
 			c.ttlSec = 1 // TTL resolution is one second, so use at least one
 		}
+		c.refreshOnGet = cfg.RefreshTTLOnGet
 		c.wg.Add(1)
 		go c.clockLoop()
 	}
@@ -283,7 +285,13 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 			continue // tag collision or a recycled record
 		}
 		expireOff := uint32((metaWord & itemstate.ExpireMask) >> itemstate.ExpireShift)
-		if expireOff == 0 || expireOff > c.nowOff.Load() {
+		nowOff := c.nowOff.Load()
+		if expireOff == 0 || expireOff > nowOff {
+			if c.refreshOnGet {
+				if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && state.TouchAndRefreshExpire(metaWord, newOff) {
+					return entry.Value, true
+				}
+			}
 			state.TouchWith(metaWord)
 			return entry.Value, true
 		}
@@ -897,7 +905,12 @@ func (c *Cache[K, V]) expireOffset() uint32 {
 	if c.ttlSec == 0 {
 		return 0
 	}
-	expireOff := c.nowOff.Load() + c.ttlSec + 1
+	return c.expireOffsetAt(c.nowOff.Load())
+}
+
+// expireOffsetAt is expireOffset for an already-loaded clock value; only meaningful when TTL is enabled.
+func (c *Cache[K, V]) expireOffsetAt(nowOff uint32) uint32 {
+	expireOff := nowOff + c.ttlSec + 1
 	if expireOff > itemstate.ExpireMax {
 		expireOff = itemstate.ExpireMax // effectively "never": clamp instead of overflowing
 	}
