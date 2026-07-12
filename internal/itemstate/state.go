@@ -37,6 +37,11 @@ const (
 	ExpireMask  uint64 = (1<<29 - 1) << ExpireShift
 	// ExpireMax is the maximum expiration offset (29 bits, ~17 years).
 	ExpireMax = 1<<29 - 1
+
+	// GenMask isolates the occupancy generation.
+	GenMask uint64 = 1<<32 - 1
+	// AliveGenMask Dead|GenMask lets a single mask-and-compare check "alive and still this generation".
+	AliveGenMask = Dead | GenMask
 )
 
 // State is a cached item's bookkeeping record: its key and eviction metadata. The value itself is not stored here -

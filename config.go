@@ -8,12 +8,10 @@ import (
 )
 
 var (
-	// ErrBadCapacity is returned by the constructor when MemoryCapacity <= 0.
-	ErrBadCapacity = errors.New("memstash: MemoryCapacity must be positive")
-	// ErrUnknownPolicy is returned by the constructor for an unknown eviction policy.
-	ErrUnknownPolicy = errors.New("memstash: unknown eviction policy")
-	// ErrNilLoader is returned when the loader function is not provided.
-	ErrNilLoader = errors.New("memstash: loader must not be nil")
+	ErrBadCapacity      = errors.New("memstash: MemoryCapacity must be positive")
+	ErrCapacityTooLarge = errors.New("memstash: MemoryCapacity exceeds the addressable pool index space (2^32 records)")
+	ErrUnknownPolicy    = errors.New("memstash: unknown eviction policy")
+	ErrNilLoader        = errors.New("memstash: loader must not be nil")
 )
 
 // Config holds the cache configuration. Pass it to NewWithConfig directly, or configure the cache field by field

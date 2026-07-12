@@ -32,12 +32,14 @@ const (
 	DefaultMemoryCapacity = 20_000
 )
 
-// cacheItem is the item as stored in the map: the payload, a pointer to the item's state record, and the generation
-// the record was handed out to this key at. A generation mismatch means the record has already been reused, i.e. the
-// item was evicted.
+// cacheItem is the item as stored in the map: the payload, the pool index of the item's state record, and the
+// generation the record was handed out to this key at. A generation mismatch means the record has already been
+// reused, i.e. the item was evicted. The 4-byte index (resolved lock-free through the cache-wide chunk registry)
+// takes the place of an 8-byte pointer, which together with the padding it would drag along keeps the entry 8 bytes
+// slimmer per item.
 type cacheItem[K comparable, V any] struct {
 	value V
-	state *itemstate.State[K]
+	idx   uint32
 	gen   uint32
 }
 
@@ -57,6 +59,7 @@ type shard[K comparable, V any] struct {
 // Cache is a two-level cache.
 type Cache[K comparable, V any] struct {
 	items    *xsync.MapOf[K, cacheItem[K, V]]
+	registry *itemstate.Registry[K] // resolves the pool indices kept in map entries; shared by all shard pools
 	costFunc func(key K, value V) uint32
 
 	shards    []shard[K, V]
@@ -109,6 +112,10 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		}
 		cfg.MemoryCapacity = DefaultMemoryCapacity
 	}
+	// Cache can hold up to MaxRecords, but with CostFunc MemoryCapacity can be bigger than number of records.
+	if cfg.CostFunc == nil && cfg.MemoryCapacity > itemstate.MaxRecords {
+		return nil, ErrCapacityTooLarge
+	}
 	if cfg.Policy != PolicyClock && cfg.Policy != PolicyS3FIFO {
 		return nil, ErrUnknownPolicy
 	}
@@ -116,6 +123,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	numShards := cfg.shardCount()
 	c := &Cache[K, V]{
 		items:         xsync.NewMapOf[K, cacheItem[K, V]](),
+		registry:      &itemstate.Registry[K]{},
 		costFunc:      cfg.CostFunc,
 		shards:        make([]shard[K, V], numShards),
 		shardMask:     uint32(numShards - 1),
@@ -140,6 +148,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		if int64(i) < remainder {
 			sh.cap++ // spread the capacity remainder over the first shards
 		}
+		sh.pool = itemstate.NewPool(c.registry)
 		switch cfg.Policy {
 		case PolicyS3FIFO:
 			sh.policy = eviction.NewS3FIFO(&sh.pool, sh.cap, ghostPerShard)
@@ -228,16 +237,18 @@ func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 	item, ok := c.items.Load(key)
 	if ok {
-		metaWord := item.state.Load()
-		// A single meta load checks both the generation and the tombstone bit: a state record reused by another key is
-		// rejected by the generation comparison.
-		if uint32(metaWord) == item.gen && metaWord&itemstate.Dead == 0 {
-			if !itemstate.Expired(metaWord, c.nowOff.Load()) {
-				item.state.TouchWith(metaWord)
+		state := c.registry.At(item.idx)
+		metaWord := state.Load()
+		// A single meta load checks both the generation and the tombstone bit:
+		// a state record reused by another key is rejected by the generation comparison.
+		if metaWord&(itemstate.AliveGenMask) == uint64(item.gen) {
+			expireOff := uint32((metaWord & itemstate.ExpireMask) >> itemstate.ExpireShift)
+			if expireOff == 0 || expireOff > c.nowOff.Load() {
+				state.TouchWith(metaWord)
 				return item.value, true
 			}
 			// TTL has elapsed - drop the item lazily instead of waiting for the eviction queue to reach it.
-			c.dropExpired(key, item.state, item.gen)
+			c.dropExpired(key, item.idx, item.gen)
 		}
 	}
 	var zero V
@@ -282,13 +293,13 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 			// Overwrite in place: the state record and its position in the queue stay the same.
 			weightDelta = weight - c.rawCost(key, old.value)
 			if c.ttlSec != 0 {
-				c.refreshExpire(old.state)
+				c.refreshExpire(sh.pool.At(old.idx))
 			}
-			return cacheItem[K, V]{value: value, state: old.state, gen: old.gen}, false
+			return cacheItem[K, V]{value: value, idx: old.idx, gen: old.gen}, false
 		}
-		newState, gen, idx := sh.pool.Claim(key, c.expireOffset())
+		_, gen, idx := sh.pool.Claim(key, c.expireOffset())
 		claimed, claimedIdx = true, idx
-		return cacheItem[K, V]{value: value, state: newState, gen: gen}, false
+		return cacheItem[K, V]{value: value, idx: idx, gen: gen}, false
 	})
 	if claimed {
 		sh.policy.Add(itemstate.QNode{Idx: claimedIdx, Cost: uint32(weight)})
@@ -313,7 +324,7 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V]) {
 		if !ok {
 			return
 		}
-		c.unlink(sh, sh.pool.At(victimIdx))
+		c.unlink(sh, victimIdx)
 		sh.pool.Release(victimIdx)
 	}
 }
@@ -321,8 +332,9 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V]) {
 // unlink removes the map entry that corresponds to exactly this state record in its current generation and subtracts
 // its weight. For items that died earlier (Delete, lazy TTL removal) the entry is already gone and its weight already
 // subtracted - Compute finds nothing and zero is subtracted.
-func (c *Cache[K, V]) unlink(sh *shard[K, V], victim *itemstate.State[K]) {
+func (c *Cache[K, V]) unlink(sh *shard[K, V], victimIdx uint32) {
 	var removedWeight int64
+	victim := sh.pool.At(victimIdx)
 	victimGen := victim.Gen()
 	c.items.Compute(victim.Key, func(old cacheItem[K, V], loaded bool) (cacheItem[K, V], bool) {
 		if !loaded {
@@ -330,7 +342,7 @@ func (c *Cache[K, V]) unlink(sh *shard[K, V], victim *itemstate.State[K]) {
 			// value.
 			return old, true
 		}
-		if old.state == victim && old.gen == victimGen {
+		if old.idx == victimIdx && old.gen == victimGen {
 			removedWeight = c.rawCost(victim.Key, old.value)
 			return old, true
 		}
@@ -341,9 +353,10 @@ func (c *Cache[K, V]) unlink(sh *shard[K, V], victim *itemstate.State[K]) {
 
 // dropExpired lazily removes a TTL-expired item from the Get path. The state record stays in the queue as a tombstone
 // and returns to the pool on the next eviction pass or tombstone sweep.
-func (c *Cache[K, V]) dropExpired(key K, state *itemstate.State[K], gen uint32) {
+func (c *Cache[K, V]) dropExpired(key K, idx uint32, gen uint32) {
 	sh := c.shardOf(key)
 	sh.mu.Lock()
+	state := sh.pool.At(idx)
 	metaWord := state.Load()
 	if uint32(metaWord) == gen && metaWord&itemstate.Dead == 0 && itemstate.Expired(metaWord, c.nowOff.Load()) {
 		state.Kill()
@@ -381,7 +394,7 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	sh := c.shardOf(key)
 	sh.mu.Lock()
 	if entry, ok := c.items.LoadAndDelete(key); ok {
-		entry.state.Kill()
+		sh.pool.At(entry.idx).Kill()
 		sh.weight.Add(-c.rawCost(key, entry.value))
 		c.noteDead(sh)
 	}
@@ -681,6 +694,7 @@ func (c *Cache[K, V]) TotalWeight() int64 {
 	total += int64(len(c.shards)) * int64(unsafe.Sizeof(shard[K, V]{}))
 	total += int64(stats.TotalBuckets)*xsyncBucketBytes + int64(stats.Size)*entryBytes
 	total += int64(c.flights.Stats().TotalBuckets) * xsyncBucketBytes
+	total += c.registry.Bytes() // every shard pool's chunks, accounted once
 
 	for i := range c.shards {
 		sh := &c.shards[i]

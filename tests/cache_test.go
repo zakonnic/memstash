@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zakonnic/memstash"
+	"github.com/zakonnic/memstash/internal/itemstate"
 )
 
 // policies is the eviction-policy axis shared by the table-driven tests.
@@ -256,6 +257,18 @@ func TestNewValidation(t *testing.T) {
 			opts:    []memstash.Option{memstash.WithMemoryCapacity(1), memstash.WithPolicy(memstash.Policy(42))},
 			wantErr: memstash.ErrUnknownPolicy,
 		},
+		{
+			name:    "capacity beyond the 32-bit pool index space",
+			opts:    []memstash.Option{memstash.WithMemoryCapacity(itemstate.MaxRecords + 1)},
+			wantErr: memstash.ErrCapacityTooLarge,
+		},
+		{
+			name: "capacity beyond the 32-bit pool index space is not checked when a cost function is set",
+			opts: []memstash.Option{
+				memstash.WithMemoryCapacity(itemstate.MaxRecords + 1),
+				memstash.WithCostFunc(func(string, string) uint32 { return 1 }),
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -312,5 +325,49 @@ func TestShardedCapacityAndConsistency(t *testing.T) {
 		if value, ok := c.GetFromMemory(key); ok {
 			assert.Equal(t, key*7, value, "corrupted value for key %d", key)
 		}
+	}
+}
+
+// TestConcurrentReadsDuringGrowth hammers lock-free reads of a fixed hot set while a writer keeps inserting fresh
+// keys, forcing the shared chunk registry to grow and republish its directory continuously. A reader observing a torn
+// directory or a stale chunk would return a corrupted value or crash.
+func TestConcurrentReadsDuringGrowth(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range policies {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := memstash.New[int, int](memstash.WithMemoryCapacity(200_000), memstash.WithPolicy(tc.policy))
+			require.NoError(t, err)
+			defer c.Close()
+
+			const hotKeys = 1000
+			for key := 0; key < hotKeys; key++ {
+				require.NoError(t, c.Set(ctx, key, key*3))
+			}
+
+			done := make(chan struct{})
+			var wg sync.WaitGroup
+			for g := 0; g < 3; g++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for key := 0; ; key = (key + 1) % hotKeys {
+						select {
+						case <-done:
+							return
+						default:
+						}
+						if value, ok := c.GetFromMemory(key); ok {
+							assert.Equal(t, key*3, value, "corrupted value for key %d", key)
+						}
+					}
+				}()
+			}
+			// The writer grows the pool by ~1.5k chunks across the shards while the readers run.
+			for key := hotKeys; key < 200_000; key++ {
+				require.NoError(t, c.Set(ctx, key, key*3))
+			}
+			close(done)
+			wg.Wait()
+		})
 	}
 }
