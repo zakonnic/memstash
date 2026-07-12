@@ -11,8 +11,8 @@ import (
 // Workloads for comparing hit rate. Every generator is deterministic (the seed is fixed), so each cache receives
 // exactly the same stream.
 const (
-	keyspace = 1_000_000 // cardinality of the key space
-	requests = 1_000_000 // length of the request stream
+	keyspace = 4_000_000 // cardinality of the key space
+	requests = 4_000_000 // length of the request stream
 )
 
 // zipfTrace is a classic Zipfian popularity distribution (s close to 1): a small hot core and a long tail.
@@ -87,7 +87,7 @@ func runHitRateSuite(t *testing.T) {
 		{"zipf+scan", scanTrace()},
 		{"one-hit-30%", oneHitTrace()},
 	}
-	capacities := []int64{10_000, 100_000, 500_000} // 1%, 10% and 50% of the key space
+	capacities := []int64{10_000, 100_000, 500_000} // ~1%, ~11% and ~54% of the ~930k unique keys a zipf trace touches
 
 	for _, capacity := range capacities {
 		t.Logf("---- capacity %d items ----", capacity)

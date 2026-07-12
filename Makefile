@@ -34,7 +34,9 @@ cover: cover-gen ## Show coverage html
 bench-speed: ## Run speed benchmarks
 	go -C benchmarks test -run xxx -bench . ./...
 bench-hitrate: ## Run hitrate benchmarks
-	go -C benchmarks test -run TestHitRate -v
+	go -C benchmarks test -run='^TestHitRate$$' -v
+bench-hitrate-real: ## Run hitrate benchmarks
+	go -C benchmarks test -run='^TestHitRateRealistic$$' -v
 .PHONY: bench
 bench: bench-speed bench-hitrate ## Run benchmarks
 
