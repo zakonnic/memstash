@@ -2,7 +2,7 @@
 
 **A blazing-fast, allocation-free, two-level cache for Go. Yet it's convenient and configurable.**
 
-memstash keeps your hot set in a lock-free in-memory tier (L1). When you need to share state across k8-nodes, or just survive a restart, plug in a second tier (L2) backed by Redis, memcached, or any store you wrap. The memory path stays allocation-free and lock-free: a hit is a single map lookup plus one atomic read. On a miss, memstash fetches from L2, promotes the value into memory, and takes care of writing it back.
+Memstash keeps your hot set in a lock-free in-memory tier (L1). When you need to share state across k8-nodes, or just survive a restart, plug in a second tier (L2) backed by Redis, memcached, or any store you wrap. The memory path stays allocation-free and lock-free: a hit is a single map lookup plus one atomic read. On a miss, memstash fetches from L2, promotes the value into memory, and takes care of writing it back.
 
 ```go
 c, _ := memstash.New[string, string]()
@@ -12,12 +12,13 @@ v, ok, err := c.Get(ctx, "hello") // faster than getting from sync.Map
 
 ## Why memstash?
 
-- **Very fast.** Outperforms Ristretto by ~5× and Otter by ~2× in our [benchmarks](#benchmarks).
+- **Very fast.** Outperforms Ristretto by ~6× and Otter by ~2.5× in our [benchmarks](#benchmarks).
 - **Top-tier hit ratio.** The S3-FIFO policy keeps pace with the best W-TinyLFU caches (Otter, Theine) and leaves Ristretto far behind, holding up especially well under scans and one-hit wonders.
+- **Low memory overhead.** Bigcache comes out on top, but Memstash is in the same league - all well ahead of the rest.
 - **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
 - **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No `interface{}`, no casts.
 - **Easy on the GC.** Inserts reuse memory blocks from a pool, so the steady state allocates nothing beyond the internal map entry.
-- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB, DynamoDB, Badger, Tarantool and Aerospike — each in its own module so the core stays clean.
+- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB, DynamoDB, Badger, Tarantool and Aerospike - each in its own module so the core stays clean.
 - **Singleflight built in.** `GetOrLoad` collapses a stampede of concurrent misses on one key into a single load.
 
 ## Table of Contents
@@ -38,7 +39,7 @@ v, ok, err := c.Get(ctx, "hello") // faster than getting from sync.Map
 go get github.com/zakonnic/memstash
 ```
 
-memstash requires Go 1.24+ and has a single core dependency ([xsync](https://github.com/puzpuzpuz/xsync)). Client SDKs are pulled in only by the specific L2 adapter module you import.
+Memstash requires Go 1.24+ and has a single core dependency ([xsync](https://github.com/puzpuzpuz/xsync)). Client SDKs are pulled in only by the specific L2 adapter module you import.
 
 ## Usage
 
@@ -75,7 +76,7 @@ func main() {
 }
 ```
 
-> `GetFromMemory` is the hottest, context-free read path. Use `Get` (which takes a `context.Context`) when an L2 is configured — it may hit the network on a memory miss.
+> `GetFromMemory` is the hottest, context-free read path. Use `Get` (which takes a `context.Context`) when an L2 is configured - it may hit the network on a memory miss.
 
 ### Read-through with a loader (singleflight)
 
@@ -126,12 +127,13 @@ defer c.Close()
 _ = c.Set(ctx, "user:42", user)     // L1 now, Redis shortly after (write-back)
 u, ok, err := c.Get(ctx, "user:42") // L1 hit → returns instantly; L1 miss → Redis, then promoted
 ```
+> Tip: A common way to shard local caches without overlap is to use the Kafka partition key — each partition is consumed by exactly one node, so the cache for a given object lives only on that node.
 
 ## Advanced Configuration
 
 memstash is configured with functional options passed to `New` (or to any adapter's `NewCache*`). Some common setups:
 
-**Byte-budgeted cache** — bound by approximate resident bytes instead of item count; the per-item size (key, value, and the cache's own overhead) is estimated automatically:
+**Byte-budgeted cache** - bound by approximate resident bytes instead of item count; the per-item size (key, value, and the cache's own overhead) is estimated automatically:
 
 ```go
 c, _ := memstash.New[string, []byte](
@@ -139,7 +141,7 @@ c, _ := memstash.New[string, []byte](
 )
 ```
 
-The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For anything more complex construction fails with `ErrBudgetNeedsCostFunc` — provide the byte size yourself:
+The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For anything more complex construction fails with `ErrBudgetNeedsCostFunc` - provide the byte size yourself:
 
 ```go
 c, _ := memstash.New[string, User](
@@ -148,7 +150,7 @@ c, _ := memstash.New[string, User](
 )
 ```
 
-**Consistency to L2 after Set** — make writes synchronous (write-through) so the value is durable in the shared tier before `Set` returns:
+**Synchronous writes on Set** - write-through policy, L2 updated synchronously:
 
 ```go
 c, _ := rueidis_adapter.NewCacheJSON[string, Session](client,
@@ -157,19 +159,47 @@ c, _ := rueidis_adapter.NewCacheJSON[string, Session](client,
 )
 ```
 
-**Batch operations** — amortize the network round trip; adapters use native pipelining / multi-get where the client supports it:
+**Batch operations** - amortize the network round trip; adapters use native pipelining / multi-get where the client supports it:
 
 ```go
 found, _ := c.BatchGet(ctx, []string{"a", "b", "c"})            // one round trip to L2 for the misses
 _ = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b", Value: b}})
 ```
 
-**Non-string keys with a custom key mapping** — provide a key function for the L2 storage key:
+**Non-string keys with a custom key mapping** - provide a key function for the L2 storage key:
 
 ```go
 c, _ := rueidis_adapter.NewCacheJSON[int, User](client,
 	memstash.WithMemoryCapacity(100_000),
 	l2.WithKeyFunc(func(id int) string { return "user:" + strconv.Itoa(id) }),
+)
+```
+
+**Custom serializer** - `NewCache` takes any `memstash.Codec[V]`, so a binary format works just as well as JSON. You can encode each field directly instead of going through JSON:
+
+```go
+type Point struct {
+	X, Y float64
+}
+
+type pointCodec struct{}
+
+func (pointCodec) Marshal(p Point) ([]byte, error) {
+	buf := make([]byte, 16)
+	binary.LittleEndian.PutUint64(buf[0:8], math.Float64bits(p.X))
+	binary.LittleEndian.PutUint64(buf[8:16], math.Float64bits(p.Y))
+	return buf, nil
+}
+
+func (pointCodec) Unmarshal(data []byte) (Point, error) {
+	return Point{
+		X: math.Float64frombits(binary.LittleEndian.Uint64(data[0:8])),
+		Y: math.Float64frombits(binary.LittleEndian.Uint64(data[8:16])),
+	}, nil
+}
+
+c, err := rueidis_adapter.NewCache[int, Point](client, pointCodec{},
+	l2.WithKeyFunc(strconv.Itoa),
 )
 ```
 
@@ -195,21 +225,21 @@ Each adapter is a separate module (`memstash/l2/<name>_adapter`) so the core nev
 
 | Module | Backend / client | context |
 |---|---|---|
-| `l2/goredis_adapter` | Redis — [redis/go-redis](https://github.com/redis/go-redis) | ✅ |
-| `l2/rueidis_adapter` | Redis — [redis/rueidis](https://github.com/redis/rueidis) | ✅ |
-| `l2/redispipe_adapter` | Redis — [joomcode/redispipe](https://github.com/joomcode/redispipe) | ✅ |
-| `l2/redigo_adapter` | Redis — [gomodule/redigo](https://github.com/gomodule/redigo) | partial |
-| `l2/gomemcache_adapter` | memcached — [bradfitz/gomemcache](https://github.com/bradfitz/gomemcache) | ❌ |
-| `l2/rainycape_adapter` | memcached — [rainycape/memcache](https://github.com/rainycape/memcache) | ❌ |
-| `l2/mc_adapter` | memcached — [memcachier/mc](https://github.com/memcachier/mc) | ❌ |
-| `l2/valyala_adapter` | memcached — [valyala/ybc](https://github.com/valyala/ybc) (cgo) | ❌ |
+| `l2/goredis_adapter` | Redis - [redis/go-redis](https://github.com/redis/go-redis) | ✅ |
+| `l2/rueidis_adapter` | Redis - [redis/rueidis](https://github.com/redis/rueidis) | ✅ |
+| `l2/redispipe_adapter` | Redis - [joomcode/redispipe](https://github.com/joomcode/redispipe) | ✅ |
+| `l2/redigo_adapter` | Redis - [gomodule/redigo](https://github.com/gomodule/redigo) | partial |
+| `l2/gomemcache_adapter` | memcached - [bradfitz/gomemcache](https://github.com/bradfitz/gomemcache) | ❌ |
+| `l2/rainycape_adapter` | memcached - [rainycape/memcache](https://github.com/rainycape/memcache) | ❌ |
+| `l2/mc_adapter` | memcached - [memcachier/mc](https://github.com/memcachier/mc) | ❌ |
+| `l2/valyala_adapter` | memcached - [valyala/ybc](https://github.com/valyala/ybc) (cgo) | ❌ |
 | `l2/sql_adapter` | any [database/sql](https://pkg.go.dev/database/sql) engine (SQLite, MySQL, ...) | ✅ |
-| `l2/pgx_adapter` | PostgreSQL — [jackc/pgx](https://github.com/jackc/pgx) (native, pipelined) | ✅ |
-| `l2/badger_adapter` | embedded — [dgraph-io/badger](https://github.com/dgraph-io/badger) | ❌ |
-| `l2/mongo_adapter` | MongoDB — [mongo-driver](https://github.com/mongodb/mongo-go-driver) | ✅ |
-| `l2/dynamo_adapter` | DynamoDB — [aws-sdk-go-v2](https://github.com/aws/aws-sdk-go-v2) | ✅ |
-| `l2/tarantool_adapter` | Tarantool — [go-tarantool](https://github.com/tarantool/go-tarantool) | ✅ |
-| `l2/aerospike_adapter` | Aerospike — [aerospike-client-go](https://github.com/aerospike/aerospike-client-go) | ❌ |
+| `l2/pgx_adapter` | PostgreSQL - [jackc/pgx](https://github.com/jackc/pgx) (native, pipelined) | ✅ |
+| `l2/badger_adapter` | embedded - [dgraph-io/badger](https://github.com/dgraph-io/badger) | ❌ |
+| `l2/mongo_adapter` | MongoDB - [mongo-driver](https://github.com/mongodb/mongo-go-driver) | ✅ |
+| `l2/dynamo_adapter` | DynamoDB - [aws-sdk-go-v2](https://github.com/aws/aws-sdk-go-v2) | ✅ |
+| `l2/tarantool_adapter` | Tarantool - [go-tarantool](https://github.com/tarantool/go-tarantool) | ✅ |
+| `l2/aerospike_adapter` | Aerospike - [aerospike-client-go](https://github.com/aerospike/aerospike-client-go) | ❌ |
 
 Each adapter takes an interface rather than a concrete client, so it stays independent of the client library's version, and a few libraries are covered without a separate module: `sql_adapter` accepts any `{QueryContext, ExecContext}` (so pgx via database/sql works too), `badger_adapter` covers [badgerhold](https://github.com/timshannon/badgerhold) via `store.Badger()`, and `dynamo_adapter` covers [guregu/dynamo](https://github.com/guregu/dynamo) via its underlying `*dynamodb.Client`.
 
@@ -231,57 +261,80 @@ go -C benchmarks test -run TestHitRate -v
 
 ![Read throughput](benchmarks/results/read_throughput.svg)
 
-### Throughput — ns/op, lower is better
+### Throughput - ns/op, lower is better
 
 | Cache | GetHit | Set | 90 Get / 10 Set | Set alloc |
 |---|--:|--:|----------------:|--:|
-| **memstash-clock** | **0.88** | 37.6 |            3.62 | 36 B / 1 |
-| **memstash-s3fifo** | **0.89** | 43.3 |            3.60 | 34 B / 1 |
-| otter-wtinylfu | 2.18 | 203.8 |           49.47 | 48 B / 1 |
-| theine-wtinylfu | 3.41 | 305.3 |           51.97 | 39 B / 0 |
-| ristretto | 5.91 | 69.7 |           12.93 | 87 B / 1 |
-| hashicorp-lru | 93.54 | 136.4 |           96.20 | 66 B / 0 |
-| sync.Map\* | 1.55 | 12.9 |            4.14 | 63 B / 2 |
+| **memstash-s3fifo** | **0.83** | 31.7 |            4.60 | 16 B / 1 |
+| **memstash-clock** | **0.85** | 34.2 |            4.55 | 18 B / 1 |
+| otter-wtinylfu | 2.04 | 352.2 |           49.77 | 48 B / 1 |
+| theine-wtinylfu | 3.27 | 306.4 |           51.53 | 38 B / 0 |
+| ristretto | 5.41 | 84.4 |           13.29 | 89 B / 1 |
+| bigcache | 8.67 | 38.7 |           23.64 | 23 B / 1 |
+| freecache | 14.02 | 20.9 |           14.37 |  0 B / 0 |
+| hashicorp-lru | 94.97 | 140.2 |           97.04 | 73 B / 0 |
+| sync.Map\* | 1.56 | 11.8 |            4.10 | 63 B / 2 |
 
-\* `sync.Map` performs no eviction — a lower-bound baseline, not a comparable cache.
+\* `sync.Map` performs no eviction - a lower-bound baseline, not a comparable cache.
 
-### Parallel throughput — millions of ops/s, higher is better
+### Parallel throughput - millions of ops/s, higher is better
 
 | Cache | 100% reads | 75% reads | 50% reads | 25% reads | 0% (writes only) |
 |---|--:|--:|--:|--:|-----------------:|
-| **memstash-clock** | **1053** | **138** | **78** | **55** |           **40** |
-| **memstash-s3fifo** | **1047** | **141** | **79** | **55** |           **44** |
-| ristretto | 180 | 25 | 18 | 8.3 |               11 |
-| otter-wtinylfu | 457 | 9.6 | 5.3 | 3.6 |              2.9 |
-| theine-wtinylfu | 291 | 10 | 6.2 | 4.6 |              3.6 |
-| hashicorp-lru | 10 | 10 | 10 | 9.5 |              9.1 |
-| sync.Map\* | 617 | 144 | 99 | 81 |               68 |
+| **memstash-s3fifo** | **1094** | **119** | **70** | **51** |           **43** |
+| **memstash-clock** | **1076** | **120** | **74** | **52** |           **37** |
+| theine-wtinylfu | 294 | 11 | 6.2 | 4.5 |              3.6 |
+| otter-wtinylfu | 182 | 9.6 | 5.3 | 3.6 |              2.8 |
+| ristretto | 181 | 39 | 13 | 8.2 |              8.5 |
+| bigcache | 101 | 31 | 24 | 22 |               26 |
+| freecache | 70 | 69 | 68 | 66 |               67 |
+| hashicorp-lru | 10 | 9.4 | 9.6 | 9.6 |              9.5 |
+| sync.Map\* | 610 | 155 | 104 | 84 |               74 |
 
-Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash stays within about 2× of the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **13–15× their throughput.**
+Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash stays within about 2× of the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **11–14× their throughput.**
 
-### Hit ratio — higher is better
+### Hit ratio - higher is better
 
-**Capacity = 100k items (10% of the key space):**
+The Size column is the cache's estimated memory footprint at the end of the one-hit-30% run (key + value bytes plus each implementation's own bookkeeping).
 
-| Cache | Zipf | Zipf+scan | One-hit 30% |
-|---|--:|--:|--:|
-| **memstash-s3fifo** | **71.51%** | **46.91%** | **63.71%** |
-| theine-wtinylfu | 71.18% | 45.59% | 63.52% |
-| memstash-clock | 71.05% | 45.35% | 63.44% |
-| hashicorp-lru | 70.33% | 42.31% | 63.00% |
-| otter-wtinylfu | 69.93% | 44.68% | 62.99% |
-| ristretto | 40.96% | 29.64% | 51.87% |
+**Capacity = 500k items (~54% of the key space):**
 
-**Capacity = 10k items (1% of the key space):**
+| Cache | Zipf | Zipf+scan | One-hit 30% | Cache Size |
+|---|--:|--:|--:|-----------:|
+| **memstash-s3fifo** | **75.00%** | **47.25%** | **53.10%** |      33 MB |
+| memstash-clock | 74.94% | 46.56% | 52.71% |      29 MB |
+| theine-wtinylfu | 74.86% | 47.25% | 52.82% |      54 MB |
+| hashicorp-lru | 74.62% | 45.67% | 52.10% |      45 MB |
+| otter-wtinylfu | 74.07% | 46.29% | 52.11% |      41 MB |
+| bigcache | 73.18% | 44.04% | 50.22% |      25 MB |
+| freecache | 72.81% | 43.56% | 50.51% |      54 MB |
+| ristretto | 50.32% | 34.60% | 41.37% |      26 MB |
 
-| Cache | Zipf | Zipf+scan | One-hit 30% |
-|---|--:|--:|--:|
-| theine-wtinylfu | 57.11% | 38.95% | 59.50% |
-| **memstash-s3fifo** | **56.84%** | **39.44%** | **59.81%** |
-| otter-wtinylfu | 54.50% | 36.64% | 57.36% |
-| memstash-clock | 50.42% | 34.53% | 55.19% |
-| hashicorp-lru | 48.38% | 33.34% | 53.76% |
-| ristretto | 20.23% | 14.50% | 30.85% |
+**Capacity = 100k items (~11% of the key space):**
+
+| Cache | Zipf | Zipf+scan | One-hit 30% | Cache Size |
+|---|--:|--:|--:|--:|
+| **memstash-s3fifo** | **67.05%** | **43.50%** | **49.57%** | 7.3 MB |
+| theine-wtinylfu | 66.70% | 42.95% | 49.20% | 12 MB |
+| otter-wtinylfu | 64.98% | 41.59% | 47.66% | 7.3 MB |
+| memstash-clock | 63.55% | 39.13% | 46.10% | 6.2 MB |
+| hashicorp-lru | 61.97% | 36.29% | 44.82% | 9.6 MB |
+| bigcache | 60.62% | 36.35% | 43.21% | 6.1 MB |
+| freecache | 58.40% | 36.29% | 42.08% | 18 MB |
+| ristretto | 35.43% | 24.89% | 30.89% | 4.7 MB |
+
+**Capacity = 10k items (~1% of the key space):**
+
+| Cache | Zipf | Zipf+scan | One-hit 30% | Cache Size |
+|---|--:|--:|--:|--:|
+| theine-wtinylfu | 51.70% | 33.89% | 41.04% | 1.5 MB |
+| **memstash-s3fifo** | **51.49%** | **34.66%** | **41.42%** | 911 kB |
+| otter-wtinylfu | 48.58% | 31.44% | 37.84% | 836 kB |
+| bigcache | 48.14% | 31.66% | 35.64% | 1.5 MB |
+| memstash-clock | 43.79% | 28.90% | 33.70% | 744 kB |
+| hashicorp-lru | 41.78% | 27.77% | 32.11% | 1.0 MB |
+| freecache | 40.16% | 26.79% | 30.57% | 6.6 MB |
+| ristretto | 18.20% | 12.53% | 16.92% | 807 kB |
 
 ## License
 

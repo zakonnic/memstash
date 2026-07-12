@@ -1,54 +1,64 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 336" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
-  <rect x="0.5" y="0.5" width="779" height="335" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 430" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <rect x="0.5" y="0.5" width="779" height="429" rx="10" fill="#ffffff" stroke="#d0d7de"/>
   <text x="24" y="34" font-size="17" font-weight="700" fill="#1f2328">Read throughput — 100% reads, Zipf keys</text>
   <text x="24" y="52" font-size="12" fill="#57606a">Million operations per second (higher is better) · AMD Ryzen 9 9900X, Go 1.26</text>
 
   <!-- gridlines (scale: 0.499 px per Mops/s, x0 = 176) -->
   <g stroke="#eaeef2" stroke-width="1">
-    <line x1="301" y1="72" x2="301" y2="294"/>
-    <line x1="426" y1="72" x2="426" y2="294"/>
-    <line x1="550" y1="72" x2="550" y2="294"/>
-    <line x1="675" y1="72" x2="675" y2="294"/>
+    <line x1="301" y1="72" x2="301" y2="382"/>
+    <line x1="426" y1="72" x2="426" y2="382"/>
+    <line x1="550" y1="72" x2="550" y2="382"/>
+    <line x1="675" y1="72" x2="675" y2="382"/>
   </g>
   <g font-size="10" fill="#8c959f" text-anchor="middle">
-    <text x="301" y="308">250</text>
-    <text x="426" y="308">500</text>
-    <text x="550" y="308">750</text>
-    <text x="675" y="308">1000</text>
+    <text x="301" y="398">250</text>
+    <text x="426" y="398">500</text>
+    <text x="550" y="398">750</text>
+    <text x="675" y="398">1000</text>
   </g>
 
   <!-- bars -->
   <g font-size="12.5" fill="#1f2328">
-    <!-- memstash-clock 1053 -->
-    <text x="168" y="92" text-anchor="end" font-weight="700">memstash-clock</text>
-    <rect x="176" y="72" width="525" height="30" rx="3" fill="#10b981"/>
-    <text x="709" y="92" font-size="12" fill="#57606a" font-weight="700">1053</text>
+    <!-- memstash-s3fifo 1094 -->
+    <text x="168" y="92" text-anchor="end" font-weight="700">memstash-s3fifo</text>
+    <rect x="176" y="72" width="546" height="30" rx="3" fill="#10b981"/>
+    <text x="730" y="92" font-size="12" fill="#57606a" font-weight="700">1094</text>
 
-    <!-- memstash-s3fifo 1047 -->
-    <text x="168" y="132" text-anchor="end" font-weight="700">memstash-s3fifo</text>
-    <rect x="176" y="112" width="522" height="30" rx="3" fill="#10b981"/>
-    <text x="706" y="132" font-size="12" fill="#57606a" font-weight="700">1047</text>
+    <!-- memstash-clock 1076 -->
+    <text x="168" y="132" text-anchor="end" font-weight="700">memstash-clock</text>
+    <rect x="176" y="112" width="537" height="30" rx="3" fill="#10b981"/>
+    <text x="721" y="132" font-size="12" fill="#57606a" font-weight="700">1076</text>
 
-    <!-- sync.Map 617 (baseline) -->
+    <!-- sync.Map 610 (baseline) -->
     <text x="168" y="172" text-anchor="end" fill="#57606a">sync.Map*</text>
-    <rect x="176" y="152" width="308" height="30" rx="3" fill="#cbd5e1"/>
-    <text x="492" y="172" font-size="12" fill="#8c959f">617</text>
+    <rect x="176" y="152" width="304" height="30" rx="3" fill="#cbd5e1"/>
+    <text x="488" y="172" font-size="12" fill="#8c959f">610</text>
 
-    <!-- otter-wtinylfu 457 -->
-    <text x="168" y="212" text-anchor="end">otter-wtinylfu</text>
-    <rect x="176" y="192" width="228" height="30" rx="3" fill="#64748b"/>
-    <text x="412" y="212" font-size="12" fill="#8c959f">457</text>
+    <!-- theine-wtinylfu 294 -->
+    <text x="168" y="212" text-anchor="end">theine-wtinylfu</text>
+    <rect x="176" y="192" width="147" height="30" rx="3" fill="#64748b"/>
+    <text x="331" y="212" font-size="12" fill="#8c959f">294</text>
 
-    <!-- theine-wtinylfu 291 -->
-    <text x="168" y="252" text-anchor="end">theine-wtinylfu</text>
-    <rect x="176" y="232" width="145" height="30" rx="3" fill="#64748b"/>
-    <text x="329" y="252" font-size="12" fill="#8c959f">291</text>
+    <!-- otter-wtinylfu 182 -->
+    <text x="168" y="252" text-anchor="end">otter-wtinylfu</text>
+    <rect x="176" y="232" width="91" height="30" rx="3" fill="#64748b"/>
+    <text x="275" y="252" font-size="12" fill="#8c959f">182</text>
 
-    <!-- ristretto 180 -->
+    <!-- ristretto 181 -->
     <text x="168" y="292" text-anchor="end">ristretto</text>
     <rect x="176" y="272" width="90" height="30" rx="3" fill="#64748b"/>
-    <text x="274" y="292" font-size="12" fill="#8c959f">180</text>
+    <text x="274" y="292" font-size="12" fill="#8c959f">181</text>
+
+    <!-- bigcache 101 -->
+    <text x="168" y="332" text-anchor="end">bigcache</text>
+    <rect x="176" y="312" width="50" height="30" rx="3" fill="#64748b"/>
+    <text x="234" y="332" font-size="12" fill="#8c959f">101</text>
+
+    <!-- freecache 70 -->
+    <text x="168" y="372" text-anchor="end">freecache</text>
+    <rect x="176" y="352" width="35" height="30" rx="3" fill="#64748b"/>
+    <text x="219" y="372" font-size="12" fill="#8c959f">70</text>
   </g>
 
-  <text x="24" y="326" font-size="10.5" fill="#8c959f">* sync.Map performs no eviction — shown as a lower-bound baseline. hashicorp-lru (10.3 Mops/s) omitted for scale.</text>
+  <text x="24" y="414" font-size="10.5" fill="#8c959f">* sync.Map performs no eviction — shown as a lower-bound baseline. hashicorp-lru (10.2 Mops/s) omitted for scale.</text>
 </svg>
