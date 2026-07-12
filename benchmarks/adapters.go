@@ -4,7 +4,6 @@ package benchmarks
 import (
 	"context"
 	"encoding/binary"
-	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -36,10 +35,7 @@ type memstashAdapter struct {
 	name string
 }
 
-func newMemstash(capacity int64, policy memstash.Policy, name string, withSizeCoef bool) benchCache {
-	if withSizeCoef {
-		capacity = AjustCapForMemstash(capacity, policy)
-	}
+func newMemstash(capacity int64, policy memstash.Policy, name string) benchCache {
 	c, err := memstash.New[uint64, uint64](
 		memstash.WithMemoryCapacity(capacity),
 		memstash.WithPolicy(policy),
@@ -48,15 +44,6 @@ func newMemstash(capacity int64, policy memstash.Policy, name string, withSizeCo
 		panic(err)
 	}
 	return &memstashAdapter{c: c, name: name}
-}
-
-// AjustCapForMemstash adjusts capacity so memory footprint lands close to others
-func AjustCapForMemstash(capacity int64, policy memstash.Policy) int64 {
-	coeff := 1.0
-	if policy == memstash.PolicyClock {
-		coeff = 0.8
-	}
-	return int64(math.Round(float64(capacity) / coeff))
 }
 
 func (a *memstashAdapter) Name() string                  { return a.name }
@@ -74,10 +61,7 @@ type ristrettoAdapter struct {
 	c *ristretto.Cache[uint64, uint64]
 }
 
-func newRistretto(capacity int64, withSizeCoef bool) benchCache {
-	if withSizeCoef {
-		capacity = AjustCapForRistretto(capacity)
-	}
+func newRistretto(capacity int64) benchCache {
 	c, err := ristretto.NewCache(&ristretto.Config[uint64, uint64]{
 		NumCounters: capacity * 10,
 		MaxCost:     capacity,
@@ -87,12 +71,6 @@ func newRistretto(capacity int64, withSizeCoef bool) benchCache {
 		panic(err)
 	}
 	return &ristrettoAdapter{c: c}
-}
-
-// AjustCapForRistretto adjusts capacity so memory footprint lands close to others
-func AjustCapForRistretto(capacity int64) int64 {
-	const coeff = 0.39
-	return int64(math.Round(float64(capacity) / coeff))
 }
 
 func (a *ristrettoAdapter) Name() string                  { return "ristretto" }
@@ -120,10 +98,7 @@ func (a *ristrettoAdapter) GetSize() uint64 {
 
 type otterAdapter struct{ c *otter.Cache[uint64, uint64] }
 
-func newOtter(capacity int64, withSizeCoef bool) benchCache {
-	if withSizeCoef {
-		capacity = AjustCapForOtter(capacity)
-	}
+func newOtter(capacity int64) benchCache {
 	c := otter.Must(&otter.Options[uint64, uint64]{
 		MaximumSize: int(capacity),
 	})
@@ -135,12 +110,6 @@ func (a *otterAdapter) Get(key uint64) (uint64, bool) { return a.c.GetIfPresent(
 func (a *otterAdapter) Set(key, value uint64, _ bool) { a.c.Set(key, value) }
 func (a *otterAdapter) Close()                        { a.c.StopAllGoroutines() }
 func (a *otterAdapter) Expose() any                   { return a.c }
-
-// AjustCapForOtter adjusts capacity so memory footprint lands close to others
-func AjustCapForOtter(capacity int64) int64 {
-	const coeff = 0.60
-	return int64(math.Round(float64(capacity) / coeff))
-}
 
 type otterNode[K comparable, V any] struct {
 	key       K
@@ -164,21 +133,12 @@ func (a *otterAdapter) GetSize() uint64 {
 
 type theineAdapter struct{ c *theine.Cache[uint64, uint64] }
 
-func newTheine(capacity int64, withSizeCoef bool) benchCache {
-	if withSizeCoef {
-		capacity = AjustCapForTheine(capacity)
-	}
+func newTheine(capacity int64) benchCache {
 	c, err := theine.NewBuilder[uint64, uint64](capacity).Build()
 	if err != nil {
 		panic(err)
 	}
 	return &theineAdapter{c: c}
-}
-
-// AjustCapForTheine adjusts capacity so memory footprint lands close to others
-func AjustCapForTheine(capacity int64) int64 {
-	const coeff = 0.96
-	return int64(math.Round(float64(capacity) / coeff))
 }
 
 func (a *theineAdapter) Name() string                  { return "theine-wtinylfu" }
@@ -198,21 +158,12 @@ func (a *theineAdapter) GetSize() uint64 {
 
 type lruAdapter struct{ c *lru.Cache[uint64, uint64] }
 
-func newLRU(capacity int64, withSizeCoef bool) benchCache {
-	if withSizeCoef {
-		capacity = AjustCapForHashicorpLRU(capacity)
-	}
+func newLRU(capacity int64) benchCache {
 	c, err := lru.New[uint64, uint64](int(capacity))
 	if err != nil {
 		panic(err)
 	}
 	return &lruAdapter{c: c}
-}
-
-// AjustCapForHashicorpLRU adjusts capacity so memory footprint lands close to others
-func AjustCapForHashicorpLRU(capacity int64) int64 {
-	const coeff = 0.72
-	return int64(math.Round(float64(capacity) / coeff))
 }
 
 func (a *lruAdapter) Name() string                  { return "hashicorp-lru" }
@@ -232,21 +183,12 @@ func (a *lruAdapter) GetSize() uint64 { return SizeOf(a.c) }
 
 type freecacheAdapter struct{ c *freecache.Cache }
 
-func newFreecache(capacity int64, avgKeySize, avgValueSize int, withSizeCoef bool) benchCache {
-	if withSizeCoef {
-		capacity = AjustCapForFreecache(capacity)
-	}
+func newFreecache(capacity int64, avgKeySize, avgValueSize int) benchCache {
 	const entryOverhead = 24 // bytes, overhead estimate
 	itemSize := entryOverhead + avgKeySize + avgValueSize
 	totalBytes := int(capacity) * itemSize
 	c := freecache.NewCache(totalBytes)
 	return &freecacheAdapter{c: c}
-}
-
-// AjustCapForFreecache adjusts capacity so memory footprint lands close to others
-func AjustCapForFreecache(capacity int64) int64 {
-	const coeff = 1.05
-	return int64(math.Round(float64(capacity) / coeff))
 }
 
 func (a *freecacheAdapter) Name() string { return "freecache" }
@@ -276,10 +218,7 @@ func (a *freecacheAdapter) GetSize() uint64 { return SizeOf(a.c) }
 
 type bigcacheAdapter struct{ c *bigcache.BigCache }
 
-func newBigcache(capacity int64, withSizeCoef bool) benchCache {
-	if withSizeCoef {
-		capacity = AjustCapForBigcache(capacity)
-	}
+func newBigcache(capacity int64) benchCache {
 	config := bigcache.DefaultConfig(100 * 365 * 24 * time.Hour) // effectively no time-based expiry
 	config.Shards = 64
 	config.MaxEntriesInWindow = int(capacity)
@@ -291,14 +230,6 @@ func newBigcache(capacity int64, withSizeCoef bool) benchCache {
 		panic(err)
 	}
 	return &bigcacheAdapter{c: c}
-}
-
-// AjustCapForBigcache adjusts capacity so memory footprint lands close to others
-func AjustCapForBigcache(capacity int64) int64 {
-	if capacity < 200_000 {
-		return int64(math.Round(float64(capacity) / 0.3))
-	}
-	return int64(math.Round(float64(capacity) / 0.4))
 }
 
 func getBigCacheHardMaxCacheSize(capacity int64, avgKeySize, avgValueSize int) int {

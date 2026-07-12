@@ -48,7 +48,7 @@ func scanTrace() []uint64 {
 // oneHitTrace is 70% Zipf over a hot core plus 30% practically unique keys (one-hit wonders): a CDN/web-cache profile.
 func oneHitTrace() []uint64 {
 	rng := rand.New(rand.NewSource(3))
-	zipf := rand.NewZipf(rng, 1.2, 10, 100_000)
+	zipf := rand.NewZipf(rng, 1.05, 10, keyspace-1)
 	trace := make([]uint64, requests)
 	unique := uint64(20_000_000)
 	for i := range trace {
@@ -75,7 +75,7 @@ func runTrace(c benchCache, trace []uint64) float64 {
 	return 100 * float64(hits) / float64(len(trace))
 }
 
-func runHitRateSuite(t *testing.T, withSizeCoef bool) {
+func runHitRateSuite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("long comparative run")
 	}
@@ -90,23 +90,17 @@ func runHitRateSuite(t *testing.T, withSizeCoef bool) {
 	capacities := []int64{10_000, 100_000, 500_000} // 1%, 10% and 50% of the key space
 
 	for _, capacity := range capacities {
-		if withSizeCoef {
-			t.Logf("---- virtual capacity %d items (real depends from lib) ----", capacity)
-		} else {
-			t.Logf("---- capacity %d items ----", capacity)
-		}
+		t.Logf("---- capacity %d items ----", capacity)
 		t.Logf("%-18s %12s %12s %12s %12s", "cache", traces[0].name, traces[1].name, traces[2].name, "size estimate")
 		builders := []func() benchCache{
-			func() benchCache {
-				return newMemstash(capacity, memstash.PolicyS3FIFO, "memstash-s3fifo", withSizeCoef)
-			},
-			func() benchCache { return newMemstash(capacity, memstash.PolicyClock, "memstash-clock", withSizeCoef) },
-			func() benchCache { return newRistretto(capacity, withSizeCoef) },
-			func() benchCache { return newOtter(capacity, withSizeCoef) },
-			func() benchCache { return newTheine(capacity, withSizeCoef) },
-			func() benchCache { return newBigcache(capacity, withSizeCoef) },
-			func() benchCache { return newFreecache(capacity, 8, 8, withSizeCoef) },
-			func() benchCache { return newLRU(capacity, withSizeCoef) },
+			func() benchCache { return newMemstash(capacity, memstash.PolicyS3FIFO, "memstash-s3fifo") },
+			func() benchCache { return newMemstash(capacity, memstash.PolicyClock, "memstash-clock") },
+			func() benchCache { return newRistretto(capacity) },
+			func() benchCache { return newOtter(capacity) },
+			func() benchCache { return newTheine(capacity) },
+			func() benchCache { return newBigcache(capacity) },
+			func() benchCache { return newFreecache(capacity, 8, 8) },
+			func() benchCache { return newLRU(capacity) },
 		}
 		for _, build := range builders {
 			var name string
@@ -129,11 +123,5 @@ func runHitRateSuite(t *testing.T, withSizeCoef bool) {
 
 // TestHitRate prints a comparative hit-rate table at equal nominal capacity (item count) per cache.
 func TestHitRate(t *testing.T) {
-	runHitRateSuite(t, false)
-}
-
-// TestHitRateNormalized prints the same comparative hit-rate table, but with each adapter's capacity adjusted via
-// GetSizeCoeff first, so the caches are compared at roughly equal memory footprint rather than equal item count.
-func TestHitRateNormalized(t *testing.T) {
-	runHitRateSuite(t, true)
+	runHitRateSuite(t)
 }
