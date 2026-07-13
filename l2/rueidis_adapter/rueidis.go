@@ -20,6 +20,13 @@ type Cache[K comparable, V any] struct {
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
 
+// Multi-key commands (MGET/MSET) beat a per-key pipeline while they stay small.
+// But one huge command is worse than a stream of small ones, so we set this limit.
+const multiKeyBudget = 16 * 1024
+
+// argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).
+const argWireOverhead = 16
+
 // New creates the adapter with an explicit value codec. By default keys must be strings (identity mapping); for other
 // key types pass l2.WithKeyFunc.
 func New[K comparable, V any](client rueidislib.Client, codec memstash.Codec[V], opts ...memstash.Option) (*Cache[K, V], error) {
@@ -110,16 +117,45 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return c.client.Do(ctx, cmd).Error()
 }
 
-// BatchGet fetches all keys in one DoMulti call (rueidis pipelines it into a single round trip).
+// BatchGet fetches all keys in one round trip: the rueidis MGet helper within multiKeyBudget, a DoMulti pipeline of
+// GETs above it.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	length := len(keys)
 	found := make(memstash.List[K, V], 0, length)
 	if length == 0 {
 		return found, nil
 	}
-	cmds := make([]rueidislib.Completed, length)
+	storageKeys := make([]string, length)
+	size := 0
 	for i, key := range keys {
-		cmds[i] = c.client.B().Get().Key(c.keyFunc(key)).Build()
+		storageKeys[i] = c.keyFunc(key)
+		size += len(storageKeys[i]) + argWireOverhead
+	}
+	if size <= multiKeyBudget {
+		replies, err := rueidislib.MGet(c.client, ctx, storageKeys)
+		if err != nil {
+			return found, err
+		}
+		for i, key := range keys {
+			msg, ok := replies[storageKeys[i]]
+			if !ok || msg.IsNil() {
+				continue
+			}
+			data, err := msg.AsBytes() // a zero-copy view into the reply
+			if err != nil {
+				return found, err
+			}
+			value, err := c.codec.Unmarshal(data)
+			if err != nil {
+				return found, err
+			}
+			found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
+		}
+		return found, nil
+	}
+	cmds := make([]rueidislib.Completed, length)
+	for i, storageKey := range storageKeys {
+		cmds[i] = c.client.B().Get().Key(storageKey).Build()
 	}
 	for i, resp := range c.client.DoMulti(ctx, cmds...) {
 		data, err := resp.AsBytes()
@@ -138,10 +174,37 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	return found, nil
 }
 
-// BatchSet stores all items in one DoMulti call; ttl == 0 means "no expiration".
+// BatchSet stores all items in one round trip; ttl == 0 means "no expiration". A no-TTL batch within multiKeyBudget
+// uses the rueidis MSet helper, anything else a DoMulti pipeline of SETs.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
 	if len(items) == 0 {
 		return nil
+	}
+	if ttl <= 0 {
+		kvs := make(map[string]string, len(items))
+		size := 0
+		for _, item := range items {
+			data, err := c.codec.Marshal(item.Value)
+			if err != nil {
+				return err
+			}
+			storageKey := c.keyFunc(item.Key)
+			kvs[storageKey] = rueidislib.BinaryString(data)
+			size += len(storageKey) + len(data) + 2*argWireOverhead
+		}
+		if size <= multiKeyBudget {
+			for _, err := range rueidislib.MSet(c.client, ctx, kvs) {
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		cmds := make([]rueidislib.Completed, 0, len(kvs))
+		for storageKey, data := range kvs {
+			cmds = append(cmds, c.client.B().Set().Key(storageKey).Value(data).Build())
+		}
+		return doMultiErr(c.client.DoMulti(ctx, cmds...))
 	}
 	cmds := make([]rueidislib.Completed, 0, len(items))
 	for _, item := range items {
@@ -149,14 +212,15 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		if err != nil {
 			return err
 		}
-		if ttl > 0 {
-			cmds = append(cmds, c.client.B().Set().Key(c.keyFunc(item.Key)).Value(rueidislib.BinaryString(data)).
-				PxMilliseconds(l2.RedisMillis(ttl)).Build())
-		} else {
-			cmds = append(cmds, c.client.B().Set().Key(c.keyFunc(item.Key)).Value(rueidislib.BinaryString(data)).Build())
-		}
+		cmds = append(cmds, c.client.B().Set().Key(c.keyFunc(item.Key)).Value(rueidislib.BinaryString(data)).
+			PxMilliseconds(l2.RedisMillis(ttl)).Build())
 	}
-	for _, resp := range c.client.DoMulti(ctx, cmds...) {
+	return doMultiErr(c.client.DoMulti(ctx, cmds...))
+}
+
+// doMultiErr returns the first error of a DoMulti result set.
+func doMultiErr(resps []rueidislib.RedisResult) error {
+	for _, resp := range resps {
 		if err := resp.Error(); err != nil {
 			return err
 		}

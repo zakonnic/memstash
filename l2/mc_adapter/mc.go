@@ -10,10 +10,9 @@ import (
 	"errors"
 	"time"
 
+	mclib "github.com/memcachier/mc/v3"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
-
-	mclib "github.com/memcachier/mc/v3"
 )
 
 // Cache is an L2 adapter over the memcachier client. The client is safe for concurrent use; its lifecycle stays with
@@ -111,14 +110,18 @@ func (c *Cache[K, V]) Delete(_ context.Context, key K) error {
 	return nil
 }
 
-// BatchGet fetches the keys one by one: the memcachier client exposes no multi-get. The context is ignored: the
+// BatchWorkers is the number of goroutines the concurrent batch fallbacks run. Raise mc.Config.PoolSize (the
+// default is 1) towards this value, or the goroutines serialize on the connection pool.
+const BatchWorkers = 8
+
+// BatchGet fetches the keys with concurrent Gets: the client exposes no multi-get. The context is ignored: the
 // client has no context support.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
-	return l2.BatchGetSequential(ctx, c, keys)
+	return l2.BatchGetConcurrent(ctx, c, keys, BatchWorkers)
 }
 
-// BatchSet stores the items one by one: the memcachier client exposes no multi-set. The context is ignored: the
+// BatchSet stores the items with concurrent Sets: the client exposes no multi-set. The context is ignored: the
 // client has no context support.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
-	return l2.BatchSetSequential(ctx, c, items, ttl)
+	return l2.BatchSetConcurrent(ctx, c, items, ttl, BatchWorkers)
 }

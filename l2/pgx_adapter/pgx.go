@@ -25,7 +25,7 @@ import (
 type DB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // DefaultTable is the table name used when the caller passes an empty table.
@@ -46,10 +46,12 @@ type Cache[K comparable, V any] struct {
 	codec   memstash.Codec[V]
 	keyFunc func(K) string
 
-	getQuery    string
-	setQuery    string
-	deleteQuery string
-	reapQuery   string
+	getQuery      string
+	setQuery      string
+	deleteQuery   string
+	reapQuery     string
+	batchGetQuery string
+	batchSetQuery string
 }
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
@@ -80,6 +82,11 @@ func New[K comparable, V any](db DB, codec memstash.Codec[V], table string, opts
 			" ON CONFLICT (cache_key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at",
 		deleteQuery: "DELETE FROM " + table + " WHERE cache_key = $1",
 		reapQuery:   "DELETE FROM " + table + " WHERE expires_at <> 0 AND expires_at <= $1",
+		batchGetQuery: "SELECT cache_key, value FROM " + table +
+			" WHERE cache_key = ANY($1) AND (expires_at = 0 OR expires_at > $2)",
+		batchSetQuery: "INSERT INTO " + table + " (cache_key, value, expires_at)" +
+			" SELECT * FROM unnest($1::text[], $2::bytea[], $3::bigint[])" +
+			" ON CONFLICT (cache_key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at",
 	}, nil
 }
 
@@ -150,26 +157,35 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return err
 }
 
-// BatchGet fetches all keys in one pipelined pgx.Batch round trip.
+// BatchGet fetches all keys in one "WHERE cache_key = ANY($1)" statement, the keys passed as one text[] parameter.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	found := make(memstash.List[K, V], 0, len(keys))
 	if len(keys) == 0 {
 		return found, nil
 	}
-	now := time.Now().Unix()
-	batch := &pgx.Batch{}
+	byStorageKey := make(map[string]K, len(keys))
+	storageKeys := make([]string, 0, len(keys))
 	for _, key := range keys {
-		batch.Queue(c.getQuery, c.keyFunc(key), now)
+		storageKey := c.keyFunc(key)
+		if _, seen := byStorageKey[storageKey]; !seen {
+			storageKeys = append(storageKeys, storageKey)
+		}
+		byStorageKey[storageKey] = key
 	}
-	br := c.db.SendBatch(ctx, batch)
-	defer br.Close()
-	for _, key := range keys {
+	rows, err := c.db.Query(ctx, c.batchGetQuery, storageKeys, time.Now().Unix())
+	if err != nil {
+		return found, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var storageKey string
 		var data []byte
-		if err := br.QueryRow().Scan(&data); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				continue
-			}
+		if err := rows.Scan(&storageKey, &data); err != nil {
 			return found, err
+		}
+		key, ok := byStorageKey[storageKey]
+		if !ok {
+			continue
 		}
 		value, err := c.codec.Unmarshal(data)
 		if err != nil {
@@ -177,31 +193,40 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		}
 		found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
 	}
-	return found, nil
+	return found, rows.Err()
 }
 
-// BatchSet stores all items in one pipelined pgx.Batch round trip; ttl == 0 means "no expiration".
+// BatchSet stores all items in one "INSERT ... SELECT FROM unnest(...)" upsert with three array parameters;
+// ttl == 0 means "no expiration". Duplicate keys collapse to the last value - PostgreSQL rejects the same key twice
+// in one upsert statement.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
 	if len(items) == 0 {
 		return nil
 	}
-	deadline := expiresAt(ttl)
-	batch := &pgx.Batch{}
+	storageKeys := make([]string, 0, len(items))
+	values := make([][]byte, 0, len(items))
+	rowIndex := make(map[string]int, len(items))
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
 			return err
 		}
-		batch.Queue(c.setQuery, c.keyFunc(item.Key), data, deadline)
-	}
-	br := c.db.SendBatch(ctx, batch)
-	defer br.Close()
-	for range items {
-		if _, err := br.Exec(); err != nil {
-			return err
+		storageKey := c.keyFunc(item.Key)
+		if i, seen := rowIndex[storageKey]; seen {
+			values[i] = data
+			continue
 		}
+		rowIndex[storageKey] = len(storageKeys)
+		storageKeys = append(storageKeys, storageKey)
+		values = append(values, data)
 	}
-	return nil
+	deadlines := make([]int64, len(storageKeys))
+	deadline := expiresAt(ttl)
+	for i := range deadlines {
+		deadlines[i] = deadline
+	}
+	_, err := c.db.Exec(ctx, c.batchSetQuery, storageKeys, values, deadlines)
+	return err
 }
 
 // DeleteExpired purges rows whose TTL has elapsed. Call it periodically: expired rows are hidden from Get but are not

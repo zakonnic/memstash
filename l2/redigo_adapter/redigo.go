@@ -7,10 +7,9 @@ import (
 	"errors"
 	"time"
 
+	redigolib "github.com/gomodule/redigo/redis"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
-
-	redigolib "github.com/gomodule/redigo/redis"
 )
 
 // Cache is an L2 adapter over a redigo *Pool. The pool is safe for concurrent use; its lifecycle stays with the
@@ -22,6 +21,14 @@ type Cache[K comparable, V any] struct {
 }
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
+
+// Multi-key commands (MGET/MSET) beat a per-key pipeline while they stay small.
+// But one huge command is worse than a stream of small ones, so we set this limit.
+// And a command that does not fit redigo's fixed 4 KiB write buffer goes out in several write calls.
+const multiKeyBudget = 3500
+
+// argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).
+const argWireOverhead = 16
 
 // New creates the adapter with an explicit value codec. By default keys must be strings (identity mapping); for other
 // key types pass l2.WithKeyFunc.
@@ -124,12 +131,40 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return err
 }
 
-// BatchGet fetches all keys in one pipelined round trip (Send/Flush/Receive) over a single pooled connection. As with
-// do, the context always cancels the wait for a connection; the commands themselves only with Pool.DialContext.
+// BatchGet fetches all keys in one round trip: one MGET command when the batch fits multiKeyBudget, otherwise a
+// pipeline of GETs (Send/Flush/Receive). As with do, the context cancels the commands only with Pool.DialContext.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	length := len(keys)
 	found := make(memstash.List[K, V], 0, length)
 	if length == 0 {
+		return found, nil
+	}
+	args := make([]any, length)
+	size := 0
+	for i, key := range keys {
+		storageKey := c.keyFunc(key)
+		args[i] = storageKey
+		size += len(storageKey) + argWireOverhead
+	}
+	if size <= multiKeyBudget {
+		replies, err := redigolib.Values(c.do(ctx, "MGET", args...))
+		if err != nil {
+			return found, err
+		}
+		for i, reply := range replies {
+			if reply == nil { // a miss
+				continue
+			}
+			data, err := redigolib.Bytes(reply, nil)
+			if err != nil {
+				return found, err
+			}
+			value, err := c.codec.Unmarshal(data)
+			if err != nil {
+				return found, err
+			}
+			found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
+		}
 		return found, nil
 	}
 	conn, err := c.pool.GetContext(ctx)
@@ -138,15 +173,15 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	}
 	defer conn.Close()
 
-	for _, key := range keys {
-		if err := conn.Send("GET", c.keyFunc(key)); err != nil {
+	for _, arg := range args {
+		if err := conn.Send("GET", arg); err != nil {
 			return found, err
 		}
 	}
 	if err := conn.Flush(); err != nil {
 		return found, err
 	}
-	for _, key := range keys {
+	for i := range keys {
 		data, err := redigolib.Bytes(conn.Receive())
 		if err != nil {
 			if errors.Is(err, redigolib.ErrNil) {
@@ -158,16 +193,31 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		if err != nil {
 			return found, err
 		}
-		found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
+		found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 	}
 	return found, nil
 }
 
-// BatchSet stores all items in one pipelined round trip over a single pooled connection; ttl == 0 means "no
-// expiration".
+// BatchSet stores all items in one round trip; ttl == 0 means "no expiration". A no-TTL batch within multiKeyBudget
+// goes out as a single MSET command; larger batches and any batch with a TTL are pipelined SETs.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
 	if len(items) == 0 {
 		return nil
+	}
+	args := make([]any, 0, 2*len(items))
+	size := 0
+	for _, item := range items {
+		data, err := c.codec.Marshal(item.Value)
+		if err != nil {
+			return err
+		}
+		storageKey := c.keyFunc(item.Key)
+		args = append(args, storageKey, data)
+		size += len(storageKey) + len(data) + 2*argWireOverhead
+	}
+	if ttl <= 0 && size <= multiKeyBudget {
+		_, err := c.do(ctx, "MSET", args...)
+		return err
 	}
 	conn, err := c.pool.GetContext(ctx)
 	if err != nil {
@@ -175,15 +225,11 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	}
 	defer conn.Close()
 
-	for _, item := range items {
-		data, err := c.codec.Marshal(item.Value)
-		if err != nil {
-			return err
-		}
+	for i := 0; i < len(args); i += 2 {
 		if ttl > 0 {
-			err = conn.Send("SET", c.keyFunc(item.Key), data, "PX", l2.RedisMillis(ttl))
+			err = conn.Send("SET", args[i], args[i+1], "PX", l2.RedisMillis(ttl))
 		} else {
-			err = conn.Send("SET", c.keyFunc(item.Key), data)
+			err = conn.Send("SET", args[i], args[i+1])
 		}
 		if err != nil {
 			return err

@@ -168,23 +168,32 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	return found, nil
 }
 
-// BatchSet stores all items in one BulkWrite of upserts; ttl == 0 means "no expiration".
+// BatchSet stores all items in one unordered BulkWrite of upserts; duplicate keys collapse to the last value.
+// ttl == 0 means "no expiration".
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
 	if len(items) == 0 {
 		return nil
 	}
 	models := make([]mongo.WriteModel, 0, len(items))
+	modelIndex := make(map[string]int, len(items))
 	for _, item := range items {
 		update, err := c.updateDoc(item.Value, ttl)
 		if err != nil {
 			return err
 		}
-		models = append(models, mongo.NewUpdateOneModel().
-			SetFilter(bson.M{"_id": c.keyFunc(item.Key)}).
+		storageKey := c.keyFunc(item.Key)
+		model := mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": storageKey}).
 			SetUpdate(update).
-			SetUpsert(true))
+			SetUpsert(true)
+		if i, seen := modelIndex[storageKey]; seen {
+			models[i] = model
+			continue
+		}
+		modelIndex[storageKey] = len(models)
+		models = append(models, model)
 	}
-	_, err := c.coll.BulkWrite(ctx, models)
+	_, err := c.coll.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
 	return err
 }
 

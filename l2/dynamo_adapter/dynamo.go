@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/zakonnic/memstash"
@@ -141,86 +142,145 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return err
 }
 
-// BatchGet fetches the keys with BatchGetItem in chunks of 100, retrying UnprocessedKeys a bounded number of times.
+// BatchGet fetches the keys with concurrent BatchGetItem chunks of 100 (the API's hard limit), retrying
+// UnprocessedKeys a bounded number of times.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	found := make(memstash.List[K, V], 0, len(keys))
 	if len(keys) == 0 {
 		return found, nil
 	}
-	// DynamoDB returns items unordered and keyed only by their storage string, so map each storage key back to the
-	// caller's K (which may not be a string).
+	// Map storage keys back to the caller's K; BatchGetItem rejects duplicate keys, so the chunks are built from
+	// the deduplicated storage keys.
 	byStorageKey := make(map[string]K, len(keys))
+	storageKeys := make([]string, 0, len(keys))
 	for _, key := range keys {
-		byStorageKey[c.keyFunc(key)] = key
-	}
-	for start := 0; start < len(keys); start += batchGetLimit {
-		end := min(start+batchGetLimit, len(keys))
-
-		req := make([]map[string]types.AttributeValue, 0, end-start)
-		for _, key := range keys[start:end] {
-			req = append(req, map[string]types.AttributeValue{keyAttr: &types.AttributeValueMemberS{Value: c.keyFunc(key)}})
+		storageKey := c.keyFunc(key)
+		if _, seen := byStorageKey[storageKey]; !seen {
+			storageKeys = append(storageKeys, storageKey)
 		}
-		pending := map[string]types.KeysAndAttributes{c.table: {Keys: req}}
-
-		for attempt := 0; len(pending) > 0; attempt++ {
-			if attempt > maxBatchRetries {
-				return found, errUnprocessed
-			}
-			out, err := c.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: pending})
-			if err != nil {
-				return found, err
-			}
-			for _, item := range out.Responses[c.table] {
-				storageKey, ok := item[keyAttr].(*types.AttributeValueMemberS)
-				if !ok {
-					continue
-				}
-				key, known := byStorageKey[storageKey.Value]
-				if !known {
-					continue
-				}
-				value, present, err := c.decodeItem(item)
-				if err != nil {
-					return found, err
-				}
-				if present {
-					found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
-				}
-			}
-			pending = out.UnprocessedKeys
+		byStorageKey[storageKey] = key
+	}
+	if len(storageKeys) <= batchGetLimit {
+		return c.batchGetChunk(ctx, storageKeys, byStorageKey, found)
+	}
+	numChunks := (len(storageKeys) + batchGetLimit - 1) / batchGetLimit
+	results := make([]memstash.List[K, V], numChunks)
+	errs := make([]error, numChunks)
+	var wg sync.WaitGroup
+	wg.Add(numChunks)
+	for i := 0; i < numChunks; i++ {
+		go func(i int) {
+			defer wg.Done()
+			chunk := storageKeys[i*batchGetLimit : min((i+1)*batchGetLimit, len(storageKeys))]
+			results[i], errs[i] = c.batchGetChunk(ctx, chunk, byStorageKey, nil)
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < numChunks; i++ {
+		found = append(found, results[i]...)
+		if errs[i] != nil {
+			return found, errs[i]
 		}
 	}
 	return found, nil
 }
 
-// BatchSet stores the items with BatchWriteItem in chunks of 25, retrying UnprocessedItems a bounded number of times.
+// batchGetChunk resolves one BatchGetItem request, retrying UnprocessedKeys, and appends the hits to found.
+func (c *Cache[K, V]) batchGetChunk(ctx context.Context, storageKeys []string, byStorageKey map[string]K, found memstash.List[K, V]) (memstash.List[K, V], error) {
+	req := make([]map[string]types.AttributeValue, 0, len(storageKeys))
+	for _, storageKey := range storageKeys {
+		req = append(req, map[string]types.AttributeValue{keyAttr: &types.AttributeValueMemberS{Value: storageKey}})
+	}
+	pending := map[string]types.KeysAndAttributes{c.table: {Keys: req}}
+
+	for attempt := 0; len(pending) > 0; attempt++ {
+		if attempt > maxBatchRetries {
+			return found, errUnprocessed
+		}
+		out, err := c.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: pending})
+		if err != nil {
+			return found, err
+		}
+		for _, item := range out.Responses[c.table] {
+			storageKey, ok := item[keyAttr].(*types.AttributeValueMemberS)
+			if !ok {
+				continue
+			}
+			key, known := byStorageKey[storageKey.Value]
+			if !known {
+				continue
+			}
+			value, present, err := c.decodeItem(item)
+			if err != nil {
+				return found, err
+			}
+			if present {
+				found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
+			}
+		}
+		pending = out.UnprocessedKeys
+	}
+	return found, nil
+}
+
+// BatchSet stores the items with concurrent BatchWriteItem chunks of 25 (the API's hard limit), retrying
+// UnprocessedItems a bounded number of times; duplicate keys collapse to the last value (BatchWriteItem rejects
+// duplicates in one request).
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
 	if len(items) == 0 {
 		return nil
 	}
-	for start := 0; start < len(items); start += batchWriteLimit {
-		end := min(start+batchWriteLimit, len(items))
-
-		writes := make([]types.WriteRequest, 0, end-start)
-		for _, item := range items[start:end] {
-			encoded, err := c.encodeItem(c.keyFunc(item.Key), item.Value, ttl)
-			if err != nil {
-				return err
-			}
-			writes = append(writes, types.WriteRequest{PutRequest: &types.PutRequest{Item: encoded}})
+	itemIndex := make(map[string]int, len(items))
+	deduped := make(memstash.List[K, V], 0, len(items))
+	for _, item := range items {
+		storageKey := c.keyFunc(item.Key)
+		if i, seen := itemIndex[storageKey]; seen {
+			deduped[i] = item
+			continue
 		}
-		pending := map[string][]types.WriteRequest{c.table: writes}
+		itemIndex[storageKey] = len(deduped)
+		deduped = append(deduped, item)
+	}
+	items = deduped
+	if len(items) <= batchWriteLimit {
+		return c.batchSetChunk(ctx, items, ttl)
+	}
+	numChunks := (len(items) + batchWriteLimit - 1) / batchWriteLimit
+	errs := make([]error, numChunks)
+	var wg sync.WaitGroup
+	wg.Add(numChunks)
+	for i := 0; i < numChunks; i++ {
+		go func(i int) {
+			defer wg.Done()
+			chunk := items[i*batchWriteLimit : min((i+1)*batchWriteLimit, len(items))]
+			errs[i] = c.batchSetChunk(ctx, chunk, ttl)
+		}(i)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
 
-		for attempt := 0; len(pending) > 0; attempt++ {
-			if attempt > maxBatchRetries {
-				return errUnprocessed
-			}
-			out, err := c.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: pending})
-			if err != nil {
-				return err
-			}
-			pending = out.UnprocessedItems
+// batchSetChunk stores one BatchWriteItem request, retrying UnprocessedItems.
+func (c *Cache[K, V]) batchSetChunk(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
+	writes := make([]types.WriteRequest, 0, len(items))
+	for _, item := range items {
+		encoded, err := c.encodeItem(c.keyFunc(item.Key), item.Value, ttl)
+		if err != nil {
+			return err
 		}
+		writes = append(writes, types.WriteRequest{PutRequest: &types.PutRequest{Item: encoded}})
+	}
+	pending := map[string][]types.WriteRequest{c.table: writes}
+
+	for attempt := 0; len(pending) > 0; attempt++ {
+		if attempt > maxBatchRetries {
+			return errUnprocessed
+		}
+		out, err := c.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: pending})
+		if err != nil {
+			return err
+		}
+		pending = out.UnprocessedItems
 	}
 	return nil
 }

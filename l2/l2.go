@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zakonnic/memstash"
@@ -113,6 +115,80 @@ func BatchSetSequential[K comparable, V any](ctx context.Context, store memstash
 		}
 	}
 	return nil
+}
+
+// --- concurrent batch fallbacks ---
+
+// BatchGetConcurrent implements L2Cache.BatchGet by running Get on up to workers goroutines. Found items keep the
+// order of keys; the hits gathered so far are returned alongside the first error.
+func BatchGetConcurrent[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], keys []K, workers int) (memstash.List[K, V], error) {
+	if len(keys) <= 1 || workers <= 1 {
+		return BatchGetSequential(ctx, store, keys)
+	}
+	type slot struct {
+		value V
+		ok    bool
+	}
+	results := make([]slot, len(keys))
+	firstErr := runConcurrent(len(keys), workers, func(i int) error {
+		value, ok, err := store.Get(ctx, keys[i])
+		if err != nil {
+			return err
+		}
+		results[i] = slot{value: value, ok: ok}
+		return nil
+	})
+	found := make(memstash.List[K, V], 0, len(keys))
+	for i, result := range results {
+		if result.ok {
+			found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: result.value})
+		}
+	}
+	return found, firstErr
+}
+
+// BatchSetConcurrent implements L2Cache.BatchSet by running Set on up to workers goroutines.
+func BatchSetConcurrent[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], items memstash.List[K, V], ttl time.Duration, workers int) error {
+	if len(items) <= 1 || workers <= 1 {
+		return BatchSetSequential(ctx, store, items, ttl)
+	}
+	return runConcurrent(len(items), workers, func(i int) error {
+		return store.Set(ctx, items[i].Key, items[i].Value, ttl)
+	})
+}
+
+// runConcurrent executes op for the indexes 0..n-1 on up to workers goroutines and returns the first error, after
+// which no new indexes are started.
+func runConcurrent(n, workers int, op func(i int) error) error {
+	if workers > n {
+		workers = n
+	}
+	var (
+		next     atomic.Int64
+		stopped  atomic.Bool
+		errOnce  sync.Once
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= n || stopped.Load() {
+					return
+				}
+				if err := op(i); err != nil {
+					errOnce.Do(func() { firstErr = err })
+					stopped.Store(true)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // --- codecs ---

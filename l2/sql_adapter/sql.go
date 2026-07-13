@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/zakonnic/memstash"
@@ -30,7 +31,7 @@ type DB interface {
 // DefaultTable is the table name used when the caller passes an empty table.
 const DefaultTable = "github.com/zakonnic/memstash_cache"
 
-// Dialect captures the two fragments of the KV SQL that differ between databases: how a positional parameter is
+// Dialect captures the fragments of the KV SQL that differ between databases: how a positional parameter is
 // rendered and how an upsert is spelled. The predefined dialects cover the common engines; supply your own for
 // anything else.
 type Dialect struct {
@@ -38,6 +39,8 @@ type Dialect struct {
 	Placeholder func(n int) string
 	// Upsert is the conflict clause appended to "INSERT INTO t (cache_key, value, expires_at) VALUES (...)".
 	Upsert string
+	// MultiRowUpsert marks that the engine accepts a multi-row "VALUES (...), (...), ...".
+	MultiRowUpsert bool
 }
 
 func qmark(int) string    { return "?" }
@@ -45,12 +48,16 @@ func dollar(n int) string { return "$" + strconv.Itoa(n) }
 
 var (
 	// SQLite targets SQLite (also works for any engine using "?" placeholders and ON CONFLICT).
-	SQLite = Dialect{Placeholder: qmark, Upsert: "ON CONFLICT(cache_key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at"}
+	SQLite = Dialect{Placeholder: qmark, Upsert: "ON CONFLICT(cache_key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at", MultiRowUpsert: true}
 	// Postgres targets PostgreSQL ($n placeholders, EXCLUDED upsert).
-	Postgres = Dialect{Placeholder: dollar, Upsert: "ON CONFLICT (cache_key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at"}
+	Postgres = Dialect{Placeholder: dollar, Upsert: "ON CONFLICT (cache_key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at", MultiRowUpsert: true}
 	// MySQL targets MySQL/MariaDB (? placeholders, ON DUPLICATE KEY upsert).
-	MySQL = Dialect{Placeholder: qmark, Upsert: "ON DUPLICATE KEY UPDATE value = VALUES(value), expires_at = VALUES(expires_at)"}
+	MySQL = Dialect{Placeholder: qmark, Upsert: "ON DUPLICATE KEY UPDATE value = VALUES(value), expires_at = VALUES(expires_at)", MultiRowUpsert: true}
 )
+
+// maxStatementParams caps the positional parameters per batch statement: 900 stays below the tightest common engine
+// limits (SQLite's historical 999, SQL Server's 2100).
+const maxStatementParams = 900
 
 // CreateTableSQL returns a portable DDL statement for the cache table. On MySQL replace TEXT with VARCHAR(255) for the
 // key so it can be a primary key.
@@ -67,8 +74,11 @@ type Cache[K comparable, V any] struct {
 	db      DB
 	codec   memstash.Codec[V]
 	keyFunc func(K) string
+	table   string
+	dialect Dialect
 
-	// Precomputed statements (table and dialect are fixed at construction).
+	// Precomputed statements (table and dialect are fixed at construction); the batch statements depend on the
+	// batch size and are built per call.
 	getQuery    string
 	setQuery    string
 	deleteQuery string
@@ -102,6 +112,8 @@ func New[K comparable, V any](db DB, codec memstash.Codec[V], table string, dial
 		db:      db,
 		codec:   codec,
 		keyFunc: keyFunc,
+		table:   table,
+		dialect: dialect,
 		getQuery: "SELECT value FROM " + table + " WHERE cache_key = " + ph(1) +
 			" AND (expires_at = 0 OR expires_at > " + ph(2) + ")",
 		setQuery: "INSERT INTO " + table + " (cache_key, value, expires_at) VALUES (" +
@@ -182,15 +194,136 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return err
 }
 
-// BatchGet and BatchSet run sequentially: batching in SQL means dialect-specific IN/UNNEST expansion, which would
-// break the driver-agnostic design. On a single connection these still share the same round-trip pipeline the driver
-// provides.
+// BatchGet fetches all keys with "SELECT ... WHERE cache_key IN (...)", split into chunks of maxStatementParams.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
-	return l2.BatchGetSequential(ctx, c, keys)
+	found := make(memstash.List[K, V], 0, len(keys))
+	if len(keys) == 0 {
+		return found, nil
+	}
+	byStorageKey := make(map[string]K, len(keys))
+	storageKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		storageKey := c.keyFunc(key)
+		if _, seen := byStorageKey[storageKey]; !seen {
+			storageKeys = append(storageKeys, storageKey)
+		}
+		byStorageKey[storageKey] = key
+	}
+	now := time.Now().Unix()
+	const chunkKeys = maxStatementParams - 1 // one parameter is the expiry deadline
+	for start := 0; start < len(storageKeys); start += chunkKeys {
+		chunk := storageKeys[start:min(start+chunkKeys, len(storageKeys))]
+		if err := c.batchGetChunk(ctx, chunk, now, byStorageKey, &found); err != nil {
+			return found, err
+		}
+	}
+	return found, nil
 }
 
+// batchGetChunk runs one IN statement and appends the hits to found.
+func (c *Cache[K, V]) batchGetChunk(ctx context.Context, chunk []string, now int64, byStorageKey map[string]K, found *memstash.List[K, V]) error {
+	ph := c.dialect.Placeholder
+	var query strings.Builder
+	query.WriteString("SELECT cache_key, value FROM ")
+	query.WriteString(c.table)
+	query.WriteString(" WHERE cache_key IN (")
+	args := make([]any, 0, len(chunk)+1)
+	for i, storageKey := range chunk {
+		if i > 0 {
+			query.WriteString(", ")
+		}
+		query.WriteString(ph(i + 1))
+		args = append(args, storageKey)
+	}
+	query.WriteString(") AND (expires_at = 0 OR expires_at > ")
+	query.WriteString(ph(len(chunk) + 1))
+	query.WriteString(")")
+	args = append(args, now)
+
+	rows, err := c.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var storageKey string
+		var data []byte
+		if err := rows.Scan(&storageKey, &data); err != nil {
+			return err
+		}
+		key, ok := byStorageKey[storageKey]
+		if !ok {
+			continue
+		}
+		value, err := c.codec.Unmarshal(data)
+		if err != nil {
+			return err
+		}
+		*found = append(*found, memstash.KeyVal[K, V]{Key: key, Value: value})
+	}
+	return rows.Err()
+}
+
+// BatchSet stores all items with multi-row "INSERT ... VALUES (...), (...) <upsert>" statements when
+// Dialect.MultiRowUpsert allows, per-item statements otherwise; ttl == 0 means "no expiration". Duplicate keys
+// collapse to the last value.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
-	return l2.BatchSetSequential(ctx, c, items, ttl)
+	if len(items) == 0 {
+		return nil
+	}
+	if !c.dialect.MultiRowUpsert {
+		return l2.BatchSetSequential(ctx, c, items, ttl)
+	}
+	// Collapse duplicate storage keys (last wins): PostgreSQL rejects the same key twice in one upsert statement.
+	type kvRow struct {
+		storageKey string
+		data       []byte
+	}
+	rows := make([]kvRow, 0, len(items))
+	rowIndex := make(map[string]int, len(items))
+	for _, item := range items {
+		data, err := c.codec.Marshal(item.Value)
+		if err != nil {
+			return err
+		}
+		storageKey := c.keyFunc(item.Key)
+		if i, seen := rowIndex[storageKey]; seen {
+			rows[i].data = data
+			continue
+		}
+		rowIndex[storageKey] = len(rows)
+		rows = append(rows, kvRow{storageKey: storageKey, data: data})
+	}
+	deadline := expiresAt(ttl)
+	const chunkRows = maxStatementParams / 3 // three parameters per row
+	ph := c.dialect.Placeholder
+	for start := 0; start < len(rows); start += chunkRows {
+		chunk := rows[start:min(start+chunkRows, len(rows))]
+		var query strings.Builder
+		query.WriteString("INSERT INTO ")
+		query.WriteString(c.table)
+		query.WriteString(" (cache_key, value, expires_at) VALUES ")
+		args := make([]any, 0, 3*len(chunk))
+		for i, row := range chunk {
+			if i > 0 {
+				query.WriteString(", ")
+			}
+			query.WriteString("(")
+			query.WriteString(ph(3*i + 1))
+			query.WriteString(", ")
+			query.WriteString(ph(3*i + 2))
+			query.WriteString(", ")
+			query.WriteString(ph(3*i + 3))
+			query.WriteString(")")
+			args = append(args, row.storageKey, row.data, deadline)
+		}
+		query.WriteString(" ")
+		query.WriteString(c.dialect.Upsert)
+		if _, err := c.db.ExecContext(ctx, query.String(), args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteExpired purges rows whose TTL has elapsed. Call it periodically: expired rows are hidden from Get but are not

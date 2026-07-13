@@ -160,10 +160,38 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	return found, nil
 }
 
-// BatchSet stores the items one by one: the client's write path is per-record. The context is honored by neither the
-// per-op nor the batch APIs used here.
+// BatchSet stores all items in one BatchOperate round trip, falling back to per-item Sets on servers without batch
+// writes (pre-6.0). The context is not honored by the client APIs used here; ttl == 0 means "no expiration".
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
-	return l2.BatchSetSequential(ctx, c, items, ttl)
+	if len(items) <= 1 {
+		return l2.BatchSetSequential(ctx, c, items, ttl)
+	}
+	policy := as.NewBatchWritePolicy()
+	policy.Expiration = expiration(ttl)
+	records := make([]as.BatchRecordIfc, 0, len(items))
+	for _, item := range items {
+		data, err := c.codec.Marshal(item.Value)
+		if err != nil {
+			return err
+		}
+		asKey, aerr := c.newKey(item.Key)
+		if aerr != nil {
+			return aerr
+		}
+		records = append(records, as.NewBatchWrite(policy, asKey, as.PutOp(as.NewBin(binName, data))))
+	}
+	if aerr := c.client.BatchOperate(nil, records); aerr != nil {
+		if aerr.Matches(astypes.UNSUPPORTED_FEATURE) {
+			return l2.BatchSetSequential(ctx, c, items, ttl)
+		}
+		return aerr
+	}
+	for _, record := range records {
+		if err := record.BatchRec().Err; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Cache[K, V]) newKey(key K) (*as.Key, as.Error) {

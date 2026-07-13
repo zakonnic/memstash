@@ -13,10 +13,9 @@ import (
 	"errors"
 	"time"
 
+	"github.com/valyala/ybc/libs/go/memcache"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
-
-	"github.com/valyala/ybc/libs/go/memcache"
 )
 
 // Cache is an L2 adapter over the valyala/ybc memcached client. The client is safe for concurrent use. Its lifecycle
@@ -148,8 +147,12 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	return found, nil
 }
 
-// BatchSet stores the items one by one: the memcached protocol has no multi-set. The context is ignored: the client
+// BatchWorkers is the number of goroutines the concurrent batch fallback runs; the ybc client pipelines concurrent
+// requests natively, so no connection tuning is needed.
+const BatchWorkers = 8
+
+// BatchSet stores the items with concurrent Sets: the protocol has no multi-set. The context is ignored: the client
 // has no context support.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
-	return l2.BatchSetSequential(ctx, c, items, ttl)
+	return l2.BatchSetConcurrent(ctx, c, items, ttl, BatchWorkers)
 }

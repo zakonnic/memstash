@@ -217,6 +217,50 @@ func (s *sequentialStub) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+func TestBatchConcurrentFallbacks(t *testing.T) {
+	ctx := context.Background()
+	store := newSequentialStub()
+
+	items := make(memstash.List[string, string], 0, 100)
+	keys := make([]string, 0, 101)
+	want := map[string]string{}
+	for i := 0; i < 100; i++ {
+		key := "k" + strconv.Itoa(i)
+		items = append(items, memstash.KeyVal[string, string]{Key: key, Value: "v" + strconv.Itoa(i)})
+		keys = append(keys, key)
+		want[key] = "v" + strconv.Itoa(i)
+	}
+	require.NoError(t, l2.BatchSetConcurrent[string, string](ctx, store, items, time.Minute, 8))
+	assert.Equal(t, 100, store.setCalls, "BatchSetConcurrent must call Set once per item")
+
+	keys = append(keys, "missing")
+	found, err := l2.BatchGetConcurrent[string, string](ctx, store, keys, 8)
+	require.NoError(t, err)
+	assert.Equal(t, want, found.ToMap())
+	require.Len(t, found, 100)
+	for i, kv := range found {
+		assert.Equal(t, keys[i], kv.Key, "found items must keep the order of keys")
+	}
+
+	t.Run("single worker degrades to sequential", func(t *testing.T) {
+		store := newSequentialStub()
+		require.NoError(t, l2.BatchSetConcurrent[string, string](ctx, store, items[:3], 0, 1))
+		found, err := l2.BatchGetConcurrent[string, string](ctx, store, keys[:3], 1)
+		require.NoError(t, err)
+		assert.Len(t, found, 3)
+	})
+
+	t.Run("first error is returned with the hits gathered so far", func(t *testing.T) {
+		store := newSequentialStub()
+		require.NoError(t, store.Set(ctx, "a", "1", 0))
+		store.failKey = "b"
+
+		found, err := l2.BatchGetConcurrent[string, string](ctx, store, []string{"a", "b", "c"}, 4)
+		require.ErrorIs(t, err, errBoom)
+		assert.LessOrEqual(t, len(found), 1, "only hits, never the failed key")
+	})
+}
+
 func TestBatchSequentialFallbacks(t *testing.T) {
 	ctx := context.Background()
 	store := newSequentialStub()

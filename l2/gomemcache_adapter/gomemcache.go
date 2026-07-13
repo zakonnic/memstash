@@ -10,10 +10,9 @@ import (
 	"errors"
 	"time"
 
+	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
-
-	"github.com/bradfitz/gomemcache/memcache"
 )
 
 // Cache is an L2 adapter over the bradfitz memcached client. The client is safe for concurrent use; its lifecycle
@@ -145,8 +144,12 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	return found, nil
 }
 
-// BatchSet stores the items one by one: the memcached protocol has no multi-set. The context is ignored: the client
+// BatchWorkers is the number of goroutines the concurrent batch fallback runs. Raise memcache.Client.MaxIdleConns
+// to at least this value, or each batch churns through fresh connections.
+const BatchWorkers = 8
+
+// BatchSet stores the items with concurrent Sets: the protocol has no multi-set. The context is ignored: the client
 // has no context support.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
-	return l2.BatchSetSequential(ctx, c, items, ttl)
+	return l2.BatchSetConcurrent(ctx, c, items, ttl, BatchWorkers)
 }
