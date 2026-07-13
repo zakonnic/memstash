@@ -63,9 +63,12 @@ type Config[K comparable, V any] struct {
 	// MemoryCapacity (but no more than 1<<20) when CostFunc == nil, otherwise 8192.
 	GhostSize int
 
-	// WriteBackBuffer is the buffer size of the background WriteBack worker. 0 means 1024. On buffer overflow the write
-	// is performed synchronously (no data is lost).
-	WriteBackBuffer int
+	// WriteBackBufferSize is the buffer size of the background WriteBack worker. 0 means 1024.
+	// On buffer overflow the write is performed synchronously.
+	WriteBackBufferSize int
+
+	// WriteBackBatching is how the WriteBack worker drains its buffer. Defaults to BatchingFull.
+	WriteBackBatching WriteBackBatching
 
 	// OnL2Error is an optional handler for L2Cache errors on paths where the error cannot be returned to the caller
 	// (write-back, the write after a load in GetOrLoad, the L2Cache read inside GetOrLoad before the loader runs).
@@ -108,8 +111,8 @@ func (c *Config[K, V]) ghostSize() int {
 }
 
 func (c *Config[K, V]) writeBackBuffer() int {
-	if c.WriteBackBuffer > 0 {
-		return c.WriteBackBuffer
+	if c.WriteBackBufferSize > 0 {
+		return c.WriteBackBufferSize
 	}
 	return 1024
 }

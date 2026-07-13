@@ -40,6 +40,18 @@ const (
 	WriteDisabled
 )
 
+// WriteBackBatching defines how the write-back worker drains its buffer into L2.
+type WriteBackBatching uint8
+
+const (
+	// BatchingFull coalesces the queued writes into BatchSet batches (the default).
+	BatchingFull WriteBackBatching = iota
+	// BatchingNone sends every write as its own Set.
+	BatchingNone
+	// BatchingAdaptive sends individual Sets until the buffer is half full, then switches to BatchSet.
+	BatchingAdaptive
+)
+
 // l2Write is a task for the background write-back worker. A non-nil flush marks a Wait checkpoint instead of a write:
 // the channel is FIFO, so by the time the worker reaches the marker every write enqueued before it has been handed to
 // L2, and closing flush releases the waiter.

@@ -27,15 +27,16 @@ type Option struct {
 // FieldOverrides accumulates the plain-value per-field options; a nil pointer means "keep the base value". It exists
 // so those options do not have to be generic: they cannot write into Config[K, V] directly without knowing K and V.
 type FieldOverrides struct {
-	memoryCapacity  *int64
-	memoryBudget    *int64
-	ttl             *time.Duration
-	refreshTTLOnGet *bool
-	policy          *Policy
-	shards          *int
-	writePolicy     *WritePolicy
-	ghostSize       *int
-	writeBackBuffer *int
+	memoryCapacity      *int64
+	memoryBudget        *int64
+	ttl                 *time.Duration
+	refreshTTLOnGet     *bool
+	policy              *Policy
+	shards              *int
+	writePolicy         *WritePolicy
+	ghostSize           *int
+	writeBackBufferSize *int
+	writeBackBatching   *WriteBackBatching
 }
 
 // configTarget is the marker implemented by every Config instantiation: it lets a typed option distinguish "a Config
@@ -80,8 +81,11 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 	if fields.ghostSize != nil {
 		cfg.GhostSize = *fields.ghostSize
 	}
-	if fields.writeBackBuffer != nil {
-		cfg.WriteBackBuffer = *fields.writeBackBuffer
+	if fields.writeBackBufferSize != nil {
+		cfg.WriteBackBufferSize = *fields.writeBackBufferSize
+	}
+	if fields.writeBackBatching != nil {
+		cfg.WriteBackBatching = *fields.writeBackBatching
 	}
 	return &cfg, nil
 }
@@ -157,10 +161,24 @@ func WithGhostSize(ghostSize int) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.ghostSize = &ghostSize }}
 }
 
-// WithWriteBackBuffer sets Config.WriteBackBuffer: the buffer size of the background WriteBack worker.
+// WithWriteBackBuffer sets Config.WriteBackBufferSize: the buffer size of the background WriteBack worker.
 func WithWriteBackBuffer(size int) Option {
-	return Option{ApplyField: func(f *FieldOverrides) { f.writeBackBuffer = &size }}
+	return Option{ApplyField: func(f *FieldOverrides) { f.writeBackBufferSize = &size }}
 }
+
+// withWriteBackBatching builds the option for one WriteBackBatching mode.
+func withWriteBackBatching(mode WriteBackBatching) Option {
+	return Option{ApplyField: func(f *FieldOverrides) { f.writeBackBatching = &mode }}
+}
+
+// WithBatchingForWriteBack the WriteBack worker drains it's buffer in BatchSet batches (the default).
+func WithBatchingForWriteBack() Option { return withWriteBackBatching(BatchingFull) }
+
+// WithNoBatchingForWriteBack one Set per write.
+func WithNoBatchingForWriteBack() Option { return withWriteBackBatching(BatchingNone) }
+
+// WithAdaptiveBatchingForWriteBack per-item Sets while the buffer is at most half full, BatchSet batches above.
+func WithAdaptiveBatchingForWriteBack() Option { return withWriteBackBatching(BatchingAdaptive) }
 
 // WithOnL2Error sets Config.OnL2Error: the handler for L2Cache errors that cannot be returned to the caller.
 func WithOnL2Error[K comparable, V any](handler func(key K, err error)) Option {

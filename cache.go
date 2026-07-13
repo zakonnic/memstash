@@ -66,10 +66,11 @@ type Cache[K comparable, V any] struct {
 	ttl          time.Duration
 	refreshOnGet bool
 
-	l2Cache       L2Cache[K, V]
-	l2WritePolicy WritePolicy // always WriteDisabled when l2Cache not set
-	onL2Error     func(key K, err error)
-	writeCh       chan l2Write[K, V]
+	l2Cache           L2Cache[K, V]
+	l2WritePolicy     WritePolicy // always WriteDisabled when l2Cache not set
+	writeBackBatching WriteBackBatching
+	onL2Error         func(key K, err error)
+	writeCh           chan l2Write[K, V]
 
 	flights *xsync.MapOf[K, *flightCall[V]]
 
@@ -135,18 +136,19 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 
 	numShards := cfg.shardCount()
 	c := &Cache[K, V]{
-		registry:      &itemstate.Registry[K, V]{},
-		costFunc:      cfg.CostFunc,
-		shards:        make([]shard[K, V], numShards),
-		shardMask:     uint32(numShards - 1),
-		seed:          maphash.MakeSeed(),
-		epoch:         time.Now(),
-		ttl:           cfg.TTL,
-		l2Cache:       cfg.L2Cache,
-		l2WritePolicy: cfg.WritePolicy,
-		onL2Error:     cfg.OnL2Error,
-		flights:       xsync.NewMapOf[K, *flightCall[V]](),
-		stop:          make(chan struct{}),
+		registry:          &itemstate.Registry[K, V]{},
+		costFunc:          cfg.CostFunc,
+		shards:            make([]shard[K, V], numShards),
+		shardMask:         uint32(numShards - 1),
+		seed:              maphash.MakeSeed(),
+		epoch:             time.Now(),
+		ttl:               cfg.TTL,
+		l2Cache:           cfg.L2Cache,
+		l2WritePolicy:     cfg.WritePolicy,
+		writeBackBatching: cfg.WriteBackBatching,
+		onL2Error:         cfg.OnL2Error,
+		flights:           xsync.NewMapOf[K, *flightCall[V]](),
+		stop:              make(chan struct{}),
 	}
 	if c.l2Cache == nil {
 		c.l2WritePolicy = WriteDisabled
@@ -960,14 +962,52 @@ func (c *Cache[K, V]) enqueueWriteBack(key K, value V) {
 	}
 }
 
-// flushWrite hands one write-back task to L2; a flush marker releases its Wait checkpoint instead.
-func (c *Cache[K, V]) flushWrite(write l2Write[K, V]) {
-	if write.flush != nil {
-		close(write.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
+// WriteBackBatchMax caps one drain batch: the writes are flushed through the adapter's BatchSet.
+const WriteBackBatchMax = 128
+
+// flushWrite hands one write-back task to L2, coalescing the writes already queued behind it into one BatchSet;
+func (c *Cache[K, V]) flushWrite(first l2Write[K, V]) {
+	if first.flush != nil {
+		close(first.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
 		return
 	}
-	if err := c.l2Cache.Set(context.Background(), write.key, write.value, c.ttl); err != nil {
-		c.reportL2Err(write.key, err)
+	// len(writeCh) is the buffer fill counter the adaptive mode switches on.
+	if c.writeBackBatching == BatchingNone ||
+		(c.writeBackBatching == BatchingAdaptive && len(c.writeCh) <= cap(c.writeCh)/2) {
+		c.writeBatch(List[K, V]{{Key: first.key, Value: first.value}})
+		return
+	}
+	batch := List[K, V]{{Key: first.key, Value: first.value}}
+	for len(batch) < WriteBackBatchMax {
+		select {
+		case write := <-c.writeCh:
+			if write.flush != nil {
+				c.writeBatch(batch)
+				close(write.flush)
+				return
+			}
+			batch = append(batch, KeyVal[K, V]{Key: write.key, Value: write.value})
+		default:
+			c.writeBatch(batch)
+			return
+		}
+	}
+	c.writeBatch(batch)
+}
+
+// writeBatch delivers drained writes to L2: one Set for a single item, one BatchSet otherwise (duplicate keys
+// collapse to the last value there, as FIFO order would). A batch error is reported for every key it covers.
+func (c *Cache[K, V]) writeBatch(batch List[K, V]) {
+	if len(batch) == 1 {
+		if err := c.l2Cache.Set(context.Background(), batch[0].Key, batch[0].Value, c.ttl); err != nil {
+			c.reportL2Err(batch[0].Key, err)
+		}
+		return
+	}
+	if err := c.l2Cache.BatchSet(context.Background(), batch, c.ttl); err != nil {
+		for _, item := range batch {
+			c.reportL2Err(item.Key, err)
+		}
 	}
 }
 
