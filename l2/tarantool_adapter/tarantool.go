@@ -19,10 +19,9 @@ import (
 	"context"
 	"time"
 
+	tarantool "github.com/tarantool/go-tarantool/v2"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
-
-	tarantool "github.com/tarantool/go-tarantool/v2"
 )
 
 // DefaultSpace is the space name used when the caller passes an empty space.
@@ -130,6 +129,14 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V, ttl time.Duration
 	return err
 }
 
+// expiresAt converts a TTL to the stored unix-second deadline.
+func expiresAt(ttl time.Duration) uint64 {
+	if ttl <= 0 {
+		return 0
+	}
+	return uint64(time.Now().Add(ttl).Unix())
+}
+
 // Delete removes the key; a missing key is not an error.
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	req := tarantool.NewDeleteRequest(c.space).Context(ctx).Index(primaryIndex).Key([]any{c.keyFunc(key)})
@@ -186,13 +193,6 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		}
 	}
 	return nil
-}
-
-func expiresAt(ttl time.Duration) int64 {
-	if ttl <= 0 {
-		return 0
-	}
-	return time.Now().Add(ttl).Unix()
 }
 
 func expired(r row) bool {

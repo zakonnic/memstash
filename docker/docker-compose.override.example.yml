@@ -1,0 +1,23 @@
+# Local port remapping for docker/docker-compose.yml.
+#
+# Copy this file to docker-compose.override.yml (it is gitignored) and edit the ports you need; `make up` merges it
+# automatically. The `!override` tag replaces the ports list instead of appending to it. Point the tests at the new
+# ports via the MEMSTASH_TEST_* environment variables (see tests/integration).
+services:
+  postgres:
+    ports: !override
+      - "15432:5432"
+
+  mongo:
+    ports: !override
+      - "37017:27017"
+
+  # The cluster nodes must listen on and announce the exact ports they are published on, so remap them through the
+  # environment and keep the two lists identical.
+  redis-cluster:
+    environment:
+      REDIS_CLUSTER_PORTS: "17001 17002 17003"
+    ports: !override
+      - "17001:17001"
+      - "17002:17002"
+      - "17003:17003"

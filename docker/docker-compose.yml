@@ -1,15 +1,25 @@
 # Backing services for the integration tests and benchmarks in tests/integration.
 #
-#   docker compose -f docker/docker-compose.yml up -d
-#   go -C tests/integration test ./... -v
-#   go -C tests/integration test -run xxx -bench . -benchtime 3s
-#   docker compose -f docker/docker-compose.yml down
+#   make up      # docker compose -f docker/docker-compose.yml [-f docker/docker-compose.override.yml] up -d
+#   make integration-tests
+#   make down
 #
-# The tests read the addresses from MEMSTASH_TEST_REDIS_ADDR / MEMSTASH_TEST_MEMCACHED_ADDR
-# (defaults: localhost:6379 / localhost:11211) and skip themselves when nothing is listening.
+# The tests read the addresses from MEMSTASH_TEST_* environment variables (see tests/integration) and skip
+# themselves when a server is not listening.
+#
+# To remap published ports, copy docker-compose.override.example.yml to docker-compose.override.yml (gitignored)
 services:
   redis:
     image: redis:7-alpine
+    # A cache profile: bounded memory with LRU eviction, no persistence, keepalive on long-idle connections.
+    command:
+      - redis-server
+      - --maxmemory 1024mb
+      - --maxmemory-policy allkeys-lru
+      - --save ''
+      - --appendonly no
+      - --tcp-keepalive 60
+    mem_limit: 384m
     ports:
       - "6379:6379"
     healthcheck:
@@ -18,8 +28,140 @@ services:
       timeout: 2s
       retries: 10
 
+  # A 3-master Redis Cluster in one container. To remap, override REDIS_CLUSTER_PORTS together with ports: the announce
+  # port must match the published port (see docker-compose.override.example.yml).
+  redis-cluster:
+    image: redis:7-alpine
+    command: ["sh", "/redis-cluster/start.sh"]
+    environment:
+      REDIS_CLUSTER_PORTS: "7001 7002 7003"
+    volumes:
+      - ./redis-cluster:/redis-cluster:ro
+    mem_limit: 1024m
+    ports:
+      - "7001:7001"
+      - "7002:7002"
+      - "7003:7003"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -p $${REDIS_CLUSTER_PORTS%% *} cluster info | grep -q cluster_state:ok"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
   memcached:
     image: memcached:1.6-alpine
+    command: ["memcached", "-m", "512", "-c", "2048", "-t", "4"]
+    mem_limit: 1024m
     ports:
       - "11211:11211"
     # memcached has no built-in healthcheck command; the TCP port opening is the readiness signal.
+
+  postgres:
+    image: postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=1024MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+    environment:
+      POSTGRES_USER: memstash
+      POSTGRES_PASSWORD: memstash
+      POSTGRES_DB: memstash
+    mem_limit: 1024m
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memstash"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mysql:
+    image: mariadb:11
+    command:
+      - --innodb-buffer-pool-size=636M
+      - --innodb-flush-log-at-trx-commit=2
+      - --max-connections=200
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb-log-file-size=512M
+      - --innodb-io-capacity=2000
+      - --innodb-io-capacity-max=4000
+    environment:
+      MARIADB_ROOT_PASSWORD: memstash
+      MARIADB_USER: memstash
+      MARIADB_PASSWORD: memstash
+      MARIADB_DATABASE: memstash
+    mem_limit: 1024m
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mongo:
+    image: mongo:7
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.35", "--auth"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: memstash
+      MONGO_INITDB_ROOT_PASSWORD: memstash
+    mem_limit: 1024m
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet -u memstash -p memstash --eval 'db.runCommand({ping: 1}).ok' | grep -q 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  dynamodb:
+    image: amazon/dynamodb-local
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    mem_limit: 1024m
+    ports:
+      - "8000:8000"
+
+  aerospike:
+    image: aerospike/aerospike-server:latest
+    # The image entrypoint renders its own template into /etc/aerospike/aerospike.conf, so the custom config is
+    # mounted under a different name and passed to asd explicitly.
+    command: ["asd", "--config-file", "/etc/aerospike/memstash.conf"]
+    volumes:
+      - ./aerospike/aerospike.conf:/etc/aerospike/memstash.conf:ro
+    mem_limit: 2g
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "asinfo -v status | grep -q ok"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  tarantool:
+    image: tarantool/tarantool:3
+    command: ["tarantool", "/opt/tarantool/init.lua"]
+    volumes:
+      - ./tarantool/init.lua:/opt/tarantool/init.lua:ro
+    mem_limit: 1024m
+    ports:
+      - "3301:3301"
+    healthcheck:
+      test: ["CMD-SHELL", "tarantool -e \"os.exit(require('net.box').connect('localhost:3301'):ping() and 0 or 1)\""]
+      interval: 3s
+      timeout: 3s
+      retries: 20

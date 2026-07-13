@@ -31,3 +31,6 @@ benchmarks/bin/
 .DS_Store
 Thumbs.db
 *~
+
+# --- Local overrides ---
+docker/docker-compose.override.yml

@@ -6,18 +6,22 @@ A separate Go module: pulls in all adapters and their client SDKs without pollut
 
 ```bash
 # from the repository root
-docker compose -f docker/docker-compose.yml up -d
+make up      # docker compose up -d --wait, with docker/docker-compose.override.yml merged in when present
 
 go -C tests/integration test ./... -v            # tests (one file per adapter, shared scenario suite)
 go -C tests/integration test ./... -short        # skip the slow TTL scenario
 go -C tests/integration test -run xxx -bench . -benchtime 3s   # benchmarks
 
-docker compose -f docker/docker-compose.yml down
+make down
 ```
 
-Server addresses: `MEMSTASH_TEST_REDIS_ADDR` (defaults to `localhost:6379`) and `MEMSTASH_TEST_MEMCACHED_ADDR`
-(`localhost:11211`). If a server isn't listening, the corresponding tests are **skipped**, not failed: a partial
-environment (only Redis or only memcached) is useful on its own.
+Server addresses come from `MEMSTASH_TEST_<SERVER>_ADDR` environment variables (REDIS, REDIS_CLUSTER_ADDRS -
+comma-separated seeds, MEMCACHED, POSTGRES, MYSQL, MONGO, DYNAMO, AEROSPIKE, TARANTOOL), with defaults matching
+docker/docker-compose.yml: `127.0.0.1:6379`, `7001-7003`, `11211`, `5432`, `3306`, `27017`, `8000`, `3000`, `3301`.
+Set them when remapping ports through docker-compose.override.yml (see the .example next to the compose file). If a
+server isn't listening, the corresponding tests are **skipped**, not failed: a partial environment is useful on its
+own. The redis cluster suite runs the cluster-capable adapters (rueidis, go-redis, redispipe) against the 3-master
+cluster; redigo is single-node only.
 
 `valyala_test.go` only builds with cgo enabled (the ybc client needs a C compiler). If there's no C compiler on the
 system, run with `CGO_ENABLED=0` — the valyala file is excluded from the build and the other adapters are unaffected:

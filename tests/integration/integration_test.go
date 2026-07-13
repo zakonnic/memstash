@@ -1,4 +1,4 @@
-// Package integration tests the two-level cache against live Redis and memcached servers through every L2 adapter.
+// Package integration tests the two-level cache against live servers through every L2 adapter.
 // Start the servers with `docker compose -f docker/docker-compose.yml up -d` (repo root); tests skip themselves when
 // the corresponding server is not listening. One file per adapter builds a cacheFactory and runs the shared suite.
 package integration
@@ -8,28 +8,39 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/zakonnic/memstash"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zakonnic/memstash"
 )
 
-func redisAddr() string {
-	if addr := os.Getenv("MEMSTASH_TEST_REDIS_ADDR"); addr != "" {
+// envAddr returns the server address from the environment (for setups with remapped ports, see
+// docker/docker-compose.override.example.yml) or the default matching docker/docker-compose.yml.
+func envAddr(env, fallback string) string {
+	if addr := os.Getenv(env); addr != "" {
 		return addr
 	}
-	return "localhost:6379"
+	return fallback
 }
 
-func memcachedAddr() string {
-	if addr := os.Getenv("MEMSTASH_TEST_MEMCACHED_ADDR"); addr != "" {
-		return addr
-	}
-	return "localhost:11211"
+// The defaults say 127.0.0.1, not localhost: clients that dial per request resolve localhost to ::1 first, and the
+// Docker Desktop port relay stalls those dials by ~50ms each.
+func redisAddr() string     { return envAddr("MEMSTASH_TEST_REDIS_ADDR", "127.0.0.1:6379") }
+func memcachedAddr() string { return envAddr("MEMSTASH_TEST_MEMCACHED_ADDR", "127.0.0.1:11211") }
+func postgresAddr() string  { return envAddr("MEMSTASH_TEST_POSTGRES_ADDR", "127.0.0.1:5432") }
+func mysqlAddr() string     { return envAddr("MEMSTASH_TEST_MYSQL_ADDR", "127.0.0.1:3306") }
+func mongoAddr() string     { return envAddr("MEMSTASH_TEST_MONGO_ADDR", "127.0.0.1:27017") }
+func dynamoAddr() string    { return envAddr("MEMSTASH_TEST_DYNAMO_ADDR", "127.0.0.1:8000") }
+func aerospikeAddr() string { return envAddr("MEMSTASH_TEST_AEROSPIKE_ADDR", "127.0.0.1:3000") }
+func tarantoolAddr() string { return envAddr("MEMSTASH_TEST_TARANTOOL_ADDR", "127.0.0.1:3301") }
+
+// redisClusterAddrs returns the seed addresses of the 3-node cluster (comma-separated in the environment).
+func redisClusterAddrs() []string {
+	return strings.Split(envAddr("MEMSTASH_TEST_REDIS_CLUSTER_ADDRS", "127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003"), ",")
 }
 
 // requireServer skips the test when nothing listens on addr, so a partial environment (only Redis, only memcached)
@@ -148,9 +159,6 @@ func suiteWriteBackFlushOnClose(t *testing.T, newCache cacheFactory) {
 	}
 }
 
-// suiteWriteBackVisibleAfterWait exercises the default policy (WriteBack): Sets return immediately, and Wait is the
-// checkpoint after which the background worker is guaranteed to have delivered them to L2 - all without stopping the
-// cache. The verification deliberately runs in a separate goroutine.
 func suiteWriteBackVisibleAfterWait(t *testing.T, newCache cacheFactory) {
 	ctx := context.Background()
 	prefix := uniquePrefix(t)
@@ -162,6 +170,7 @@ func suiteWriteBackVisibleAfterWait(t *testing.T, newCache cacheFactory) {
 		require.NoError(t, writer.Set(ctx, fmt.Sprintf("k%d", i), fmt.Sprintf("v%d", i)))
 	}
 
+	// The verification runs in a separate goroutine.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

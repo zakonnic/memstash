@@ -1,13 +1,17 @@
 DC = docker compose
+DC_FILES = -f docker/docker-compose.yml
+ifneq (,$(wildcard docker/docker-compose.override.yml))
+DC_FILES += -f docker/docker-compose.override.yml
+endif
 
 .PHONY: help
 help: ## Show help message
 	@cat $(MAKEFILE_LIST) | grep -e "^[a-zA-Z_\%-]*: *.*## *" | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
-up: ## Start containers for the integration tests
-	$(DC) -f docker/docker-compose.yml up -d
+up: ## Start containers for the integration tests (waits for healthchecks)
+	$(DC) $(DC_FILES) up -d --wait
 down: ## Stop and remove the integration containers
-	$(DC) -f docker/docker-compose.yml down
+	$(DC) $(DC_FILES) down
 
 update-packages: ## Update go modules versions
 	go get -u ./...
