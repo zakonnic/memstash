@@ -121,7 +121,7 @@ client, _ := rueidis.NewClient(rueidis.ClientOption{
 })
 
 // JSON values, string keys, 10-minute TTL applied to both tiers (L1 uses the default capacity).
-c, _ := rueidis_adapter.NewCacheJSON[string, User](client, memstash.WithTTL(10*time.Minute))
+c, _ := rueidis_adapter.NewJSONCache[string, User](client, memstash.WithTTL(10*time.Minute))
 defer c.Close()
 
 _ = c.Set(ctx, "user:42", user)     // L1 now, Redis shortly after (write-back)
@@ -153,7 +153,7 @@ c, _ := memstash.New[string, User](
 **Synchronous writes on Set** - write-through policy, L2 updated synchronously:
 
 ```go
-c, _ := rueidis_adapter.NewCacheJSON[string, Session](client,
+c, _ := rueidis_adapter.NewJSONCache[string, Session](client,
 	memstash.WithMemoryCapacity(50_000),
 	memstash.WithWritePolicy(memstash.WriteThrough),
 )
@@ -169,7 +169,7 @@ _ = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b",
 **Non-string keys with a custom key mapping** - provide a key function for the L2 storage key:
 
 ```go
-c, _ := rueidis_adapter.NewCacheJSON[int, User](client,
+c, _ := rueidis_adapter.NewJSONCache[int, User](client,
 	memstash.WithMemoryCapacity(100_000),
 	l2.WithKeyFunc(func(id int) string { return "user:" + strconv.Itoa(id) }),
 )
@@ -221,7 +221,7 @@ Full option list:
 
 ## L2 Adapters
 
-Each adapter is a separate module (`memstash/l2/<name>_adapter`) so the core never pulls in a client SDK you don't use. Every adapter offers both an "adapter only" constructor (`New`, `NewJSON`, `NewBytes`) and an all-in-one two-level constructor (`NewCache`, `NewCacheJSON`, `NewCacheBytes`), plus native batch pipelining where the client supports it.
+Each adapter is a separate module (`memstash/l2/<name>_adapter`) so the core never pulls in a client SDK you don't use. Every adapter offers both an "adapter only" constructor (`New`, `NewJSON`, `NewBytes`) and an all-in-one two-level constructor (`NewCache`, `NewJSONCache`, `NewBytesCache`), plus native batch pipelining where the client supports it.
 
 | Module | Backend / client | context |
 |---|---|---|

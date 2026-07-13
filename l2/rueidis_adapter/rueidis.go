@@ -5,10 +5,9 @@ import (
 	"context"
 	"time"
 
+	rueidislib "github.com/redis/rueidis"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
-
-	rueidislib "github.com/redis/rueidis"
 )
 
 // Cache is an L2 adapter over rueidis. The client is safe for concurrent use; its lifecycle stays with the caller.
@@ -66,13 +65,13 @@ func NewCache[K comparable, V any](client rueidislib.Client, codec memstash.Code
 	return memstash.New[K, V](cacheOpts...)
 }
 
-// NewCacheJSON builds a two-level cache with the JSON value codec (see NewCache).
-func NewCacheJSON[K comparable, V any](client rueidislib.Client, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+// NewJSONCache builds a two-level cache with the JSON value codec (see NewCache).
+func NewJSONCache[K comparable, V any](client rueidislib.Client, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
 	return NewCache[K, V](client, l2.JSONCodec[V](), opts...)
 }
 
-// NewCacheBytes builds a two-level cache that passes []byte values through unchanged (see NewCache).
-func NewCacheBytes[K comparable](client rueidislib.Client, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
+// NewBytesCache builds a two-level cache that passes []byte values through unchanged (see NewCache).
+func NewBytesCache[K comparable](client rueidislib.Client, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
 	return NewCache[K, []byte](client, l2.BytesCodec(), opts...)
 }
 

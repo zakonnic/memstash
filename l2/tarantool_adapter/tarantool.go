@@ -90,13 +90,13 @@ func NewCache[K comparable, V any](doer tarantool.Doer, codec memstash.Codec[V],
 	return memstash.New[K, V](cacheOpts...)
 }
 
-// NewCacheJSON builds a two-level cache with the JSON value codec (see NewCache).
-func NewCacheJSON[K comparable, V any](doer tarantool.Doer, space string, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+// NewJSONCache builds a two-level cache with the JSON value codec (see NewCache).
+func NewJSONCache[K comparable, V any](doer tarantool.Doer, space string, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
 	return NewCache[K, V](doer, l2.JSONCodec[V](), space, opts...)
 }
 
-// NewCacheBytes builds a two-level cache that passes []byte values through unchanged (see NewCache).
-func NewCacheBytes[K comparable](doer tarantool.Doer, space string, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
+// NewBytesCache builds a two-level cache that passes []byte values through unchanged (see NewCache).
+func NewBytesCache[K comparable](doer tarantool.Doer, space string, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
 	return NewCache[K, []byte](doer, l2.BytesCodec(), space, opts...)
 }
 

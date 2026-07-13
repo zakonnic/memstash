@@ -69,13 +69,13 @@ func NewCache[K comparable, V any](pool *redigolib.Pool, codec memstash.Codec[V]
 	return memstash.New[K, V](cacheOpts...)
 }
 
-// NewCacheJSON builds a two-level cache with the JSON value codec (see NewCache).
-func NewCacheJSON[K comparable, V any](pool *redigolib.Pool, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+// NewJSONCache builds a two-level cache with the JSON value codec (see NewCache).
+func NewJSONCache[K comparable, V any](pool *redigolib.Pool, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
 	return NewCache[K, V](pool, l2.JSONCodec[V](), opts...)
 }
 
-// NewCacheBytes builds a two-level cache that passes []byte values through unchanged (see NewCache).
-func NewCacheBytes[K comparable](pool *redigolib.Pool, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
+// NewBytesCache builds a two-level cache that passes []byte values through unchanged (see NewCache).
+func NewBytesCache[K comparable](pool *redigolib.Pool, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
 	return NewCache[K, []byte](pool, l2.BytesCodec(), opts...)
 }
 

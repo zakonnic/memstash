@@ -146,13 +146,13 @@ func NewCache[K comparable, V any](db DB, codec memstash.Codec[V], table string,
 	return memstash.New[K, V](cacheOpts...)
 }
 
-// NewCacheJSON builds a two-level cache with the JSON value codec (see NewCache).
-func NewCacheJSON[K comparable, V any](db DB, table string, dialect Dialect, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+// NewJSONCache builds a two-level cache with the JSON value codec (see NewCache).
+func NewJSONCache[K comparable, V any](db DB, table string, dialect Dialect, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
 	return NewCache[K, V](db, l2.JSONCodec[V](), table, dialect, opts...)
 }
 
-// NewCacheBytes builds a two-level cache that passes []byte values through unchanged (see NewCache).
-func NewCacheBytes[K comparable](db DB, table string, dialect Dialect, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
+// NewBytesCache builds a two-level cache that passes []byte values through unchanged (see NewCache).
+func NewBytesCache[K comparable](db DB, table string, dialect Dialect, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
 	return NewCache[K, []byte](db, l2.BytesCodec(), table, dialect, opts...)
 }
 

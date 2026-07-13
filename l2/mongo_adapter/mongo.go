@@ -14,7 +14,6 @@ import (
 
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
-
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -75,13 +74,13 @@ func NewCache[K comparable, V any](coll *mongo.Collection, codec memstash.Codec[
 	return memstash.New[K, V](cacheOpts...)
 }
 
-// NewCacheJSON builds a two-level cache with the JSON value codec (see NewCache).
-func NewCacheJSON[K comparable, V any](coll *mongo.Collection, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+// NewJSONCache builds a two-level cache with the JSON value codec (see NewCache).
+func NewJSONCache[K comparable, V any](coll *mongo.Collection, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
 	return NewCache[K, V](coll, l2.JSONCodec[V](), opts...)
 }
 
-// NewCacheBytes builds a two-level cache that passes []byte values through unchanged (see NewCache).
-func NewCacheBytes[K comparable](coll *mongo.Collection, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
+// NewBytesCache builds a two-level cache that passes []byte values through unchanged (see NewCache).
+func NewBytesCache[K comparable](coll *mongo.Collection, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
 	return NewCache[K, []byte](coll, l2.BytesCodec(), opts...)
 }
 

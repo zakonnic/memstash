@@ -13,10 +13,9 @@ import (
 	"errors"
 	"time"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
-
-	badger "github.com/dgraph-io/badger/v4"
 )
 
 // Cache is an L2 adapter over BadgerDB. The *badger.DB lifecycle stays with the caller.
@@ -67,13 +66,13 @@ func NewCache[K comparable, V any](db *badger.DB, codec memstash.Codec[V], opts 
 	return memstash.New[K, V](cacheOpts...)
 }
 
-// NewCacheJSON builds a two-level cache with the JSON value codec (see NewCache).
-func NewCacheJSON[K comparable, V any](db *badger.DB, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+// NewJSONCache builds a two-level cache with the JSON value codec (see NewCache).
+func NewJSONCache[K comparable, V any](db *badger.DB, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
 	return NewCache[K, V](db, l2.JSONCodec[V](), opts...)
 }
 
-// NewCacheBytes builds a two-level cache that passes []byte values through unchanged (see NewCache).
-func NewCacheBytes[K comparable](db *badger.DB, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
+// NewBytesCache builds a two-level cache that passes []byte values through unchanged (see NewCache).
+func NewBytesCache[K comparable](db *badger.DB, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
 	return NewCache[K, []byte](db, l2.BytesCodec(), opts...)
 }
 

@@ -7,11 +7,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zakonnic/memstash"
-	"github.com/zakonnic/memstash/l2"
-
 	redispiperedis "github.com/joomcode/redispipe/redis"
 	"github.com/joomcode/redispipe/redisconn"
+	"github.com/zakonnic/memstash"
+	"github.com/zakonnic/memstash/l2"
 )
 
 // Cache is an L2 adapter over a redispipe Sender (redisconn or rediscluster). The sender is safe for concurrent use;
@@ -75,13 +74,13 @@ func NewCache[K comparable, V any](sender redispiperedis.Sender, codec memstash.
 	return memstash.New[K, V](cacheOpts...)
 }
 
-// NewCacheJSON builds a two-level cache with the JSON value codec (see NewCache).
-func NewCacheJSON[K comparable, V any](sender redispiperedis.Sender, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+// NewJSONCache builds a two-level cache with the JSON value codec (see NewCache).
+func NewJSONCache[K comparable, V any](sender redispiperedis.Sender, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
 	return NewCache[K, V](sender, l2.JSONCodec[V](), opts...)
 }
 
-// NewCacheBytes builds a two-level cache that passes []byte values through unchanged (see NewCache).
-func NewCacheBytes[K comparable](sender redispiperedis.Sender, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
+// NewBytesCache builds a two-level cache that passes []byte values through unchanged (see NewCache).
+func NewBytesCache[K comparable](sender redispiperedis.Sender, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
 	return NewCache[K, []byte](sender, l2.BytesCodec(), opts...)
 }
 

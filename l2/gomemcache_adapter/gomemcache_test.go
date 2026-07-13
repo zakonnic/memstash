@@ -8,7 +8,6 @@ import (
 	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
 	gomemcache_adapter "github.com/zakonnic/memstash/l2/gomemcache_adapter"
@@ -95,10 +94,10 @@ func TestNewCache(t *testing.T) {
 	assert.Equal(t, "v", v)
 
 	// The codec-fixed cache constructors share the same plumbing - a smoke instantiation is enough.
-	cacheJSON, err := gomemcache_adapter.NewCacheJSON[string, int](client, memstash.WithMemoryCapacity(10))
+	cacheJSON, err := gomemcache_adapter.NewJSONCache[string, int](client, memstash.WithMemoryCapacity(10))
 	require.NoError(t, err)
 	cacheJSON.Close()
-	cacheBytes, err := gomemcache_adapter.NewCacheBytes[string](client, memstash.WithMemoryCapacity(10))
+	cacheBytes, err := gomemcache_adapter.NewBytesCache[string](client, memstash.WithMemoryCapacity(10))
 	require.NoError(t, err)
 	cacheBytes.Close()
 }

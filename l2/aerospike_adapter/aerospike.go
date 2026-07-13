@@ -11,11 +11,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/zakonnic/memstash"
-	"github.com/zakonnic/memstash/l2"
-
 	as "github.com/aerospike/aerospike-client-go/v7"
 	astypes "github.com/aerospike/aerospike-client-go/v7/types"
+	"github.com/zakonnic/memstash"
+	"github.com/zakonnic/memstash/l2"
 )
 
 // binName holds the encoded value in every record.
@@ -71,13 +70,13 @@ func NewCache[K comparable, V any](client as.ClientIfc, codec memstash.Codec[V],
 	return memstash.New[K, V](cacheOpts...)
 }
 
-// NewCacheJSON builds a two-level cache with the JSON value codec (see NewCache).
-func NewCacheJSON[K comparable, V any](client as.ClientIfc, namespace, set string, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+// NewJSONCache builds a two-level cache with the JSON value codec (see NewCache).
+func NewJSONCache[K comparable, V any](client as.ClientIfc, namespace, set string, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
 	return NewCache[K, V](client, l2.JSONCodec[V](), namespace, set, opts...)
 }
 
-// NewCacheBytes builds a two-level cache that passes []byte values through unchanged (see NewCache).
-func NewCacheBytes[K comparable](client as.ClientIfc, namespace, set string, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
+// NewBytesCache builds a two-level cache that passes []byte values through unchanged (see NewCache).
+func NewBytesCache[K comparable](client as.ClientIfc, namespace, set string, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
 	return NewCache[K, []byte](client, l2.BytesCodec(), namespace, set, opts...)
 }
 
