@@ -46,8 +46,8 @@ bench: bench-speed bench-hitrate ## Run benchmarks
 
 integration-tests: ## Run integration tests against live redis/memcached (make up first); CGO off so the cgo-only valyala adapter is skipped
 	CGO_ENABLED=0 go -C tests/integration test ./... -v
-integration-bench: ## Run L1+L2 load-profile benchmarks against live redis/memcached (make up first)
-	CGO_ENABLED=0 go -C tests/integration test -run xxx -bench . -benchtime 3s ./...
+integration-bench: up ## Run L1+L2 load-profile benchmarks against the live servers (make up first)
+	CGO_ENABLED=0 go -C tests/integration test -run xxx -bench . -benchtime 1s ./...
 
 .PHONY: load-generator
 load-generator: ## Build the long-running load generator (+ config.yaml) into benchmarks/bin

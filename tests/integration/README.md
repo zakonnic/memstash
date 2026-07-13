@@ -46,15 +46,19 @@ CGO_ENABLED=0 go -C tests/integration test ./... -v
 Each subtest runs in its own key namespace (`l2.PrefixedString`), so tests and repeated runs don't see each other's
 data and don't require cleaning up the servers.
 
-## Benchmarks (real-world load profiles, L1 ≈ 10% of the keyspace)
+## Benchmarks (realistic traces, every backend)
+
+The workloads are scaled-down copies of the realistic workload scenarios, replayed cache-aside
+(L1 → L2 → miss stores the deterministic value, write-back drains in the background). Keyspaces are sized so even a backend at tens of ms per L2 Get replays a meaningful slice of the
+trace within one `-benchtime` window; `make integration-bench` covers all backends in a few minutes.
 
 | Benchmark | Profile |
 |---|---|
-| `BenchmarkZipfReadThrough` | read-through with a Zipf distribution: a hot head served from L1, a tail from the network; `l1hit-ratio` metric |
-| `BenchmarkSessionReadMostly` | session store: 90% reads / 10% write-through writes, uniform access (worst case for L1) |
-| `BenchmarkWriteBackIngest` | 100% writes with async WriteBack (metrics/counters); buffer flush happens outside the timer |
-| `BenchmarkWriteThroughIngest` | the same writes done synchronously — a baseline showing the cost of the network round trip on Set |
-| `BenchmarkGetOrLoadZipf` | read-through via GetOrLoad with singleflight; `loader-calls` metric (should be ~0) |
+| `BenchmarkWebSessions` | Zipf over 20k session tokens, ~350-650 B JSON documents |
+| `BenchmarkCDNAssets` | 75% Zipf over an 8k catalogue + 25% one-hit wonders, bimodal 0.6-32 KB values |
+| `BenchmarkDBRows` | Zipf point lookups over 20k rows with a recurring 2k-row sequential scan |
+| `BenchmarkAdapterBatch*` | raw adapter BatchGet/BatchSet paths on the redis adapters, three size profiles |
 
-Benchmarks are run against the canonical clients of both backends (go-redis and bradfitz/gomemcache) — the adapters
-differ only in protocol wiring, so the backend-level numbers are transferable.
+Each scenario runs on every adapter/backend pair. Clients are dialed once per
+process and shared; one live cache per scenario+backend persists across the ramp-up runs, so the numbers describe a
+converged warm cache (`l1hit-ratio`/`l2hit-ratio` are reported next to ns/op).

@@ -76,6 +76,8 @@ services:
       - checkpoint_timeout=15min
       - -c
       - checkpoint_completion_target=0.9
+      - -c
+      - synchronous_commit=off
     environment:
       POSTGRES_USER: memstash
       POSTGRES_PASSWORD: memstash
@@ -134,7 +136,7 @@ services:
     command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
     mem_limit: 1024m
     ports:
-      - "8000:8000"
+      - "8100:8000"
 
   aerospike:
     image: aerospike/aerospike-server:latest

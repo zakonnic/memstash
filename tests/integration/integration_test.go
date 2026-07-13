@@ -34,7 +34,7 @@ func memcachedAddr() string { return envAddr("MEMSTASH_TEST_MEMCACHED_ADDR", "12
 func postgresAddr() string  { return envAddr("MEMSTASH_TEST_POSTGRES_ADDR", "127.0.0.1:5432") }
 func mysqlAddr() string     { return envAddr("MEMSTASH_TEST_MYSQL_ADDR", "127.0.0.1:3306") }
 func mongoAddr() string     { return envAddr("MEMSTASH_TEST_MONGO_ADDR", "127.0.0.1:27017") }
-func dynamoAddr() string    { return envAddr("MEMSTASH_TEST_DYNAMO_ADDR", "127.0.0.1:8000") }
+func dynamoAddr() string    { return envAddr("MEMSTASH_TEST_DYNAMO_ADDR", "127.0.0.1:8100") }
 func aerospikeAddr() string { return envAddr("MEMSTASH_TEST_AEROSPIKE_ADDR", "127.0.0.1:3000") }
 func tarantoolAddr() string { return envAddr("MEMSTASH_TEST_TARANTOOL_ADDR", "127.0.0.1:3301") }
 
