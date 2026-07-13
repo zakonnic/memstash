@@ -84,6 +84,11 @@ func NewBytesCache[K comparable](coll *mongo.Collection, opts ...memstash.Option
 	return NewCache[K, []byte](coll, l2.BytesCodec(), opts...)
 }
 
+// NewStringCache builds a two-level cache that passes string values through unchanged (see NewCache).
+func NewStringCache[K comparable](coll *mongo.Collection, opts ...memstash.Option) (*memstash.Cache[K, string], error) {
+	return NewCache[K, string](coll, l2.StringCodec(), opts...)
+}
+
 // EnsureTTLIndex creates the TTL index on expireAt so MongoDB deletes expired documents. Safe to call repeatedly.
 func (c *Cache[K, V]) EnsureTTLIndex(ctx context.Context) error {
 	_, err := c.coll.Indexes().CreateOne(ctx, mongo.IndexModel{

@@ -74,6 +74,11 @@ func NewBytesCache[K comparable](client *memcache.Client, opts ...memstash.Optio
 	return NewCache[K, []byte](client, l2.BytesCodec(), opts...)
 }
 
+// NewStringCache builds a two-level cache that passes string values through unchanged (see NewCache).
+func NewStringCache[K comparable](client *memcache.Client, opts ...memstash.Option) (*memstash.Cache[K, string], error) {
+	return NewCache[K, string](client, l2.StringCodec(), opts...)
+}
+
 // Get returns the value; a missing key is (zero, false, nil). The context is ignored: the client has no context
 // support.
 func (c *Cache[K, V]) Get(_ context.Context, key K) (V, bool, error) {

@@ -76,6 +76,11 @@ func NewBytesCache[K comparable](db *badger.DB, opts ...memstash.Option) (*memst
 	return NewCache[K, []byte](db, l2.BytesCodec(), opts...)
 }
 
+// NewStringCache builds a two-level cache that passes string values through unchanged (see NewCache).
+func NewStringCache[K comparable](db *badger.DB, opts ...memstash.Option) (*memstash.Cache[K, string], error) {
+	return NewCache[K, string](db, l2.StringCodec(), opts...)
+}
+
 // Get returns the value; a missing (or expired) key is (zero, false, nil).
 func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	var (

@@ -105,6 +105,11 @@ func NewBytesCache[K comparable](client DynamoAPI, table string, opts ...memstas
 	return NewCache[K, []byte](client, l2.BytesCodec(), table, opts...)
 }
 
+// NewStringCache builds a two-level cache that passes string values through unchanged (see NewCache).
+func NewStringCache[K comparable](client DynamoAPI, table string, opts ...memstash.Option) (*memstash.Cache[K, string], error) {
+	return NewCache[K, string](client, l2.StringCodec(), table, opts...)
+}
+
 // Get returns the value; a missing (or expired) key is (zero, false, nil).
 func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	var zero V

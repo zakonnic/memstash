@@ -79,6 +79,11 @@ func NewBytesCache[K comparable](pool *redigolib.Pool, opts ...memstash.Option) 
 	return NewCache[K, []byte](pool, l2.BytesCodec(), opts...)
 }
 
+// NewStringCache builds a two-level cache that passes string values through unchanged (see NewCache).
+func NewStringCache[K comparable](pool *redigolib.Pool, opts ...memstash.Option) (*memstash.Cache[K, string], error) {
+	return NewCache[K, string](pool, l2.StringCodec(), opts...)
+}
+
 // do borrows a connection, runs one command and returns the connection to the pool. The context cancels the wait for
 // a free connection always; it cancels the command itself only when the pool dials connections with context support
 // (Pool.DialContext) - otherwise the command falls back to the plain Do.

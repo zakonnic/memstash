@@ -100,6 +100,11 @@ func NewBytesCache[K comparable](doer tarantool.Doer, space string, opts ...mems
 	return NewCache[K, []byte](doer, l2.BytesCodec(), space, opts...)
 }
 
+// NewStringCache builds a two-level cache that passes string values through unchanged (see NewCache).
+func NewStringCache[K comparable](doer tarantool.Doer, space string, opts ...memstash.Option) (*memstash.Cache[K, string], error) {
+	return NewCache[K, string](doer, l2.StringCodec(), space, opts...)
+}
+
 // Get returns the value; a missing (or expired) key is (zero, false, nil).
 func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	var zero V

@@ -84,6 +84,11 @@ func NewBytesCache[K comparable](sender redispiperedis.Sender, opts ...memstash.
 	return NewCache[K, []byte](sender, l2.BytesCodec(), opts...)
 }
 
+// NewStringCache builds a two-level cache that passes string values through unchanged (see NewCache).
+func NewStringCache[K comparable](sender redispiperedis.Sender, opts ...memstash.Option) (*memstash.Cache[K, string], error) {
+	return NewCache[K, string](sender, l2.StringCodec(), opts...)
+}
+
 // Get returns the value; a missing key is (zero, false, nil).
 func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	var zero V
