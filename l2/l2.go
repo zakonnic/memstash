@@ -117,6 +117,17 @@ func BatchSetSequential[K comparable, V any](ctx context.Context, store memstash
 	return nil
 }
 
+// BatchDeleteSequential implements L2Cache.BatchDelete for backends without a native multi-delete by looping over
+// Delete.
+func BatchDeleteSequential[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], keys []K) error {
+	for _, key := range keys {
+		if err := store.Delete(ctx, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // --- concurrent batch fallbacks ---
 
 // BatchGetConcurrent implements L2Cache.BatchGet by running Get on up to workers goroutines. Found items keep the
@@ -154,6 +165,16 @@ func BatchSetConcurrent[K comparable, V any](ctx context.Context, store memstash
 	}
 	return runConcurrent(len(items), workers, func(i int) error {
 		return store.Set(ctx, items[i].Key, items[i].Value, ttl)
+	})
+}
+
+// BatchDeleteConcurrent implements L2Cache.BatchDelete by running Delete on up to workers goroutines.
+func BatchDeleteConcurrent[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], keys []K, workers int) error {
+	if len(keys) <= 1 || workers <= 1 {
+		return BatchDeleteSequential(ctx, store, keys)
+	}
+	return runConcurrent(len(keys), workers, func(i int) error {
+		return store.Delete(ctx, keys[i])
 	})
 }
 

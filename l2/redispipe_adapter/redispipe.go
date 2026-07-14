@@ -130,6 +130,31 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return redispiperedis.AsError(c.sync.Do(ctx, "DEL", c.keyFunc(key)))
 }
 
+// BatchDelete removes all keys in one round trip: a single DEL request on a plain connection when the batch fits
+// multiKeyBudget, otherwise a SendMany batch of DELs.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if c.singleNode {
+		args := make([]interface{}, len(keys))
+		size := 0
+		for i, key := range keys {
+			storageKey := c.keyFunc(key)
+			args[i] = storageKey
+			size += len(storageKey) + argWireOverhead
+		}
+		if size <= multiKeyBudget {
+			return redispiperedis.AsError(c.sync.Do(ctx, "DEL", args...))
+		}
+	}
+	requests := make([]redispiperedis.Request, len(keys))
+	for i, key := range keys {
+		requests[i] = redispiperedis.Req("DEL", c.keyFunc(key))
+	}
+	return sendManyErr(c.sync.SendMany(ctx, requests))
+}
+
 // BatchGet fetches all keys in one round trip: a single MGET request on a plain connection when the batch fits
 // multiKeyBudget, otherwise a SendMany batch of GETs.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {

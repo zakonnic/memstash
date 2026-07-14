@@ -198,6 +198,34 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	return nil
 }
 
+// BatchDelete removes all keys in one BatchOperate round trip, falling back to per-key Deletes on servers without
+// batch writes (pre-6.0). The context is not honored by the client APIs used here; missing keys are not errors.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) <= 1 {
+		return l2.BatchDeleteSequential[K, V](ctx, c, keys)
+	}
+	records := make([]as.BatchRecordIfc, 0, len(keys))
+	for _, key := range keys {
+		asKey, aerr := c.newKey(key)
+		if aerr != nil {
+			return aerr
+		}
+		records = append(records, as.NewBatchDelete(nil, asKey))
+	}
+	if aerr := c.client.BatchOperate(nil, records); aerr != nil {
+		if aerr.Matches(astypes.UNSUPPORTED_FEATURE) {
+			return l2.BatchDeleteSequential[K, V](ctx, c, keys)
+		}
+		return aerr
+	}
+	for _, record := range records {
+		if err := record.BatchRec().Err; err != nil && !err.Matches(astypes.KEY_NOT_FOUND_ERROR) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *Cache[K, V]) newKey(key K) (*as.Key, as.Error) {
 	return as.NewKey(c.namespace, c.set, c.keyFunc(key))
 }

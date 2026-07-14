@@ -181,6 +181,21 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	return wb.Flush()
 }
 
+// BatchDelete removes all keys through a single WriteBatch (Badger's bulk-write path).
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	wb := c.db.NewWriteBatch()
+	defer wb.Cancel()
+	for _, key := range keys {
+		if err := wb.Delete([]byte(c.keyFunc(key))); err != nil {
+			return err
+		}
+	}
+	return wb.Flush()
+}
+
 // newEntry builds a Badger entry, attaching a TTL only when one is requested.
 func newEntry(key string, data []byte, ttl time.Duration) *badger.Entry {
 	e := badger.NewEntry([]byte(key), data)

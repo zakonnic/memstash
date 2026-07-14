@@ -131,6 +131,30 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return c.client.Del(ctx, c.keyFunc(key)).Err()
 }
 
+// BatchDelete removes all keys in one round trip: a single DEL command on a single-node client when the batch fits
+// MultiKeyBudget, otherwise a pipeline of DELs.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	storageKeys := make([]string, len(keys))
+	size := 0
+	for i, key := range keys {
+		storageKeys[i] = c.keyFunc(key)
+		size += len(storageKeys[i]) + argWireOverhead
+	}
+	if c.singleNode && size <= MultiKeyBudget {
+		return c.client.Del(ctx, storageKeys...).Err()
+	}
+	_, err := c.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for _, storageKey := range storageKeys {
+			pipe.Del(ctx, storageKey)
+		}
+		return nil
+	})
+	return err
+}
+
 // BatchGet fetches all keys in one round trip: a single MGET command on a single-node client when the batch fits
 // multiKeyBudget, otherwise a pipeline of GETs.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {

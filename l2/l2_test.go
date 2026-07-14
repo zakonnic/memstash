@@ -172,11 +172,12 @@ func TestWithKeyFuncAndResolveOptions(t *testing.T) {
 // back into l2.BatchGetSequential/BatchSetSequential, so this is also representative of how an adapter without a
 // native multi-get/multi-set wires them up.
 type sequentialStub struct {
-	mu       sync.Mutex
-	m        map[string]string
-	getCalls int
-	setCalls int
-	failKey  string // if set, Get on this key returns errBoom
+	mu          sync.Mutex
+	m           map[string]string
+	getCalls    int
+	setCalls    int
+	deleteCalls int
+	failKey     string // if set, Get on this key returns errBoom
 }
 
 var errBoom = errors.New("boom")
@@ -213,8 +214,13 @@ func (s *sequentialStub) BatchSet(ctx context.Context, items memstash.List[strin
 func (s *sequentialStub) Delete(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.deleteCalls++
 	delete(s.m, key)
 	return nil
+}
+
+func (s *sequentialStub) BatchDelete(ctx context.Context, keys []string) error {
+	return l2.BatchDeleteSequential[string, string](ctx, s, keys)
 }
 
 func TestBatchConcurrentFallbacks(t *testing.T) {

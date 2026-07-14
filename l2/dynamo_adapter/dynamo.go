@@ -34,7 +34,7 @@ const (
 
 	batchGetLimit   = 100 // DynamoDB BatchGetItem hard limit
 	batchWriteLimit = 25  // DynamoDB BatchWriteItem hard limit
-	maxBatchRetries = 4   // bounded retries for UnprocessedKeys / UnprocessedItems
+	maxBatchRetries = 1   // bounded retries for UnprocessedKeys / UnprocessedItems
 )
 
 // DynamoAPI is the subset of the DynamoDB SDK the adapter needs; *dynamodb.Client satisfies it.
@@ -273,6 +273,64 @@ func (c *Cache[K, V]) batchSetChunk(ctx context.Context, items memstash.List[K, 
 			return err
 		}
 		writes = append(writes, types.WriteRequest{PutRequest: &types.PutRequest{Item: encoded}})
+	}
+	pending := map[string][]types.WriteRequest{c.table: writes}
+
+	for attempt := 0; len(pending) > 0; attempt++ {
+		if attempt > maxBatchRetries {
+			return errUnprocessed
+		}
+		out, err := c.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: pending})
+		if err != nil {
+			return err
+		}
+		pending = out.UnprocessedItems
+	}
+	return nil
+}
+
+// BatchDelete removes the keys with concurrent BatchWriteItem chunks of 25 (the API's hard limit), retrying
+// UnprocessedItems a bounded number of times; duplicate keys collapse (BatchWriteItem rejects duplicates in one
+// request).
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(keys))
+	storageKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		storageKey := c.keyFunc(key)
+		if _, dup := seen[storageKey]; dup {
+			continue
+		}
+		seen[storageKey] = struct{}{}
+		storageKeys = append(storageKeys, storageKey)
+	}
+	if len(storageKeys) <= batchWriteLimit {
+		return c.batchDeleteChunk(ctx, storageKeys)
+	}
+	numChunks := (len(storageKeys) + batchWriteLimit - 1) / batchWriteLimit
+	errs := make([]error, numChunks)
+	var wg sync.WaitGroup
+	wg.Add(numChunks)
+	for i := 0; i < numChunks; i++ {
+		go func(i int) {
+			defer wg.Done()
+			chunk := storageKeys[i*batchWriteLimit : min((i+1)*batchWriteLimit, len(storageKeys))]
+			errs[i] = c.batchDeleteChunk(ctx, chunk)
+		}(i)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// batchDeleteChunk removes one BatchWriteItem request of deletes, retrying UnprocessedItems.
+func (c *Cache[K, V]) batchDeleteChunk(ctx context.Context, storageKeys []string) error {
+	writes := make([]types.WriteRequest, 0, len(storageKeys))
+	for _, storageKey := range storageKeys {
+		writes = append(writes, types.WriteRequest{DeleteRequest: &types.DeleteRequest{
+			Key: map[string]types.AttributeValue{keyAttr: &types.AttributeValueMemberS{Value: storageKey}},
+		}})
 	}
 	pending := map[string][]types.WriteRequest{c.table: writes}
 

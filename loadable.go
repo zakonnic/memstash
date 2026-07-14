@@ -93,6 +93,11 @@ func (lc *LoadableCache[K, V]) Delete(ctx context.Context, key K) error {
 	return lc.c.Delete(ctx, key)
 }
 
+// BatchDelete: see Cache.BatchDelete.
+func (lc *LoadableCache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	return lc.c.BatchDelete(ctx, keys)
+}
+
 // Close: see Cache.Close.
 func (lc *LoadableCache[K, V]) Close() { lc.c.Close() }
 

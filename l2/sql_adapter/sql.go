@@ -331,6 +331,39 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	return nil
 }
 
+// BatchDelete removes all keys with "DELETE ... WHERE cache_key IN (...)" statements, split into chunks of
+// maxStatementParams.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	storageKeys := make([]string, len(keys))
+	for i, key := range keys {
+		storageKeys[i] = c.keyFunc(key)
+	}
+	ph := c.dialect.Placeholder
+	for start := 0; start < len(storageKeys); start += maxStatementParams {
+		chunk := storageKeys[start:min(start+maxStatementParams, len(storageKeys))]
+		var query strings.Builder
+		query.WriteString("DELETE FROM ")
+		query.WriteString(c.table)
+		query.WriteString(" WHERE cache_key IN (")
+		args := make([]any, 0, len(chunk))
+		for i, storageKey := range chunk {
+			if i > 0 {
+				query.WriteString(", ")
+			}
+			query.WriteString(ph(i + 1))
+			args = append(args, storageKey)
+		}
+		query.WriteString(")")
+		if _, err := c.db.ExecContext(ctx, query.String(), args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // DeleteExpired purges rows whose TTL has elapsed. Call it periodically: expired rows are hidden from Get but are not
 // removed automatically.
 func (c *Cache[K, V]) DeleteExpired(ctx context.Context) (int64, error) {

@@ -19,6 +19,8 @@ type L2Cache[K comparable, V any] interface {
 	BatchSet(ctx context.Context, items List[K, V], ttl time.Duration) error
 	// Delete removes the key; a missing key is not treated as an error.
 	Delete(ctx context.Context, key K) error
+	// BatchDelete removes all keys in one round trip where the backend supports it; missing keys are not errors.
+	BatchDelete(ctx context.Context, keys []K) error
 }
 
 // Codec is the value serialization contract for networked L2 adapters.
@@ -54,9 +56,10 @@ const (
 
 // l2Write is a task for the background write-back worker. A non-nil flush marks a Wait checkpoint instead of a write:
 // the channel is FIFO, so by the time the worker reaches the marker every write enqueued before it has been handed to
-// L2, and closing flush releases the waiter.
+// L2, and closing flush releases the waiter. del marks a BatchDelete task (value is unused).
 type l2Write[K comparable, V any] struct {
 	key   K
 	value V
 	flush chan<- struct{}
+	del   bool
 }

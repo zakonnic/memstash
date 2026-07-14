@@ -14,13 +14,16 @@ import (
 // gatedL2 blocks inside every Set/BatchSet until the test permits it, so the test controls exactly what is queued in
 // the write-back buffer when the worker drains it. Each call signals entered and waits for one release token.
 type gatedL2 struct {
-	mu         sync.Mutex
-	m          map[string]string
-	setCalls   int
-	batchCalls int
-	batchSizes []int
-	entered    chan struct{}
-	release    chan struct{}
+	mu               sync.Mutex
+	m                map[string]string
+	setCalls         int
+	batchCalls       int
+	batchSizes       []int
+	deleteCalls      int
+	batchDeleteCalls int
+	batchDeleteSizes []int
+	entered          chan struct{}
+	release          chan struct{}
 }
 
 func newGatedL2() *gatedL2 {
@@ -75,9 +78,25 @@ func (g *gatedL2) BatchSet(_ context.Context, items memstash.List[string, string
 }
 
 func (g *gatedL2) Delete(_ context.Context, key string) error {
+	g.entered <- struct{}{}
+	<-g.release
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.deleteCalls++
 	delete(g.m, key)
+	return nil
+}
+
+func (g *gatedL2) BatchDelete(_ context.Context, keys []string) error {
+	g.entered <- struct{}{}
+	<-g.release
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.batchDeleteCalls++
+	g.batchDeleteSizes = append(g.batchDeleteSizes, len(keys))
+	for _, key := range keys {
+		delete(g.m, key)
+	}
 	return nil
 }
 
@@ -85,6 +104,12 @@ func (g *gatedL2) counters() (sets, batches int, sizes []int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.setCalls, g.batchCalls, append([]int(nil), g.batchSizes...)
+}
+
+func (g *gatedL2) deleteCounters() (deletes, batches int, sizes []int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.deleteCalls, g.batchDeleteCalls, append([]int(nil), g.batchDeleteSizes...)
 }
 
 // newWriteBackCache builds a WriteBack cache with an 8-slot buffer over the gated stub.

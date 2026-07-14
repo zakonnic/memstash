@@ -175,6 +175,15 @@ func (f *l2Stub) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+func (f *l2Stub) BatchDelete(_ context.Context, keys []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, key := range keys {
+		delete(f.m, key)
+	}
+	return nil
+}
+
 func (f *l2Stub) snapshot(key string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

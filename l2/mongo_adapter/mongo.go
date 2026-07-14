@@ -134,6 +134,19 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return err
 }
 
+// BatchDelete removes all keys with a single {_id: {$in: [...]}} DeleteMany.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	storageKeys := make([]string, len(keys))
+	for i, key := range keys {
+		storageKeys[i] = c.keyFunc(key)
+	}
+	_, err := c.coll.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": storageKeys}})
+	return err
+}
+
 // BatchGet fetches all keys with a single {_id: {$in: [...]}} query.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	found := make(memstash.List[K, V], 0, len(keys))

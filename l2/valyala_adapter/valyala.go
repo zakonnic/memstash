@@ -161,3 +161,9 @@ const BatchWorkers = 8
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
 	return l2.BatchSetConcurrent(ctx, c, items, ttl, BatchWorkers)
 }
+
+// BatchDelete removes the keys with concurrent Deletes: the protocol has no multi-delete. The context is ignored:
+// the client has no context support.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	return l2.BatchDeleteConcurrent(ctx, c, keys, BatchWorkers)
+}

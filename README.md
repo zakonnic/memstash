@@ -164,6 +164,7 @@ c, _ := rueidis_adapter.NewJSONCache[string, Session](client,
 ```go
 found, _ := c.BatchGet(ctx, []string{"a", "b", "c"})            // one round trip to L2 for the misses
 _ = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b", Value: b}})
+_ = c.BatchDelete(ctx, []string{"a", "b"})                      // follows the write policy, like BatchSet
 ```
 
 **Non-string keys with a custom key mapping** - provide a key function for the L2 storage key:
@@ -245,7 +246,7 @@ Each adapter takes an interface rather than a concrete client, so it stays indep
 
 SQL, Tarantool and other stores without server-side expiration filter expired entries on read and expose a reaper (`DeleteExpired`) to purge them; the note in each package doc explains the specifics.
 
-Rolling your own is straightforward: implement the `memstash.L2Cache[K, V]` interface (`Get`/`BatchGet`/`Set`/`BatchSet`/`Delete`) and pass it to `WithL2Cache`.
+Rolling your own is straightforward: implement the `memstash.L2Cache[K, V]` interface (`Get`/`BatchGet`/`Set`/`BatchSet`/`Delete`/`BatchDelete`) and pass it to `WithL2Cache`.
 
 ## Benchmarks
 

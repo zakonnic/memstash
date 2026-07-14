@@ -121,6 +121,33 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return c.client.Do(ctx, cmd).Error()
 }
 
+// BatchDelete removes all keys in one round trip: the rueidis MDel helper within multiKeyBudget, a DoMulti pipeline
+// of DELs above it.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	storageKeys := make([]string, len(keys))
+	size := 0
+	for i, key := range keys {
+		storageKeys[i] = c.keyFunc(key)
+		size += len(storageKeys[i]) + argWireOverhead
+	}
+	if size <= multiKeyBudget {
+		for _, err := range rueidislib.MDel(c.client, ctx, storageKeys) {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	cmds := make([]rueidislib.Completed, len(storageKeys))
+	for i, storageKey := range storageKeys {
+		cmds[i] = c.client.B().Del().Key(storageKey).Build()
+	}
+	return doMultiErr(c.client.DoMulti(ctx, cmds...))
+}
+
 // BatchGet fetches all keys in one round trip: the rueidis MGet helper within multiKeyBudget, a DoMulti pipeline of
 // GETs above it.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {

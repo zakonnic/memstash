@@ -136,8 +136,47 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return err
 }
 
+// BatchDelete removes all keys in one round trip: one DEL command when the batch fits multiKeyBudget, otherwise a
+// pipeline of DELs (Send/Flush/Receive). As with do, the context cancels the commands only with Pool.DialContext.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	args := make([]any, len(keys))
+	size := 0
+	for i, key := range keys {
+		storageKey := c.keyFunc(key)
+		args[i] = storageKey
+		size += len(storageKey) + argWireOverhead
+	}
+	if size <= multiKeyBudget {
+		_, err := c.do(ctx, "DEL", args...)
+		return err
+	}
+	conn, err := c.pool.GetContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	for _, arg := range args {
+		if err := conn.Send("DEL", arg); err != nil {
+			return err
+		}
+	}
+	if err := conn.Flush(); err != nil {
+		return err
+	}
+	for range args {
+		if _, err := conn.Receive(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // BatchGet fetches all keys in one round trip: one MGET command when the batch fits multiKeyBudget, otherwise a
-// pipeline of GETs (Send/Flush/Receive). As with do, the context cancels the commands only with Pool.DialContext.
+// pipeline of GETs (Send/Flush/Receive).
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	length := len(keys)
 	found := make(memstash.List[K, V], 0, length)

@@ -149,6 +149,24 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return err
 }
 
+// BatchDelete issues all deletes up front (async futures) and then resolves them, pipelining the round trip.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	futures := make([]*tarantool.Future, len(keys))
+	for i, key := range keys {
+		req := tarantool.NewDeleteRequest(c.space).Context(ctx).Index(primaryIndex).Key([]any{c.keyFunc(key)})
+		futures[i] = c.doer.Do(req)
+	}
+	for _, future := range futures {
+		if _, err := future.Get(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // BatchGet issues all selects up front (async futures) and then resolves them, pipelining the round trip.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	found := make(memstash.List[K, V], 0, len(keys))

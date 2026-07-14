@@ -547,6 +547,28 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	return nil
 }
 
+// BatchDelete removes the keys from memory and forwards the deletions to L2 according to WritePolicy: WriteThrough
+// issues one synchronous BatchDelete, WriteBack enqueues the deletes for the background worker, which always
+// coalesces them into BatchDelete batches regardless of WriteBackBatching. An error can come only from the
+// synchronous batch delete.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	for _, key := range keys {
+		sh, keyHash := c.shardAndHash(key)
+		sh.mu.Lock()
+		c.deleteLocked(sh, keyHash, key)
+		sh.mu.Unlock()
+	}
+	switch c.l2WritePolicy {
+	case WriteThrough:
+		return c.l2Cache.BatchDelete(ctx, keys)
+	case WriteBack:
+		for _, key := range keys {
+			c.enqueueDelete(key)
+		}
+	}
+	return nil
+}
+
 // GetOrLoad returns the value, loading it with the load function when both levels miss. Concurrent calls for the same
 // key are coalesced (singleflight): load runs once and the rest wait for its result. Errors are not cached.
 func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V]) (V, error) {
@@ -962,37 +984,89 @@ func (c *Cache[K, V]) enqueueWriteBack(key K, value V) {
 	}
 }
 
+// enqueueDelete puts a delete into the worker's buffer;
+// deletes synchronously on overflow or when the cache is closed.
+func (c *Cache[K, V]) enqueueDelete(key K) {
+	syncDelete := func() {
+		if err := c.l2Cache.Delete(context.Background(), key); err != nil {
+			c.reportL2Err(key, err)
+		}
+	}
+	select {
+	case <-c.stop:
+		// The worker is gone (Close was called): a buffered send would park the delete in a channel nobody drains.
+		syncDelete()
+		return
+	default:
+	}
+	select {
+	case c.writeCh <- l2Write[K, V]{key: key, del: true}:
+	default:
+		syncDelete()
+	}
+}
+
 // WriteBackBatchMax caps one drain batch: the writes are flushed through the adapter's BatchSet.
 const WriteBackBatchMax = 128
 
-// flushWrite hands one write-back task to L2, coalescing the writes already queued behind it into one BatchSet;
+// flushWrite hands one write-back task to L2, coalescing the tasks already queued behind it into one BatchSet;
 func (c *Cache[K, V]) flushWrite(first l2Write[K, V]) {
-	if first.flush != nil {
-		close(first.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
-		return
-	}
-	// len(writeCh) is the buffer fill counter the adaptive mode switches on.
-	if c.writeBackBatching == BatchingNone ||
-		(c.writeBackBatching == BatchingAdaptive && len(c.writeCh) <= cap(c.writeCh)/2) {
-		c.writeBatch(List[K, V]{{Key: first.key, Value: first.value}})
-		return
-	}
-	batch := List[K, V]{{Key: first.key, Value: first.value}}
-	for len(batch) < WriteBackBatchMax {
-		select {
-		case write := <-c.writeCh:
-			if write.flush != nil {
-				c.writeBatch(batch)
-				close(write.flush)
-				return
-			}
-			batch = append(batch, KeyVal[K, V]{Key: write.key, Value: write.value})
-		default:
-			c.writeBatch(batch)
+	for more := true; more; {
+		if first.flush != nil {
+			close(first.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
 			return
 		}
+		// len(writeCh) is the buffer fill counter the adaptive mode switches on.
+		if !first.del && (c.writeBackBatching == BatchingNone ||
+			(c.writeBackBatching == BatchingAdaptive && len(c.writeCh) <= cap(c.writeCh)/2)) {
+			c.writeBatch(List[K, V]{{Key: first.key, Value: first.value}})
+			return
+		}
+		first, more = c.flushRun(first)
 	}
-	c.writeBatch(batch)
+}
+
+// flushRun coalesces the tasks of first's kind queued behind it and delivers them as one batch.
+// Returns next to flushWrite to seed the next run.
+func (c *Cache[K, V]) flushRun(first l2Write[K, V]) (next l2Write[K, V], more bool) {
+	var sets List[K, V]
+	var deletes []K
+	if first.del {
+		deletes = append(deletes, first.key)
+	} else {
+		sets = append(sets, KeyVal[K, V]{Key: first.key, Value: first.value})
+	}
+	for len(sets)+len(deletes) < WriteBackBatchMax {
+		select {
+		case write := <-c.writeCh:
+			switch {
+			case write.flush != nil:
+				c.deliverRun(sets, deletes)
+				close(write.flush)
+				return next, false
+			case write.del != first.del:
+				c.deliverRun(sets, deletes)
+				return write, true
+			case write.del:
+				deletes = append(deletes, write.key)
+			default:
+				sets = append(sets, KeyVal[K, V]{Key: write.key, Value: write.value})
+			}
+		default:
+			c.deliverRun(sets, deletes)
+			return next, false
+		}
+	}
+	c.deliverRun(sets, deletes)
+	return next, false
+}
+
+func (c *Cache[K, V]) deliverRun(sets List[K, V], deletes []K) {
+	if len(deletes) > 0 {
+		c.deleteBatch(deletes)
+		return
+	}
+	c.writeBatch(sets)
 }
 
 // writeBatch delivers drained writes to L2: one Set for a single item, one BatchSet otherwise (duplicate keys
@@ -1007,6 +1081,22 @@ func (c *Cache[K, V]) writeBatch(batch List[K, V]) {
 	if err := c.l2Cache.BatchSet(context.Background(), batch, c.ttl); err != nil {
 		for _, item := range batch {
 			c.reportL2Err(item.Key, err)
+		}
+	}
+}
+
+// deleteBatch delivers drained deletes to L2: one Delete for a single key, one BatchDelete otherwise. A batch error
+// is reported for every key it covers.
+func (c *Cache[K, V]) deleteBatch(keys []K) {
+	if len(keys) == 1 {
+		if err := c.l2Cache.Delete(context.Background(), keys[0]); err != nil {
+			c.reportL2Err(keys[0], err)
+		}
+		return
+	}
+	if err := c.l2Cache.BatchDelete(context.Background(), keys); err != nil {
+		for _, key := range keys {
+			c.reportL2Err(key, err)
 		}
 	}
 }

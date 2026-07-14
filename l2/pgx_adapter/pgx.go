@@ -28,7 +28,7 @@ type DB interface {
 }
 
 // DefaultTable is the table name used when the caller passes an empty table.
-const DefaultTable = "github.com/zakonnic/memstash_cache"
+const DefaultTable = "memstash_cache"
 
 // CreateTableSQL returns the DDL for the cache table.
 func CreateTableSQL(table string) string {
@@ -45,12 +45,13 @@ type Cache[K comparable, V any] struct {
 	codec   memstash.Codec[V]
 	keyFunc func(K) string
 
-	getQuery      string
-	setQuery      string
-	deleteQuery   string
-	reapQuery     string
-	batchGetQuery string
-	batchSetQuery string
+	getQuery         string
+	setQuery         string
+	deleteQuery      string
+	reapQuery        string
+	batchGetQuery    string
+	batchSetQuery    string
+	batchDeleteQuery string
 }
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
@@ -86,6 +87,7 @@ func New[K comparable, V any](db DB, codec memstash.Codec[V], table string, opts
 		batchSetQuery: "INSERT INTO " + table + " (cache_key, value, expires_at)" +
 			" SELECT * FROM unnest($1::text[], $2::bytea[], $3::bigint[])" +
 			" ON CONFLICT (cache_key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at",
+		batchDeleteQuery: "DELETE FROM " + table + " WHERE cache_key = ANY($1)",
 	}, nil
 }
 
@@ -230,6 +232,19 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		deadlines[i] = deadline
 	}
 	_, err := c.db.Exec(ctx, c.batchSetQuery, storageKeys, values, deadlines)
+	return err
+}
+
+// BatchDelete removes all keys in one "WHERE cache_key = ANY($1)" statement, the keys passed as one text[] parameter.
+func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	storageKeys := make([]string, len(keys))
+	for i, key := range keys {
+		storageKeys[i] = c.keyFunc(key)
+	}
+	_, err := c.db.Exec(ctx, c.batchDeleteQuery, storageKeys)
 	return err
 }
 
