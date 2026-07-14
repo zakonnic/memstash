@@ -12,7 +12,7 @@ v, ok, err := c.Get(ctx, "hello") // faster than getting from sync.Map
 
 ## Why memstash?
 
-- **Very fast.** Outperforms Ristretto by ~6× and Otter by ~2.5× in our [benchmarks](#benchmarks).
+- **Very fast.** Outperforms Ristretto by ~6× and Otter by ~2× in our [benchmarks](#benchmarks).
 - **Top-tier hit ratio.** The S3-FIFO policy keeps pace with the best W-TinyLFU caches (Otter, Theine) and leaves Ristretto far behind, holding up especially well under scans and one-hit wonders.
 - **Low memory overhead.** Bigcache comes out on top, but Memstash is in the same league - all well ahead of the rest.
 - **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
@@ -84,7 +84,6 @@ The most common caching pattern: on a miss, load from the source of truth. Concu
 
 ```go
 c, _ := memstash.New[string, User](
-	memstash.WithMemoryCapacity(100_000),
 	memstash.WithTTL(5*time.Minute),
 )
 
@@ -154,7 +153,6 @@ c, _ := memstash.New[string, User](
 
 ```go
 c, _ := rueidis_adapter.NewJSONCache[string, Session](client,
-	memstash.WithMemoryCapacity(50_000),
 	memstash.WithWritePolicy(memstash.WriteThrough),
 )
 ```
@@ -167,11 +165,22 @@ _ = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b",
 _ = c.BatchDelete(ctx, []string{"a", "b"})                      // follows the write policy, like BatchSet
 ```
 
+**Observability and iteration** - `Stats()` returns the operation counters (collected with striped counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via `WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it - without it every getter reads 0. `Iterator()` walks the live first-level entries lock-free, independent of stats:
+
+```go
+c, _ := memstash.New[string, User](
+	memstash.WithStats(),
+)
+s := c.Stats() // s.Hits(), s.Misses(), s.Sets(), s.Deletes(), s.Gets(), s.HitRate(), s.MissRate()
+for key, value := range c.Iterator() {
+	fmt.Println(key, value)
+}
+```
+
 **Non-string keys with a custom key mapping** - provide a key function for the L2 storage key:
 
 ```go
 c, _ := rueidis_adapter.NewJSONCache[int, User](client,
-	memstash.WithMemoryCapacity(100_000),
 	l2.WithKeyFunc(func(id int) string { return "user:" + strconv.Itoa(id) }),
 )
 ```
@@ -208,7 +217,7 @@ Full option list:
 
 | Option | Purpose |
 |---|---|
-| `WithMemoryCapacity(n)` | L1 capacity in weight units (required; defaults to 20 000). |
+| `WithMemoryCapacity(n)` | L1 capacity in weight units (defaults to 20 000). |
 | `WithMemoryBudget(bytes)` | L1 bound in approximate resident bytes; derives a size-based cost function automatically (mutually exclusive with `WithMemoryCapacity`). |
 | `WithCostFunc(fn)` | Per-item weight function (e.g. size in bytes). |
 | `WithTTL(d)` | Item lifetime (1-second resolution); applied to L2 writes too. |
@@ -219,6 +228,7 @@ Full option list:
 | `WithWriteBackBuffer(n)` | Size of the async write-back buffer. |
 | `WithGhostSize(n)` | S3-FIFO ghost-queue capacity. |
 | `WithOnL2Error(fn)` | Handler for background L2 errors. |
+| `WithStats()` | Enables the `Stats()` operation counters. Off by default. |
 
 ## L2 Adapters
 

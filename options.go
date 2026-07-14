@@ -37,6 +37,7 @@ type FieldOverrides struct {
 	ghostSize           *int
 	writeBackBufferSize *int
 	writeBackBatching   *WriteBackBatching
+	statsEnabled        *bool
 }
 
 // configTarget is the marker implemented by every Config instantiation: it lets a typed option distinguish "a Config
@@ -86,6 +87,9 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 	}
 	if fields.writeBackBatching != nil {
 		cfg.WriteBackBatching = *fields.writeBackBatching
+	}
+	if fields.statsEnabled != nil {
+		cfg.StatsEnabled = *fields.statsEnabled
 	}
 	return &cfg, nil
 }
@@ -184,5 +188,13 @@ func WithAdaptiveBatchingForWriteBack() Option { return withWriteBackBatching(Ba
 func WithOnL2Error[K comparable, V any](handler func(key K, err error)) Option {
 	return Option{ApplyTyped: func(target any) error {
 		return applyToConfig(target, func(cfg *Config[K, V]) { cfg.OnL2Error = handler })
+	}}
+}
+
+// WithStats sets Config.StatsEnabled: turns on the operation counters returned by Cache.Stats(). Off by default.
+func WithStats() Option {
+	return Option{ApplyField: func(f *FieldOverrides) {
+		on := true
+		f.statsEnabled = &on
 	}}
 }

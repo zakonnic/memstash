@@ -73,6 +73,9 @@ type Config[K comparable, V any] struct {
 	// OnL2Error is an optional handler for L2Cache errors on paths where the error cannot be returned to the caller
 	// (write-back, the write after a load in GetOrLoad, the L2Cache read inside GetOrLoad before the loader runs).
 	OnL2Error func(key K, err error)
+
+	// StatsEnabled turns on the operation counters returned by Stats(). Off by default - adds 0.6 ns overhead.
+	StatsEnabled bool
 }
 
 // isMemstashConfig marks every Config instantiation for the typed-option dispatch protocol (see Option).

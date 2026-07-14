@@ -74,6 +74,7 @@ type Cache[K comparable, V any] struct {
 	writeCh           chan l2Write[K, V]
 
 	flights *xsync.MapOf[K, *flightCall[V]]
+	stats   Stats
 
 	stop      chan struct{}
 	wg        sync.WaitGroup
@@ -149,6 +150,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		writeBackBatching: cfg.WriteBackBatching,
 		onL2Error:         cfg.OnL2Error,
 		flights:           xsync.NewMapOf[K, *flightCall[V]](),
+		stats:             newStats(cfg.StatsEnabled),
 		stop:              make(chan struct{}),
 	}
 	if c.l2Cache == nil {
@@ -242,24 +244,34 @@ func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
 // memory hit is a lock-free, allocation-free path.
 func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	if value, ok := c.getMemory(key); ok {
+		c.stats.incHits()
 		return value, true, nil
 	}
 	if c.l2Cache == nil {
+		c.stats.incMisses()
 		var zero V
 		return zero, false, nil
 	}
 	value, ok, err := c.l2Cache.Get(ctx, key)
 	if err != nil || !ok {
+		c.stats.incMisses()
 		var zero V
 		return zero, false, err
 	}
+	c.stats.incHits()
 	c.setMemory(key, value)
 	return value, true, nil
 }
 
 // GetFromMemory reads the first level only: the fastest possible path, without a context, L2, or errors.
 func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
-	return c.getMemory(key)
+	value, ok := c.getMemory(key)
+	if ok {
+		c.stats.incHits()
+	} else {
+		c.stats.incMisses()
+	}
+	return value, ok
 }
 
 // getMemory is the lock-free memory-hit path. The slot's short hash is only a prefilter; the record's immutable
@@ -310,6 +322,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 // write.
 func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 	c.setMemory(key, value)
+	c.stats.incSets()
 	if c.l2WritePolicy == WriteDisabled {
 		return nil
 	}
@@ -541,6 +554,7 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	sh.mu.Lock()
 	c.deleteLocked(sh, keyHash, key)
 	sh.mu.Unlock()
+	c.stats.incDeletes()
 
 	if c.l2WritePolicy != WriteDisabled {
 		return c.l2Cache.Delete(ctx, key)
@@ -559,6 +573,7 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 		c.deleteLocked(sh, keyHash, key)
 		sh.mu.Unlock()
 	}
+	c.stats.addDeletes(int64(len(keys)))
 	switch c.l2WritePolicy {
 	case WriteThrough:
 		return c.l2Cache.BatchDelete(ctx, keys)
@@ -578,13 +593,15 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		return zero, ErrNilLoader
 	}
 	if value, ok := c.getMemory(key); ok {
+		c.stats.incHits()
 		return value, nil
 	}
 
 	call := &flightCall[V]{done: make(chan struct{})}
 	if winner, loaded := c.flights.LoadOrStore(key, call); loaded {
 		// A flight is already in progress - wait for its result or for the context to be canceled (the owner keeps
-		// loading on behalf of everyone else).
+		// loading on behalf of everyone else). The key was not in the cache when this call looked: a miss.
+		c.stats.incMisses()
 		select {
 		case <-winner.done:
 			return winner.val, winner.err
@@ -618,16 +635,23 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 // error the memory part gathered so far is returned alongside the error.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error) {
 	if c.l2Cache == nil {
-		return c.batchGetMemory(keys), nil
+		found := c.batchGetMemory(keys)
+		c.stats.addHits(int64(len(found)))
+		c.stats.addMisses(int64(len(keys) - len(found)))
+		return found, nil
 	}
 	found, missing := c.batchGetMemoryWithMissing(keys)
+	c.stats.addHits(int64(len(found)))
 	if len(missing) == 0 {
 		return found, nil
 	}
 	fromL2, err := c.l2Cache.BatchGet(ctx, missing)
 	if err != nil {
+		c.stats.addMisses(int64(len(missing)))
 		return found, err
 	}
+	c.stats.addHits(int64(len(fromL2)))
+	c.stats.addMisses(int64(len(missing) - len(fromL2)))
 	for _, item := range fromL2 {
 		c.setMemory(item.Key, item.Value)
 		found = append(found, item)
@@ -665,6 +689,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items List[K, V]) error {
 	for _, item := range items {
 		c.setMemory(item.Key, item.Value)
 	}
+	c.stats.addSets(int64(len(items)))
 	switch c.l2WritePolicy {
 	case WriteThrough:
 		return c.l2Cache.BatchSet(ctx, items, c.ttl)
@@ -686,11 +711,14 @@ func (c *Cache[K, V]) BatchGetOrLoad(ctx context.Context, keys []K, load BatchLo
 		return nil, ErrNilLoader
 	}
 	found, missing := c.batchGetMemoryWithMissing(keys)
+	c.stats.addHits(int64(len(found)))
 	if len(missing) == 0 {
 		return found, nil
 	}
 
 	joined, loadErr := c.singleflight(ctx, load, &found, missing)
+	// Joined keys were not in the cache when this call looked: misses (the owned keys are counted by batchLoad).
+	c.stats.addMisses(int64(len(joined)))
 
 	for _, flight := range joined {
 		select {
@@ -789,6 +817,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 			resolved = append(resolved, item)
 			resolvedKeys[item.Key] = struct{}{}
 		}
+		c.stats.addHits(int64(len(resolved)))
 		if len(resolved) > 0 {
 			toLoad = make([]K, 0, len(keys)-len(resolved))
 			for _, key := range keys {
@@ -801,6 +830,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 	if len(toLoad) == 0 {
 		return resolved, nil
 	}
+	c.stats.addMisses(int64(len(toLoad)))
 
 	loaded, err := load(ctx, toLoad)
 	if err != nil {
@@ -810,6 +840,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 		c.setMemory(item.Key, item.Value)
 		resolved = append(resolved, item)
 	}
+	c.stats.addSets(int64(len(loaded)))
 	switch c.l2WritePolicy {
 	case WriteThrough:
 		// The values are already in hand - an L2 write error must not fail the read.
@@ -829,12 +860,14 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) (V, error) {
 	// A parallel flight may have finished while we were registering.
 	if value, ok := c.getMemory(key); ok {
+		c.stats.incHits()
 		return value, nil
 	}
 	if c.l2Cache != nil {
 		value, ok, err := c.l2Cache.Get(ctx, key)
 		switch {
 		case err == nil && ok:
+			c.stats.incHits()
 			c.setMemory(key, value)
 			return value, nil
 		case err != nil:
@@ -842,12 +875,14 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 			c.reportL2Err(key, err)
 		}
 	}
+	c.stats.incMisses()
 	value, err := load(ctx, key)
 	if err != nil {
 		var zero V
 		return zero, err
 	}
 	c.setMemory(key, value)
+	c.stats.incSets()
 	if c.l2WritePolicy != WriteDisabled {
 		if c.l2WritePolicy == WriteThrough {
 			// The value is already in hand - an L2 write error must not fail the read.
