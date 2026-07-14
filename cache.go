@@ -9,6 +9,7 @@ package memstash
 import (
 	"context"
 	"hash/maphash"
+	"iter"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -858,6 +859,37 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 		}
 	}
 	return value, nil
+}
+
+// Iterator returns an iterator over all live first-level entries (L2 is not scanned). The walk is lock-free and
+// weakly consistent, like sync.Map.Range: entries written or removed while iterating may or may not be seen, but a
+// yielded pair is never torn.
+func (c *Cache[K, V]) Iterator() iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		for i := range c.shards {
+			t := c.shards[i].table.Load()
+			nowOff := c.nowOff.Load()
+			for pos := range t.slots {
+				packed := t.slots[pos].Load()
+				if uint32(packed>>32) < minKeyShortHash {
+					continue // empty or tombstone
+				}
+				state := c.registry.At(uint32(packed))
+				metaWord := state.Load()
+				if metaWord&itemstate.Dead != 0 || itemstate.Expired(metaWord, nowOff) {
+					continue
+				}
+				entry := state.Entry()
+				// The alive-and-same-generation re-check rejects a record recycled between the meta and box loads.
+				if entry == nil || state.Load()&itemstate.AliveGenMask != metaWord&itemstate.AliveGenMask {
+					continue
+				}
+				if !yield(entry.Key, entry.Value) {
+					return
+				}
+			}
+		}
+	}
 }
 
 // Len returns the number of first-level items (including expired ones not yet swept).
