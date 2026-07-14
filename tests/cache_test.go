@@ -20,6 +20,8 @@ var policies = []struct {
 }{
 	{name: "clock", policy: memstash.PolicyClock},
 	{name: "s3fifo", policy: memstash.PolicyS3FIFO},
+	{name: "wtinylfu", policy: memstash.PolicyWTinyLFU},
+	{name: "sieve", policy: memstash.PolicySIEVE},
 }
 
 func newCache(t *testing.T, cfg memstash.Config[string, string]) *memstash.Cache[string, string] {

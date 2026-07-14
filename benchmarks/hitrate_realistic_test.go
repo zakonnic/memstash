@@ -67,6 +67,10 @@ func TestHitRateRealistic(t *testing.T) {
 		builders := []func() benchCacheBytes{
 			func() benchCacheBytes { return newMemstashBytes(sc.budget, memstash.PolicyS3FIFO, "memstash-s3fifo") },
 			func() benchCacheBytes { return newMemstashBytes(sc.budget, memstash.PolicyClock, "memstash-clock") },
+			func() benchCacheBytes {
+				return newMemstashBytes(sc.budget, memstash.PolicyWTinyLFU, "memstash-wtinylfu")
+			},
+			func() benchCacheBytes { return newMemstashBytes(sc.budget, memstash.PolicySIEVE, "memstash-sieve") },
 			func() benchCacheBytes { return newRistrettoBytes(sc.budget, sc.avgEntry) },
 			func() benchCacheBytes { return newOtterBytes(sc.budget) },
 			func() benchCacheBytes { return newTheineBytes(sc.budget) },

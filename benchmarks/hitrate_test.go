@@ -95,6 +95,8 @@ func runHitRateSuite(t *testing.T) {
 		builders := []func() benchCache{
 			func() benchCache { return newMemstash(capacity, memstash.PolicyS3FIFO, "memstash-s3fifo") },
 			func() benchCache { return newMemstash(capacity, memstash.PolicyClock, "memstash-clock") },
+			func() benchCache { return newMemstash(capacity, memstash.PolicyWTinyLFU, "memstash-wtinylfu") },
+			func() benchCache { return newMemstash(capacity, memstash.PolicySIEVE, "memstash-sieve") },
 			func() benchCache { return newRistretto(capacity) },
 			func() benchCache { return newOtter(capacity) },
 			func() benchCache { return newTheine(capacity) },

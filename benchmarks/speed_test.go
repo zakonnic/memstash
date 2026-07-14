@@ -30,6 +30,8 @@ func speedContenders() []benchCache {
 	return []benchCache{
 		newMemstash(speedCapacity, memstash.PolicyS3FIFO, "memstash-s3fifo"),
 		newMemstash(speedCapacity, memstash.PolicyClock, "memstash-clock"),
+		newMemstash(speedCapacity, memstash.PolicyWTinyLFU, "memstash-wtinylfu"),
+		newMemstash(speedCapacity, memstash.PolicySIEVE, "memstash-sieve"),
 		newRistretto(speedCapacity),
 		newOtter(speedCapacity),
 		newTheine(speedCapacity),

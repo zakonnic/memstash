@@ -14,6 +14,7 @@ var (
 	ErrBudgetAndCapacity   = errors.New("memstash: MemoryBudget and MemoryCapacity are mutually exclusive")
 	ErrBudgetNeedsCostFunc = errors.New("memstash: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly")
 	ErrUnknownPolicy       = errors.New("memstash: unknown eviction policy")
+	ErrNilCustomPolicy     = errors.New("memstash: the custom eviction policy factory returned nil")
 	ErrNilLoader           = errors.New("memstash: loader must not be nil")
 	ErrBadTTL              = errors.New("memstash: TTL must not be negative")
 	// ErrLoaderPanic resolves the singleflight of a loader that panicked: the panic itself propagates to the caller
@@ -43,8 +44,12 @@ type Config[K comparable, V any] struct {
 	// RefreshTTLOnGet makes every first-level hit extend the item's lifetime by a full TTL (sliding expiration).
 	RefreshTTLOnGet bool
 
-	// Policy is the eviction policy. Defaults to PolicyClock.
+	// Policy is the eviction policy. Defaults to PolicyS3FIFO.
 	Policy Policy
+
+	// CustomPolicy is an optional factory for a user-supplied eviction policy, called once per shard. When set it
+	// takes precedence over Policy. The factory must not return nil.
+	CustomPolicy EvictionPolicyFactory[K, V]
 
 	// Shards is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to a
 	// power of two. 0 means automatic: GOMAXPROCS, but no more than 128 and such that each shard gets at least 64 weight
@@ -59,8 +64,8 @@ type Config[K comparable, V any] struct {
 	// must observe the value in L2 right after Set returns.
 	WritePolicy WritePolicy
 
-	// GhostSize is the total capacity of the S3-FIFO ghost queues (in keys). 0 means choose automatically:
-	// MemoryCapacity (but no more than 1<<20) when CostFunc == nil, otherwise 8192.
+	// GhostSize is the total capacity of the S3-FIFO ghost queues and of the W-TinyLFU frequency sketch (in keys).
+	// 0 means choose automatically: MemoryCapacity (but no more than 1<<20) when CostFunc == nil, otherwise 8192.
 	GhostSize int
 
 	// WriteBackBufferSize is the buffer size of the background WriteBack worker. 0 means 1024.

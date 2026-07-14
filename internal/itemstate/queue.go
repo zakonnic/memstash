@@ -97,6 +97,14 @@ func (q *EvictQueue) Range(f func(QNode)) {
 	}
 }
 
+// Peek returns the head node without removing it.
+func (q *EvictQueue) Peek() (QNode, bool) {
+	if q.size == 0 {
+		return QNode{}, false
+	}
+	return q.head.items[q.headIdx], true
+}
+
 // Pop removes a node from the head. Fully consumed chunks are handed to the GC as a whole; a drained last chunk is
 // reused from the beginning.
 func (q *EvictQueue) Pop() (QNode, bool) {

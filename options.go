@@ -143,6 +143,14 @@ func WithPolicy(policy Policy) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.policy = &policy }}
 }
 
+// WithCustomEvictionPolicy sets Config.CustomPolicy: a factory for a user-supplied eviction policy, called once per
+// shard. It takes precedence over WithPolicy.
+func WithCustomEvictionPolicy[K comparable, V any](factory EvictionPolicyFactory[K, V]) Option {
+	return Option{ApplyTyped: func(target any) error {
+		return applyToConfig(target, func(cfg *Config[K, V]) { cfg.CustomPolicy = factory })
+	}}
+}
+
 // WithShards sets Config.Shards: the number of shards the eviction state is split into.
 func WithShards(shards int) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.shards = &shards }}
@@ -160,7 +168,8 @@ func WithWritePolicy(writePolicy WritePolicy) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.writePolicy = &writePolicy }}
 }
 
-// WithGhostSize sets Config.GhostSize: the total capacity of the S3-FIFO ghost queues (in keys).
+// WithGhostSize sets Config.GhostSize: the total capacity of the S3-FIFO ghost queues and of the W-TinyLFU
+// frequency sketch (in keys).
 func WithGhostSize(ghostSize int) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.ghostSize = &ghostSize }}
 }

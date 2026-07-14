@@ -16,6 +16,8 @@ func BenchmarkMemstashGetHitSerial(b *testing.B) {
 	}{
 		{"memstash-s3fifo", memstash.PolicyS3FIFO},
 		{"memstash-clock", memstash.PolicyClock},
+		{"memstash-wtinylfu", memstash.PolicyWTinyLFU},
+		{"memstash-sieve", memstash.PolicySIEVE},
 	} {
 		c, err := memstash.New[uint64, uint64](
 			memstash.WithMemoryCapacity(speedCapacity),

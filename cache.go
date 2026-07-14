@@ -39,7 +39,7 @@ const (
 type shard[K comparable, V any] struct {
 	mu        sync.Mutex
 	table     atomic.Pointer[hashSlots] // replaced wholesale on growth/purge
-	policy    eviction.Policy[K, V]
+	policy    EvictionPolicy[K, V]
 	pool      itemstate.Pool[K, V]
 	weight    atomic.Int64
 	cap       int64
@@ -129,8 +129,12 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.CostFunc == nil && cfg.MemoryCapacity > itemstate.MaxRecords {
 		return nil, ErrCapacityTooLarge
 	}
-	if cfg.Policy != PolicyClock && cfg.Policy != PolicyS3FIFO {
-		return nil, ErrUnknownPolicy
+	if cfg.CustomPolicy == nil {
+		switch cfg.Policy {
+		case PolicyS3FIFO, PolicyClock, PolicyWTinyLFU, PolicySIEVE:
+		default:
+			return nil, ErrUnknownPolicy
+		}
 	}
 	if cfg.TTL < 0 {
 		return nil, ErrBadTTL
@@ -167,11 +171,22 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		}
 		sh.pool = itemstate.NewPool(c.registry)
 		sh.table.Store(newHashSlots(minTableSlots))
+		if cfg.CustomPolicy != nil {
+			sh.policy = cfg.CustomPolicy(&sh.pool, sh.cap)
+			if sh.policy == nil {
+				return nil, ErrNilCustomPolicy
+			}
+			continue
+		}
 		switch cfg.Policy {
 		case PolicyS3FIFO:
 			sh.policy = eviction.NewS3FIFO(&sh.pool, sh.cap, ghostPerShard)
 		case PolicyClock:
 			sh.policy = eviction.NewClockPolicy(&sh.pool)
+		case PolicyWTinyLFU:
+			sh.policy = eviction.NewWTinyLFU(&sh.pool, sh.cap, ghostPerShard)
+		case PolicySIEVE:
+			sh.policy = eviction.NewSieve(&sh.pool)
 		}
 	}
 

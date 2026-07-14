@@ -213,6 +213,18 @@ c, err := rueidis_adapter.NewCache[int, Point](client, pointCodec{},
 )
 ```
 
+**Eviction policies** - four built-ins, selected with `WithPolicy`: `PolicyS3FIFO` (the default: quarantine + protected queue + ghost, the best all-rounder under scans and one-hit wonders), `PolicyClock` (GCLOCK, approximates LRU at FIFO cost), `PolicyWTinyLFU` (an admission window gated by a Count-Min frequency sketch that remembers keys across evictions - strong on skewed workloads), and `PolicySIEVE` (a single scan hand over the insertion order - the simplest, with an S3-FIFO-class hit rate). All share the same lock-free read path: a read only sets a 2-bit reference counter on the item's record.
+
+**Custom eviction policy** - implement the `memstash.EvictionPolicy` interface (the same contract the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Range`/`Bytes`, all called under the shard mutex) and plug its per-shard factory in:
+
+```go
+c, err := memstash.New[string, User](
+	memstash.WithCustomEvictionPolicy(func(states memstash.ItemStates[string, User], shardCap int64) memstash.EvictionPolicy[string, User] {
+		return newMyPolicy(states, shardCap) // states resolves QNode indices to item records
+	}),
+)
+```
+
 Full option list:
 
 | Option | Purpose |
@@ -221,12 +233,13 @@ Full option list:
 | `WithMemoryBudget(bytes)` | L1 bound in approximate resident bytes; derives a size-based cost function automatically (mutually exclusive with `WithMemoryCapacity`). |
 | `WithCostFunc(fn)` | Per-item weight function (e.g. size in bytes). |
 | `WithTTL(d)` | Item lifetime (1-second resolution); applied to L2 writes too. |
-| `WithPolicy(p)` | `PolicyS3FIFO` (default) or `PolicyClock`. |
+| `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`. |
+| `WithCustomEvictionPolicy(fn)` | Plug in your own eviction policy: a per-shard factory returning a `memstash.EvictionPolicy` implementation. |
 | `WithShards(n)` | Number of eviction shards (default: auto by GOMAXPROCS). |
 | `WithL2Cache(l2)` | Attach a second level directly. |
 | `WithWritePolicy(p)` | `WriteBack` (default), `WriteThrough`, or `WriteDisabled`. |
 | `WithWriteBackBuffer(n)` | Size of the async write-back buffer. |
-| `WithGhostSize(n)` | S3-FIFO ghost-queue capacity. |
+| `WithGhostSize(n)` | Capacity (in keys) of the S3-FIFO ghost queues and the W-TinyLFU frequency sketch. |
 | `WithOnL2Error(fn)` | Handler for background L2 errors. |
 | `WithStats()` | Enables the `Stats()` operation counters. Off by default. |
 
