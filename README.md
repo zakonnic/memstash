@@ -2,7 +2,7 @@
 
 **A blazing-fast, allocation-free, two-level cache for Go. Yet it's convenient and configurable.**
 
-Memstash keeps your hot set in a lock-free in-memory tier (L1). When you need to share state across k8-nodes, or just survive a restart, plug in a second tier (L2) backed by Redis, memcached, or any store you wrap. The memory path stays allocation-free and lock-free: a hit is a single map lookup plus one atomic read. On a miss, memstash fetches from L2, promotes the value into memory, and takes care of writing it back.
+Memstash keeps your hot set in a lock-free in-memory tier (L1). When you need to share state across machines, or just survive a restart, plug in a second tier (L2) backed by Redis, memcached, or any store you wrap. The memory path stays allocation-free and lock-free: a hit is a single map lookup plus one atomic read. On a miss, memstash fetches from L2, promotes the value into memory, and takes care of writing it back.
 
 ```go
 c, _ := memstash.New[string, string]()
@@ -14,7 +14,7 @@ v, ok, err := c.Get(ctx, "hello") // faster than getting from sync.Map
 
 - **Very fast.** Outperforms Ristretto by ~6× and Otter by ~2× in our [benchmarks](#benchmarks).
 - **Top-tier hit ratio.** The S3-FIFO policy keeps pace with the best W-TinyLFU caches (Otter, Theine) and leaves Ristretto far behind, holding up especially well under scans and one-hit wonders.
-- **Low memory overhead.** Bigcache comes out on top, but Memstash is in the same league - all well ahead of the rest.
+- **Low memory overhead.** Memstash and bigcache trade the top spot depending on capacity, both comfortably ahead of the rest.
 - **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
 - **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No `interface{}`, no casts.
 - **Easy on the GC.** Inserts reuse memory blocks from a pool, so the steady state allocates nothing beyond the internal map entry.
@@ -126,11 +126,12 @@ defer c.Close()
 _ = c.Set(ctx, "user:42", user)     // L1 now, Redis shortly after (write-back)
 u, ok, err := c.Get(ctx, "user:42") // L1 hit → returns instantly; L1 miss → Redis, then promoted
 ```
-> Tip: A common way to shard local caches without overlap is to use the Kafka partition key — each partition is consumed by exactly one node, so the cache for a given object lives only on that node.
+
+> Tip: A common way to shard local caches without overlap is to key them by the Kafka partition - each partition is consumed by exactly one node, so the cache for a given object lives only on that node.
 
 ## Advanced Configuration
 
-memstash is configured with functional options passed to `New` (or to any adapter's `NewCache*`). Some common setups:
+Memstash is configured with functional options passed to `New` (or to any adapter's `NewCache*`). Some common setups:
 
 **Byte-budgeted cache** - bound by approximate resident bytes instead of item count; the per-item size (key, value, and the cache's own overhead) is estimated automatically:
 
@@ -140,11 +141,11 @@ c, _ := memstash.New[string, []byte](
 )
 ```
 
-The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For anything more complex construction fails with `ErrBudgetNeedsCostFunc` - provide the byte size yourself:
+The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For anything more complex, construction fails with `ErrBudgetNeedsCostFunc` - provide the byte size yourself:
 
 ```go
 c, _ := memstash.New[string, User](
-	memstash.WithMemoryBudget(512<<20),
+	memstash.WithMemoryBudget(512 << 20),
 	memstash.WithCostFunc(func(k string, u User) uint32 { return uint32(len(k) + u.Bytes()) }),
 )
 ```
@@ -239,6 +240,7 @@ Full option list:
 | `WithL2Cache(l2)` | Attach a second level directly. |
 | `WithWritePolicy(p)` | `WriteBack` (default), `WriteThrough`, or `WriteDisabled`. |
 | `WithWriteBackBuffer(n)` | Size of the async write-back buffer. |
+| `WithBatchingForWriteBack()` / `WithNoBatchingForWriteBack()` / `WithAdaptiveBatchingForWriteBack()` | How the write-back worker drains its buffer to L2: coalesced into `BatchSet` (default), one `Set` per write, or adaptive. |
 | `WithGhostSize(n)` | Capacity (in keys) of the S3-FIFO ghost queues and the W-TinyLFU frequency sketch. |
 | `WithOnL2Error(fn)` | Handler for background L2 errors. |
 | `WithStats()` | Enables the `Stats()` operation counters. Off by default. |
@@ -246,6 +248,8 @@ Full option list:
 ## L2 Adapters
 
 Each adapter is a separate module (`memstash/l2/<name>_adapter`) so the core never pulls in a client SDK you don't use. Every adapter offers both an "adapter only" constructor (`New`, `NewJSON`, `NewBytes`) and an all-in-one two-level constructor (`NewCache`, `NewJSONCache`, `NewBytesCache`), plus native batch pipelining where the client supports it.
+
+The write path favors throughput by default: instead of one round trip per key, the background write-back worker coalesces the Sets into the adapter's native `BatchSet` (an `MSET` or a pipeline).
 
 | Module | Backend / client | context |
 |---|---|---|
@@ -276,7 +280,7 @@ Rolling your own is straightforward: implement the `memstash.L2Cache[K, V]` inte
 [Measured](benchmarks/results/out.txt) on an AMD Ryzen 9 9900X (Go 1.26.4). Reproduce with:
 
 ```sh
-# throughput and allocations (Get / Set / mixed 90-10) vs Ristretto, Otter, hashicorp/lru, plain sync.Map
+# throughput and allocations (Get / Set / mixed 90-10) vs other libs and a plain sync.Map baseline
 go -C benchmarks test -run xxx -bench . -benchmem
 
 # hit ratio across Zipf, Zipf+scan, and one-hit-wonder workloads
@@ -289,15 +293,17 @@ go -C benchmarks test -run TestHitRate -v
 
 | Cache | GetHit | Set | 90 Get / 10 Set | Set alloc |
 |---|--:|--:|----------------:|--:|
-| **memstash-s3fifo** | **0.83** | 31.7 |            4.60 | 16 B / 1 |
-| **memstash-clock** | **0.85** | 34.2 |            4.55 | 18 B / 1 |
-| otter-wtinylfu | 2.04 | 352.2 |           49.77 | 48 B / 1 |
-| theine-wtinylfu | 3.27 | 306.4 |           51.53 | 38 B / 0 |
-| ristretto | 5.41 | 84.4 |           13.29 | 89 B / 1 |
-| bigcache | 8.67 | 38.7 |           23.64 | 23 B / 1 |
-| freecache | 14.02 | 20.9 |           14.37 |  0 B / 0 |
-| hashicorp-lru | 94.97 | 140.2 |           97.04 | 73 B / 0 |
-| sync.Map\* | 1.56 | 11.8 |            4.10 | 63 B / 2 |
+| **memstash-s3fifo** | **0.89** | 31.4 |            4.70 | 16 B / 1 |
+| **memstash-clock** | **0.91** | 32.1 |            4.57 | 17 B / 1 |
+| **memstash-wtinylfu** | **0.91** | 33.8 |            4.56 | 17 B / 1 |
+| **memstash-sieve** | **1.02** | 31.9 |            4.52 | 16 B / 1 |
+| theine-wtinylfu | 3.42 | 311.6 |           52.43 | 44 B / 0 |
+| ristretto | 5.75 | 87.4 |           14.00 | 90 B / 1 |
+| otter-wtinylfu | 5.78 | 419.9 |           50.56 | 48 B / 1 |
+| bigcache | 8.72 | 38.2 |           23.70 | 23 B / 1 |
+| freecache | 13.69 | 21.3 |           14.42 |  0 B / 0 |
+| hashicorp-lru | 91.72 | 138.1 |           95.65 | 71 B / 0 |
+| sync.Map\* | 1.56 | 11.2 |            4.08 | 63 B / 2 |
 
 \* `sync.Map` performs no eviction - a lower-bound baseline, not a comparable cache.
 
@@ -305,15 +311,17 @@ go -C benchmarks test -run TestHitRate -v
 
 | Cache | 100% reads | 75% reads | 50% reads | 25% reads | 0% (writes only) |
 |---|--:|--:|--:|--:|-----------------:|
-| **memstash-s3fifo** | **1094** | **119** | **70** | **51** |           **43** |
-| **memstash-clock** | **1076** | **120** | **74** | **52** |           **37** |
-| theine-wtinylfu | 294 | 11 | 6.2 | 4.5 |              3.6 |
-| otter-wtinylfu | 182 | 9.6 | 5.3 | 3.6 |              2.8 |
-| ristretto | 181 | 39 | 13 | 8.2 |              8.5 |
-| bigcache | 101 | 31 | 24 | 22 |               26 |
-| freecache | 70 | 69 | 68 | 66 |               67 |
-| hashicorp-lru | 10 | 9.4 | 9.6 | 9.6 |              9.5 |
-| sync.Map\* | 610 | 155 | 104 | 84 |               74 |
+| **memstash-s3fifo** | **1010** | **125** | **72** | **47** |           **41** |
+| **memstash-clock** | **1007** | **125** | **72** | **49** |           **43** |
+| **memstash-wtinylfu** | **1007** | **126** | **65** | **53** |           **40** |
+| **memstash-sieve** | **998** | **116** | **70** | **52** |           **43** |
+| otter-wtinylfu | 469 | 9.7 | 5.3 | 3.6 |              2.8 |
+| theine-wtinylfu | 294 | 11 | 6.0 | 4.5 |              3.3 |
+| ristretto | 175 | 37 | 19 | 7.9 |               11 |
+| bigcache | 114 | 31 | 24 | 22 |               26 |
+| freecache | 72 | 67 | 68 | 67 |               67 |
+| hashicorp-lru | 10 | 8.5 | 9.8 | 9.6 |              9.4 |
+| sync.Map\* | 608 | 150 | 107 | 84 |               74 |
 
 Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash stays within about 2× of the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **11–14× their throughput.**
 
@@ -326,40 +334,42 @@ The Size column is the cache's estimated memory footprint at the end of the one-
 | Cache | Zipf | Zipf+scan | One-hit 30% | Cache Size |
 |---|--:|--:|--:|-----------:|
 | **memstash-s3fifo** | **75.00%** | **47.25%** | **53.10%** |      33 MB |
+| memstash-wtinylfu | 74.99% | 47.14% | 53.07% |      33 MB |
+| memstash-sieve | 74.99% | 47.01% | 52.99% |      34 MB |
 | memstash-clock | 74.94% | 46.56% | 52.71% |      29 MB |
-| theine-wtinylfu | 74.86% | 47.25% | 52.82% |      54 MB |
+| theine-wtinylfu | 74.79% | 47.14% | 52.82% |      54 MB |
 | hashicorp-lru | 74.62% | 45.67% | 52.10% |      45 MB |
-| otter-wtinylfu | 74.07% | 46.29% | 52.11% |      41 MB |
+| otter-wtinylfu | 74.14% | 46.35% | 52.13% |      41 MB |
+| freecache | 73.35% | 43.56% | 50.45% |      54 MB |
 | bigcache | 73.18% | 44.04% | 50.22% |      25 MB |
-| freecache | 72.81% | 43.56% | 50.51% |      54 MB |
-| ristretto | 50.32% | 34.60% | 41.37% |      26 MB |
+| ristretto | 50.31% | 34.62% | 41.37% |      27 MB |
 
 **Capacity = 100k items (~11% of the key space):**
 
 | Cache | Zipf | Zipf+scan | One-hit 30% | Cache Size |
 |---|--:|--:|--:|--:|
-| **memstash-s3fifo** | **67.05%** | **43.50%** | **49.57%** | 7.3 MB |
-| theine-wtinylfu | 66.70% | 42.95% | 49.20% | 12 MB |
-| otter-wtinylfu | 64.98% | 41.59% | 47.66% | 7.3 MB |
+| memstash-wtinylfu | 67.13% | 43.56% | 49.58% | 7.3 MB |
+| **memstash-s3fifo** | **67.05%** | **43.49%** | **49.57%** | 7.3 MB |
+| theine-wtinylfu | 66.80% | 42.96% | 49.18% | 12 MB |
+| memstash-sieve | 66.12% | 42.84% | 48.68% | 7.2 MB |
+| otter-wtinylfu | 64.99% | 41.60% | 47.57% | 7.3 MB |
 | memstash-clock | 63.55% | 39.13% | 46.10% | 6.2 MB |
 | hashicorp-lru | 61.97% | 36.29% | 44.82% | 9.6 MB |
 | bigcache | 60.62% | 36.35% | 43.21% | 6.1 MB |
-| freecache | 58.40% | 36.29% | 42.08% | 18 MB |
-| ristretto | 35.43% | 24.89% | 30.89% | 4.7 MB |
+| freecache | 58.56% | 36.29% | 42.08% | 18 MB |
+| ristretto | 35.53% | 24.93% | 30.88% | 4.7 MB |
 
 **Capacity = 10k items (~1% of the key space):**
 
 | Cache | Zipf | Zipf+scan | One-hit 30% | Cache Size |
 |---|--:|--:|--:|--:|
-| theine-wtinylfu | 51.70% | 33.89% | 41.04% | 1.5 MB |
-| **memstash-s3fifo** | **51.49%** | **34.66%** | **41.42%** | 911 kB |
-| otter-wtinylfu | 48.58% | 31.44% | 37.84% | 836 kB |
+| memstash-wtinylfu | 51.96% | 33.87% | 40.74% | 912 kB |
+| **memstash-s3fifo** | **51.48%** | **34.66%** | **41.41%** | 912 kB |
+| theine-wtinylfu | 51.38% | 33.90% | 40.99% | 1.5 MB |
+| memstash-sieve | 51.06% | 34.17% | 40.55% | 894 kB |
+| otter-wtinylfu | 48.65% | 31.44% | 37.85% | 806 kB |
 | bigcache | 48.14% | 31.66% | 35.64% | 1.5 MB |
-| memstash-clock | 43.79% | 28.90% | 33.70% | 744 kB |
+| memstash-clock | 43.78% | 28.90% | 33.71% | 749 kB |
 | hashicorp-lru | 41.78% | 27.77% | 32.11% | 1.0 MB |
-| freecache | 40.16% | 26.79% | 30.57% | 6.6 MB |
-| ristretto | 18.20% | 12.53% | 16.92% | 807 kB |
-
-## License
-
-Apache 2.0
+| freecache | 40.16% | 26.79% | 30.58% | 6.6 MB |
+| ristretto | 18.24% | 12.56% | 16.79% | 807 kB |
