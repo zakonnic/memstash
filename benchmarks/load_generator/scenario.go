@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -12,38 +13,76 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v3"
+	rueidislib "github.com/redis/rueidis"
+
 	"github.com/zakonnic/memstash"
 )
 
-// scenario drives one cache with its own goroutines, its own request-rate/key-space shape, and its own log file.
-// All scenarios run in the same process, in parallel and independently of each other.
+// scenario drives one cache with its own goroutines, key-space shape, and log file; all scenarios run in parallel.
 type scenario struct {
 	name        string
-	description string // human-readable summary printed to the console at startup
+	description string
 	cache       *memstash.Cache[string, []byte]
-	cacheSize   int64 // capacity passed to WithMemoryCapacity when the cache was built; for display only
+	cacheSize   int64 // for display only
 
-	goroutines int       // number of worker goroutines
-	rps        []float64 // target requests/sec per worker, len(rps) == goroutines
+	redisClient rueidislib.Client // nil when L1-only
+	redisAddr   []string
 
-	readPercent int // chance (0-100) that an operation is a Get rather than a Set
+	goroutines int
+	rps        []float64 // target requests/sec per worker, len == goroutines
 
-	// Get keys are drawn uniformly from [0, keySpace); Set keys are drawn uniformly from [0, writeKeySpace).
-	// writeKeySpace < keySpace means some fraction of Gets can never hit (those keys were never written).
+	readPercent int // 0-100: chance an op is a Get rather than a Set
+
+	// Keys follow a Zipf distribution (skew zipfS, index 0 hottest): Gets over [0, keySpace), Sets over
+	// [0, writeKeySpace). keySpace is several times L1 capacity, so L1 holds only the hot head and the tail leans on
+	// L2 or misses.
 	keySpace      int
 	writeKeySpace int
+	zipfS         float64
 
-	newValue func(rng *rand.Rand) []byte // value generator for Set
+	// value derives a key's deterministic bytes (see values.go); truth holds them for every write key and is the
+	// oracle a Get is checked against.
+	value  valueFunc
+	truth  *xsync.MapOf[string, []byte]
+	errLog *errorLog
 
 	logPath string
 
 	ops, gets, sets, hits, misses, errs atomic.Int64
 }
 
+// keyFor builds the key for index n. The scenario-name prefix keeps scenarios that share a Redis L2 from colliding
+// (which would overwrite each other's values and trip the verification).
+func (s *scenario) keyFor(n int) string { return fmt.Sprintf("%s:key-%d", s.name, n) }
+
+// fillTruth populates the source of truth for every write key, in parallel, before any worker runs.
+func (s *scenario) fillTruth() {
+	s.truth = xsync.NewMapOf[string, []byte]()
+	workers := runtime.NumCPU()
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(start int) {
+			defer wg.Done()
+			for n := start; n < s.writeKeySpace; n += workers {
+				key := s.keyFor(n)
+				s.truth.Store(key, s.value(key))
+			}
+		}(w)
+	}
+	wg.Wait()
+}
+
 // run starts the worker goroutines and blocks in the monitor loop until ctx is canceled.
 func (s *scenario) run(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
-	defer s.cache.Close()
+	defer func() {
+		s.cache.Close() // flush write-back to L2 before closing the client
+		if s.redisClient != nil {
+			s.redisClient.Close()
+		}
+	}()
 
 	var workers sync.WaitGroup
 	for i := 0; i < s.goroutines; i++ {
@@ -55,16 +94,20 @@ func (s *scenario) run(ctx context.Context, wg *sync.WaitGroup) {
 	workers.Wait()
 }
 
+// workerTick paces each worker by running its owed ops in a batch per tick; one timer tick per op can't sustain
+// high rps.
 const workerTick = 10 * time.Millisecond
 
 func (s *scenario) worker(ctx context.Context, wg *sync.WaitGroup, idx int) {
 	defer wg.Done()
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(idx)<<32 ^ int64(len(s.name))))
 	rps := s.rps[idx]
 	if rps <= 0 {
 		return
 	}
+	rng := rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(idx)<<32 ^ int64(len(s.name))))
+	reads := newZipf(rng, s.keySpace, s.zipfS)
+	writes := newZipf(rng, s.writeKeySpace, s.zipfS)
 	opsPerTick := rps * workerTick.Seconds()
 
 	ticker := time.NewTicker(workerTick)
@@ -80,34 +123,69 @@ func (s *scenario) worker(ctx context.Context, wg *sync.WaitGroup, idx int) {
 			n := int(owed)
 			owed -= float64(n)
 			for i := 0; i < n; i++ {
-				s.doOp(rng)
+				s.doOp(rng, reads, writes)
 			}
 		}
 	}
 }
 
-func (s *scenario) doOp(rng *rand.Rand) {
+// newZipf builds a Zipf generator over [0, n) with skew s (index 0 hottest). s is clamped above 1, which NewZipf
+// requires.
+func newZipf(rng *rand.Rand, n int, s float64) *rand.Zipf {
+	if s <= 1 {
+		s = 1.001
+	}
+	if n < 2 {
+		n = 2
+	}
+	return rand.NewZipf(rng, s, 1, uint64(n-1))
+}
+
+func (s *scenario) doOp(rng *rand.Rand, reads, writes *rand.Zipf) {
 	ctx := context.Background()
 	if rng.Intn(100) < s.readPercent {
-		key := fmt.Sprintf("key-%d", rng.Intn(s.keySpace))
-		_, ok, err := s.cache.Get(ctx, key)
-		s.gets.Add(1)
-		switch {
-		case err != nil:
-			s.errs.Add(1)
-		case ok:
-			s.hits.Add(1)
-		default:
-			s.misses.Add(1)
-		}
+		s.doGet(ctx, s.keyFor(int(reads.Uint64())))
 	} else {
-		key := fmt.Sprintf("key-%d", rng.Intn(s.writeKeySpace))
-		if err := s.cache.Set(ctx, key, s.newValue(rng)); err != nil {
-			s.errs.Add(1)
-		}
-		s.sets.Add(1)
+		s.doSet(ctx, s.keyFor(int(writes.Uint64())))
 	}
 	s.ops.Add(1)
+}
+
+// doGet reads the key and checks any returned value against the source of truth. Cache/Redis errors and
+// verification failures both count as errors and are logged.
+func (s *scenario) doGet(ctx context.Context, key string) {
+	s.gets.Add(1)
+	got, ok, err := s.cache.Get(ctx, key)
+	switch {
+	case err != nil:
+		s.errs.Add(1)
+		s.errLog.opError(s.name, "get", key, 0, err)
+	case ok:
+		s.hits.Add(1)
+		if want, known := s.truth.Load(key); !known {
+			s.errs.Add(1)
+			s.errLog.anomaly(s.name, key, got) // a value for a key we never wrote
+		} else if !bytes.Equal(got, want) {
+			s.errs.Add(1)
+			s.errLog.mismatch(s.name, key, got, want)
+		}
+	default:
+		s.misses.Add(1)
+	}
+}
+
+// doSet writes the key's source-of-truth value, so a later Get always has the right bytes to verify against.
+func (s *scenario) doSet(ctx context.Context, key string) {
+	s.sets.Add(1)
+	value, ok := s.truth.Load(key)
+	if !ok { // pre-filled for every write key; defensive fallback
+		value = s.value(key)
+		s.truth.Store(key, value)
+	}
+	if err := s.cache.Set(ctx, key, value); err != nil {
+		s.errs.Add(1)
+		s.errLog.opError(s.name, "set", key, len(value), err)
+	}
 }
 
 // monitor logs a stats snapshot once a minute (and once more on shutdown) to the scenario's own log file.
@@ -126,15 +204,15 @@ func (s *scenario) monitor(ctx context.Context) {
 		"read_percent", s.readPercent,
 		"key_space", s.keySpace,
 		"write_key_space", s.writeKeySpace,
+		"redis_address", s.redisAddr, // empty when the scenario runs L1-only
 	)
 
-	start := time.Now()
-	lastTime := start
-	var lastOps int64
-	lastCPU, cpuErr := processCPUTime()
+	cpu, cpuErr := processCPUTime()
 	if cpuErr != nil {
 		logger.Warn("cpu time unavailable", "error", cpuErr.Error())
 	}
+	start := time.Now()
+	prev := meter{t: start, cpu: cpu}
 
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -142,38 +220,46 @@ func (s *scenario) monitor(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			lastTime, lastOps, lastCPU = s.logStats(logger, start, lastTime, lastOps, lastCPU)
+			prev = s.logStats(logger, start, prev)
 		case <-ctx.Done():
-			s.logStats(logger, start, lastTime, lastOps, lastCPU)
+			s.logStats(logger, start, prev)
 			logger.Info("scenario stopped")
 			return
 		}
 	}
 }
 
-func (s *scenario) logStats(logger *slog.Logger, start, lastTime time.Time, lastOps int64, lastCPU time.Duration) (time.Time, int64, time.Duration) {
+// meter is the previous snapshot the windowed rates (ops/sec, hit rate, CPU) are measured against.
+type meter struct {
+	t               time.Time
+	ops, gets, hits int64
+	cpu             time.Duration
+}
+
+func (s *scenario) logStats(logger *slog.Logger, start time.Time, prev meter) meter {
 	now := time.Now()
-	wallDelta := now.Sub(lastTime)
+	wall := now.Sub(prev.t).Seconds()
 
 	ops, gets, sets, hits, misses, errs := s.ops.Load(), s.gets.Load(), s.sets.Load(), s.hits.Load(), s.misses.Load(), s.errs.Load()
-	opsDelta := ops - lastOps
-	opsPerSec := float64(0)
-	if wallDelta > 0 {
-		opsPerSec = float64(opsDelta) / wallDelta.Seconds()
-	}
 
+	opsPerSec := float64(0)
+	if wall > 0 {
+		opsPerSec = float64(ops-prev.ops) / wall
+	}
+	// Hit rate over this interval, not since boot, so it reflects the current steady state rather than being dragged
+	// down forever by cold-start misses.
 	hitRate := float64(0)
-	if gets > 0 {
-		hitRate = float64(hits) / float64(gets) * 100
+	if dg := gets - prev.gets; dg > 0 {
+		hitRate = float64(hits-prev.hits) / float64(dg) * 100
 	}
 
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 
-	cpuNow, cpuErr := processCPUTime()
+	cpu, cpuErr := processCPUTime()
 	cpuCores, cpuPercent := float64(0), float64(0)
-	if cpuErr == nil && wallDelta > 0 {
-		cpuCores = (cpuNow - lastCPU).Seconds() / wallDelta.Seconds()
+	if cpuErr == nil && wall > 0 {
+		cpuCores = (cpu - prev.cpu).Seconds() / wall
 		cpuPercent = cpuCores / float64(runtime.NumCPU()) * 100
 	}
 
@@ -197,8 +283,8 @@ func (s *scenario) logStats(logger *slog.Logger, start, lastTime time.Time, last
 		"process_cpu_percent", cpuPercent,
 	)
 
-	if cpuErr == nil {
-		lastCPU = cpuNow
+	if cpuErr != nil {
+		cpu = prev.cpu // no fresh reading; keep the old baseline so the next interval measures from it
 	}
-	return now, ops, lastCPU
+	return meter{t: now, ops: ops, gets: gets, hits: hits, cpu: cpu}
 }

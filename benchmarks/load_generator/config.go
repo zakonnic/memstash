@@ -3,12 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// scenarioOverride holds the fields config.yaml is allowed to override for a single scenario. Every field is a
-// pointer (or a possibly-nil slice), so leaving it out of the file keeps the built-in default from buildScenarios.
+// scenarioOverride is a scenario's config block; a nil pointer (or empty slice) keeps the built-in default.
 type scenarioOverride struct {
 	Size          *int64    `yaml:"size"` // cache capacity in weight units; passed to memstash.WithMemoryCapacity
 	Goroutines    *int      `yaml:"goroutines"`
@@ -16,16 +16,17 @@ type scenarioOverride struct {
 	ReadPercent   *int      `yaml:"read_percent"`
 	KeySpace      *int      `yaml:"key_space"`
 	WriteKeySpace *int      `yaml:"write_key_space"`
+	ZipfS         *float64  `yaml:"zipf_s"` // Zipf skew (>1); higher = more concentrated on hot keys
+	// RedisAddress: "" means L1 only, a comma-separated list dials a cluster; omitted keeps the built-in default.
+	RedisAddress *string `yaml:"redis_address"`
 }
 
-// fileConfig is the root of config.yaml: one optional override block per scenario, keyed by scenario name
-// (scenario-1, scenario-2, scenario-3).
+// fileConfig is the root of config.yaml: an override block per scenario name.
 type fileConfig struct {
 	Scenarios map[string]scenarioOverride `yaml:"scenarios"`
 }
 
-// loadConfig reads and parses path. A missing file is not an error - config.yaml only overrides the built-in
-// defaults, it isn't required for the load generator to run.
+// loadConfig reads and parses path; a missing file is not an error (the defaults are self-sufficient).
 func loadConfig(path string) (fileConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -53,6 +54,24 @@ func effectiveSize(cfg fileConfig, name string, defaultSize int64) (int64, error
 	return *o.Size, nil
 }
 
+// effectiveRedisAddress resolves the scenario's L2 seed nodes: the config override (present but blank = L1 only) or
+// defaultAddr, comma-split. An empty result means no L2.
+func effectiveRedisAddress(cfg fileConfig, name, defaultAddr string) []string {
+	addr := defaultAddr
+	if o, ok := cfg.Scenarios[name]; ok && o.RedisAddress != nil {
+		addr = *o.RedisAddress
+	}
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return nil
+	}
+	seeds := strings.Split(addr, ",")
+	for i := range seeds {
+		seeds[i] = strings.TrimSpace(seeds[i])
+	}
+	return seeds
+}
+
 // applyOverride merges o onto s, leaving any field o didn't set untouched, then validates the result.
 func applyOverride(s *scenario, o scenarioOverride) error {
 	if o.Goroutines != nil {
@@ -70,7 +89,13 @@ func applyOverride(s *scenario, o scenarioOverride) error {
 	if o.WriteKeySpace != nil {
 		s.writeKeySpace = *o.WriteKeySpace
 	}
+	if o.ZipfS != nil {
+		s.zipfS = *o.ZipfS
+	}
 
+	if s.zipfS <= 1 {
+		return fmt.Errorf("%s: zipf_s=%g must be > 1", s.name, s.zipfS)
+	}
 	if len(s.rps) != s.goroutines {
 		return fmt.Errorf("%s: rps has %d entries but goroutines=%d - config.yaml must give one rps value per goroutine",
 			s.name, len(s.rps), s.goroutines)

@@ -1,22 +1,26 @@
-# Per-scenario overrides for the load generator (benchmarks/load_generator).
+# Per-scenario overrides for the load generator. Every field is optional; an omitted field, block, or file keeps
+# the built-in default from buildScenarios(). If you set goroutines, rps must have one entry per goroutine.
 #
-# Every field is optional: anything left out - a field, a whole scenario block, or the whole file - keeps the
-# built-in default from buildScenarios() in main.go. If you override `goroutines`, you must also give an `rps` list
-# with the same number of entries (one target requests/sec value per worker goroutine).
+# Ships pre-filled with the built-in defaults, so it also documents them. Copied next to the binary by
+# `make load-generator`, loaded from the working directory unless -config says otherwise.
 #
-# This file ships pre-filled with the current built-in defaults, so it doubles as documentation of what runs out of
-# the box - edit values in place to change the load. It is copied next to the binary by `make load-generator` and
-# loaded by default from the working directory (override the path with -config).
+# Values come from the workload package (scenario-1 = sessions, scenario-2 = CDN assets, scenario-3 = DB rows),
+# deterministic per key, stored in a source-of-truth map and re-checked after every Get; errors go to errors.log.
+#
+# Keys follow a Zipf distribution (zipf_s > 1, higher = more skew); key_space is several times L1 capacity, so L1
+# holds only the hot head and the tail leans on L2 or misses. redis_address: "" = L1 only, "host:port" = one node,
+# comma-separated = cluster; omit to keep the default (scenario-1 none, scenarios 2/3 the docker cluster).
 
 scenarios:
-  # 10 goroutines, 90% Get / 10% Set, 10k rps total, default cache size. Only half the read key space is ever
-  # written, so ~half of all Gets target keys that were never Set.
+  # Web sessions, Zipf reads over a key space ~7.5x L1 capacity. L1 only.
   scenario-1:
     size: 20000
+    redis_address: ""
     goroutines: 10
     read_percent: 90
-    key_space: 200000
-    write_key_space: 100000
+    key_space: 1500000
+    write_key_space: 1000000
+    zipf_s: 1.1
     rps:
       - 1000
       - 1000
@@ -29,29 +33,32 @@ scenarios:
       - 1000
       - 1000
 
-  # 5 goroutines, 50% Get / 50% Set, 10k rps total, default cache size. Only 5% of the read key space is ever
-  # written - a small hot write set under heavy churn.
+  # CDN / static assets, bimodal value sizes, key space ~7.5x L1. Redis L2 (cluster).
   scenario-2:
     size: 20000
+    redis_address: "127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003"
     goroutines: 5
     read_percent: 50
-    key_space: 200000
-    write_key_space: 10000
+    key_space: 150000
+    write_key_space: 150000
+    zipf_s: 1.1
     rps:
-      - 2000
-      - 2000
-      - 2000
-      - 2000
-      - 2000
+      - 20000
+      - 20000
+      - 20000
+      - 20000
+      - 20000
 
-  # 40 goroutines, 90% Get / 10% Set, all keys are written. One goroutine alone drives 10k rps; the remaining 39
-  # share 30k rps (~769.23 rps each) for 40k rps total.
+  # DB rows, byte-weighted L1 (~10 MB holds ~28k of the ~200k keys). Redis L2 (cluster). One goroutine drives 10k
+  # rps; the remaining 39 share 30k rps.
   scenario-3:
-    size: 1000000
+    size: 10000000
+    redis_address: "127.0.0.1:6379"
     goroutines: 40
     read_percent: 90
-    key_space: 1000000
-    write_key_space: 1000000
+    key_space: 20000000
+    write_key_space: 20000000
+    zipf_s: 1.1
     rps:
       - 10000
       - 769.230769

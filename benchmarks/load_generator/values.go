@@ -1,44 +1,19 @@
 package main
 
-import (
-	"encoding/json"
-	"math/rand"
-)
+import "github.com/zakonnic/memstash/tests/workload"
 
-// User is the record used by scenario 3: two fields, marshaled to JSON before being stored so the cache's CostFunc
-// (which only knows about []byte) has something to measure.
-type User struct {
-	Number int    `json:"number"`
-	Text   string `json:"text"`
-}
+// Values come from the workload package; its three scenario types, in declaration order, map onto the three
+// scenarios: scenario-1 -> SessionScenario, scenario-2 -> CDNScenario, scenario-3 -> DBScenario. Each Value is a
+// pure function of the key, so the source-of-truth map can verify Gets and values stay stable across runs.
 
-const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+// truthBlobSeed fixes the byte pool the values are sliced from, so it doesn't change between runs.
+const truthBlobSeed = 20260715
 
-func randomString(rng *rand.Rand, n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[rng.Intn(len(letters))]
-	}
-	return string(b)
-}
+var sharedBlob = workload.NewBlob(truthBlobSeed, workload.DefaultBlobSize)
 
-func randomBytes(rng *rand.Rand, n int) []byte {
-	b := make([]byte, n)
-	_, _ = rng.Read(b) // math/rand.Rand.Read never errors
-	return b
-}
+// valueFunc returns the deterministic value bytes for a key.
+type valueFunc func(key string) []byte
 
-// randomPayload is the value generator for scenarios 1 and 2: an opaque random blob, 64-256 bytes.
-func randomPayload(rng *rand.Rand) []byte {
-	return randomBytes(rng, 64+rng.Intn(193))
-}
-
-// randomUserJSON is the value generator for scenario 3: a random User marshaled to JSON.
-func randomUserJSON(rng *rand.Rand) []byte {
-	u := User{Number: rng.Intn(1_000_000), Text: randomString(rng, 16+rng.Intn(49))}
-	b, err := json.Marshal(u)
-	if err != nil {
-		panic(err) // User always marshals; a failure here would mean a broken encoding/json
-	}
-	return b
-}
+func sessionValue(key string) []byte { return workload.SessionScenario{}.Value(sharedBlob, key) }
+func cdnValue(key string) []byte     { return workload.CDNScenario{}.Value(sharedBlob, key) }
+func dbValue(key string) []byte      { return workload.DBScenario{}.Value(sharedBlob, key) }

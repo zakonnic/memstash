@@ -13,7 +13,7 @@ for port in $PORTS; do
     --cluster-config-file "/tmp/nodes-$port.conf" \
     --cluster-node-timeout 5000 \
     --cluster-announce-ip 127.0.0.1 \
-    --maxmemory 128mb \
+    --maxmemory 512mb \
     --maxmemory-policy allkeys-lru \
     --save '' \
     --appendonly no \

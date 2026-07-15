@@ -11,15 +11,15 @@
 services:
   redis:
     image: redis:7-alpine
-    # A cache profile: bounded memory with LRU eviction, no persistence, keepalive on long-idle connections.
+    # A single-node cache: LRU eviction, no persistence (no disk writes), keepalive on long-idle connections.
     command:
       - redis-server
-      - --maxmemory 1024mb
+      - --maxmemory 768mb
       - --maxmemory-policy allkeys-lru
       - --save ''
       - --appendonly no
       - --tcp-keepalive 60
-    mem_limit: 384m
+    mem_limit: 1g
     ports:
       - "6379:6379"
     healthcheck:
@@ -28,8 +28,8 @@ services:
       timeout: 2s
       retries: 10
 
-  # A 3-master Redis Cluster in one container. To remap, override REDIS_CLUSTER_PORTS together with ports: the announce
-  # port must match the published port (see docker-compose.override.example.yml).
+  # A 3-master Redis Cluster in one container, emulating a production cache cluster; /tmp is a tmpfs so
+  # the cluster-config file and node logs never touch the disk. To remap, override REDIS_CLUSTER_PORTS.
   redis-cluster:
     image: redis:7-alpine
     command: ["sh", "/redis-cluster/start.sh"]
@@ -37,7 +37,9 @@ services:
       REDIS_CLUSTER_PORTS: "7001 7002 7003"
     volumes:
       - ./redis-cluster:/redis-cluster:ro
-    mem_limit: 1024m
+    tmpfs:
+      - /tmp
+    mem_limit: 2g
     ports:
       - "7001:7001"
       - "7002:7002"
@@ -58,6 +60,7 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    # durability is traded away to spare the disk: no forced syncs, smaller WAL, synchronous_commit off.
     command:
       - postgres
       - -c
@@ -78,6 +81,10 @@ services:
       - checkpoint_completion_target=0.9
       - -c
       - synchronous_commit=off
+      - -c
+      - fsync=off
+      - -c
+      - full_page_writes=off
     environment:
       POSTGRES_USER: memstash
       POSTGRES_PASSWORD: memstash
@@ -93,9 +100,11 @@ services:
 
   mysql:
     image: mariadb:11
+    # durability relaxed to spare the disk.
     command:
       - --innodb-buffer-pool-size=636M
       - --innodb-flush-log-at-trx-commit=2
+      - --innodb-doublewrite=0
       - --max-connections=200
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -122,6 +131,9 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: memstash
       MONGO_INITDB_ROOT_PASSWORD: memstash
+    # the ephemeral data dir lives on a tmpfs to keep it off the disk.
+    tmpfs:
+      - /data/db
     mem_limit: 1024m
     ports:
       - "27017:27017"
