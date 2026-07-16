@@ -7,11 +7,11 @@ import (
 	"github.com/zakonnic/memstash"
 )
 
-// Speed benchmarks of in-memory operations. The key sequence (Zipf over a hot set) is precomputed so the random number
-// generator does not distort the measurement. sync.Map and xsync.MapOf are the no-eviction baselines.
+// Speed benchmarks of in-memory operations. The key sequence (Zipf over a hot set) is precomputed so the RNG does not
+// distort the measurement.
 const (
-	speedCapacity = 1 << 17 // cache capacity
-	speedHotKeys  = 1 << 16 // warmed-up keys (they fit entirely within the capacity)
+	speedCapacity = 1 << 17
+	speedHotKeys  = 1 << 16 // fits entirely inside speedCapacity, so warmUp evicts nothing
 	seqLen        = 1 << 20
 	seqMask       = seqLen - 1
 )
@@ -85,7 +85,7 @@ func BenchmarkSet(b *testing.B) {
 	}
 }
 
-// BenchmarkMixed90_10 is a realistic mix: 90% reads, 10% writes.
+// BenchmarkMixed90_10 is the realistic mix: 90% reads, 10% writes.
 func BenchmarkMixed90_10(b *testing.B) {
 	for _, c := range speedContenders() {
 		warmUp(c)

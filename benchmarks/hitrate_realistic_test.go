@@ -8,16 +8,15 @@ import (
 	"github.com/zakonnic/memstash/tests/workload"
 )
 
-// Realistic-workload hit-rate comparison: string keys and []byte values shaped like real payloads (JSON sessions,
-// static assets, serialized DB rows) instead of uint64/uint64. Caches are bounded by a byte budget, not an item
-// count, so variable value sizes matter: byte-aware caches must balance "many small" against "few large" entries.
-// Every generator is deterministic (fixed seeds), so each cache receives exactly the same stream.
+// Realistic-workload hit-rate comparison: string keys and []byte values shaped like real payloads, bounded by a byte
+// budget rather than an item count, so byte-aware caches must balance "many small" against "few large" entries. Every
+// generator is seeded fixed, so each cache receives exactly the same stream.
 //
-// Budgets are chosen well below the working-set footprint of each trace (roughly 15-30% of it), otherwise every
-// policy converges to the same compulsory-miss ceiling and the comparison degenerates (see hitrate_test.go).
+// Budgets sit at roughly 15-30% of each trace's working set. Higher and every policy converges to the same
+// compulsory-miss ceiling and the comparison degenerates.
 
-// contentBlob is a shared pool of deterministic printable bytes; values are sliced/copied out of it instead of
-// being generated per key, which keeps value construction cheap on the miss path.
+// contentBlob is a shared pool of deterministic printable bytes; values are sliced out of it rather than generated
+// per key, which keeps value construction cheap on the miss path.
 var contentBlob = workload.NewBlob(99, workload.DefaultBlobSize)
 
 // --- scenario 1: web session store ---
@@ -27,8 +26,7 @@ var hitrateSessions = workload.SessionScenario{Catalog: 3_000_000, TraceLen: 2_0
 
 // --- scenario 2: CDN / static-asset cache ---
 // 75% Zipf (s=1.05) over a 1M-object catalogue plus 25% one-hit wonders (cache-busting URLs, crawlers), ~1.5M
-// requests. Value sizes are bimodal like real assets: ~90% small files (0.6-8 KB) and ~10% large ones (8-64 KB),
-// so the byte budget forces a "many small vs few large" trade-off.
+// requests. Value sizes are bimodal like real assets: ~90% small files (0.6-8 KB), ~10% large ones (8-64 KB).
 var hitrateCDN = workload.CDNScenario{Catalog: 1_000_000, TraceLen: 1_500_000}
 
 // --- scenario 3: DB row cache ---

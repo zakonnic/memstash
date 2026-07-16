@@ -4,7 +4,6 @@ package benchmarks
 import (
 	"context"
 	"encoding/binary"
-	"strconv"
 	"sync"
 	"time"
 	"unsafe"
@@ -84,17 +83,14 @@ func (a *ristrettoAdapter) Set(key, value uint64, sync bool) {
 func (a *ristrettoAdapter) Close()      { a.c.Close() }
 func (a *ristrettoAdapter) Expose() any { return a.c }
 
-// GetSize ristretto has no byte-accounting API (Metrics tracks Set's cost units, which the benchmark always calls
-// with 1 - an item count, not bytes), and its store is a plain mutex-guarded Go map, so reflection sees all of it.
+// GetSize falls back to reflection: ristretto has no byte-accounting API (Metrics tracks cost units, always 1 here),
+// and its store is a plain mutex-guarded Go map, so SizeOf sees all of it.
 func (a *ristrettoAdapter) GetSize() uint64 {
 	a.c.Wait()
 	return SizeOf(a.c)
 }
 
 // --- otter (W-TinyLFU) ---
-//
-// otter v2 has a single eviction policy - adaptive W-TinyLFU (a count-min frequency sketch in front of an LRU/SLRU) -
-// so the label makes the policy explicit; there is no other otter mode to select.
 
 type otterAdapter struct{ c *otter.Cache[uint64, uint64] }
 
@@ -120,8 +116,8 @@ type otterNode[K comparable, V any] struct {
 	queueType uint8
 }
 
-// GetSize otter reports no byte total, and its hash table is a fork of xsync.MapOf living in an unexported
-// internal package, so we can't call an equivalent of Stats() directly on it. But can simulate this map.
+// GetSize simulates otter's hash table: it reports no byte total, and the table is an xsync.MapOf fork in an
+// unexported package, so Stats() is out of reach and reflection cannot see through its unsafe.Pointer nodes.
 func (a *otterAdapter) GetSize() uint64 {
 	a.c.StopAllGoroutines()
 	estimatedSize := SizeOf(a.c)
@@ -147,8 +143,8 @@ func (a *theineAdapter) Set(key, value uint64, _ bool) { a.c.Set(key, value, 1) 
 func (a *theineAdapter) Close()                        { a.c.Close() }
 func (a *theineAdapter) Expose() any                   { return a.c }
 
-// GetSize theine has no byte-accounting API either, but its store is plain sharded maps (map[K]*Entry) guarded by
-// mutexes, no unsafe.Pointer indirection, so reflection can walk all of it.
+// GetSize falls back to reflection: no byte-accounting API, but the store is plain sharded map[K]*Entry with no
+// unsafe.Pointer indirection, so SizeOf walks all of it.
 func (a *theineAdapter) GetSize() uint64 {
 	a.c.Wait()
 	return SizeOf(a.c)
@@ -172,14 +168,13 @@ func (a *lruAdapter) Set(key, value uint64, _ bool) { a.c.Add(key, value) }
 func (a *lruAdapter) Close()                        {}
 func (a *lruAdapter) Expose() any                   { return a.c }
 
-// GetSize a plain container/list + map, no native size accounting; reflection covers it fully (no unsafe.Pointer).
+// GetSize falls back to reflection: no native accounting, and a plain container/list + map has no unsafe.Pointer.
 func (a *lruAdapter) GetSize() uint64 { return SizeOf(a.c) }
 
 // --- freecache (shard-local LRU-ish ring buffers over []byte) ---
 //
-// freecache sizes itself in bytes rather than item count, so capacity is converted using a generous per-entry
-// overhead estimate (header + 8-byte int key + 8-byte value) to make its resident size comparable to the other
-// caches under the same `capacity` items.
+// freecache sizes itself in bytes, not items, so capacity is converted with a per-entry overhead estimate to keep it
+// comparable to the other caches at the same nominal item count.
 
 type freecacheAdapter struct{ c *freecache.Cache }
 
@@ -207,14 +202,14 @@ func (a *freecacheAdapter) Set(key, value uint64, _ bool) {
 func (a *freecacheAdapter) Close()      {}
 func (a *freecacheAdapter) Expose() any { return a.c }
 
-// GetSize freecache pre-allocates one fixed []byte ring buffer per segment at construction and manages entries as
-// raw bytes within it - so reflection already reports the real, mostly load-independent footprint;
+// GetSize uses reflection and is cheap even at 100M entries: entries live as raw bytes inside per-segment ring
+// buffers, so SizeOf sizes the slices and never walks an entry.
 func (a *freecacheAdapter) GetSize() uint64 { return SizeOf(a.c) }
 
 // --- bigcache (sharded, size-bounded, string-keyed) ---
 //
 // bigcache has no item-count limit, only a byte budget (HardMaxCacheSize) and a shard count; both are derived from
-// capacity with a generous per-entry overhead estimate so its resident size is comparable to the other caches.
+// capacity with a per-entry overhead estimate to keep it comparable to the other caches.
 
 type bigcacheAdapter struct{ c *bigcache.BigCache }
 
@@ -246,7 +241,7 @@ func getBigCacheHardMaxCacheSize(capacity int64, avgKeySize, avgValueSize int) i
 
 func (a *bigcacheAdapter) Name() string { return "bigcache" }
 func (a *bigcacheAdapter) Get(key uint64) (uint64, bool) {
-	v, err := a.c.Get(strconv.FormatUint(key, 10))
+	v, err := a.c.Get(bigcacheKey(key))
 	if err != nil {
 		return 0, false
 	}
@@ -255,12 +250,21 @@ func (a *bigcacheAdapter) Get(key uint64) (uint64, bool) {
 func (a *bigcacheAdapter) Set(key, value uint64, _ bool) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], value)
-	_ = a.c.Set(strconv.FormatUint(key, 10), buf[:])
+	_ = a.c.Set(bigcacheKey(key), buf[:])
+}
+
+// bigcacheKey packs the key into its raw 8 bytes: bigcache is string-keyed, and decimal formatting would store up to
+// 20 bytes per key instead of the 8 every other contender holds.
+func bigcacheKey(key uint64) string {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], key)
+	return string(buf[:])
 }
 func (a *bigcacheAdapter) Close()      { _ = a.c.Close() }
 func (a *bigcacheAdapter) Expose() any { return a.c }
 
-// GetSize bigcache's own Capacity() misses inner hash index, SizeOf walks both.
+// GetSize uses reflection rather than bigcache's own Capacity(), which counts only the ring buffers and misses the
+// hash index.
 func (a *bigcacheAdapter) GetSize() uint64 { return SizeOf(a.c) }
 
 // --- sync.Map (no eviction; speed measurements only) ---
@@ -281,8 +285,8 @@ func (a *syncMapAdapter) Set(key, value uint64, _ bool) { a.m.Store(key, value) 
 func (a *syncMapAdapter) Close()                        {}
 func (a *syncMapAdapter) Expose() any                   { return &a.m }
 
-// GetSize sync.Map has no size accounting of its own, and its internal read/dirty maps use interface{}-boxed
-// entries reached through regular pointers (no unsafe.Pointer), so reflection can walk it.
+// GetSize falls back to reflection: no accounting of its own, and the read/dirty maps box entries behind regular
+// pointers, not unsafe.Pointer.
 func (a *syncMapAdapter) GetSize() uint64 { return SizeOf(&a.m) }
 
 // --- xsync.MapOf (no eviction; lower bound on the cost of map operations) ---
@@ -297,6 +301,6 @@ func (a *xsyncMapAdapter) Set(key, value uint64, _ bool) { a.m.Store(key, value)
 func (a *xsyncMapAdapter) Close()                        {}
 func (a *xsyncMapAdapter) Expose() any                   { return a.m }
 
-// GetSize xsync.MapOf's own buckets sit behind unsafe.Pointer (invisible to reflection), but it exposes Stats(),
-// which gives the exact bucket/entry counts needed to size it properly - same approach memstash's TotalWeight uses.
+// GetSize goes through Stats(): the buckets sit behind unsafe.Pointer, invisible to reflection, but Stats() gives
+// exact bucket and entry counts.
 func (a *xsyncMapAdapter) GetSize() uint64 { return xsyncMapOfBytes(a.m) }

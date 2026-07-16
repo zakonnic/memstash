@@ -35,14 +35,19 @@ cover-func: cover-gen ## Show coverage by func
 .PHONY: cover
 cover: cover-gen ## Show coverage html
 	go tool cover -html=var/coverage.out
+
 bench-speed: ## Run speed benchmarks
-	go -C benchmarks test -run xxx -bench . ./...
+	go -C benchmarks test -run='^BenchmarkGetHit$$' -bench . ./...
 bench-hitrate: ## Run hitrate benchmarks
 	go -C benchmarks test -run='^TestHitRate$$' -v
 bench-hitrate-real: ## Run hitrate benchmarks
 	go -C benchmarks test -run='^TestHitRateRealistic$$' -v
 .PHONY: bench
 bench: bench-speed bench-hitrate ## Run benchmarks
+bench-100kk:
+	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprintMemstash -tags=long
+bench-100kk-all:
+	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprint -tags=others
 
 integration-tests: ## Run integration tests against live redis/memcached (make up first); CGO off so the cgo-only valyala adapter is skipped
 	CGO_ENABLED=0 go -C tests/integration test ./... -v

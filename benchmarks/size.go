@@ -143,7 +143,9 @@ func (s *sizer) sizeOfSlice(v reflect.Value) uint64 {
 		return 0
 	}
 	total := uint64(v.Cap()) * uint64(elemType.Size())
-
+	if isScalarKind(elemType.Kind()) {
+		return total
+	}
 	for i := 0; i < v.Len(); i++ {
 		total += s.sizeOf(v.Index(i))
 	}
@@ -198,14 +200,7 @@ func (s *sizer) sizeOfStruct(v reflect.Value) uint64 {
 	return total
 }
 func (s *sizer) sizeOfArray(v reflect.Value) uint64 {
-	elemKind := v.Type().Elem().Kind()
-	switch elemKind {
-	case reflect.Bool,
-		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32,
-		reflect.Uint64, reflect.Uintptr,
-		reflect.Float32, reflect.Float64,
-		reflect.Complex64, reflect.Complex128:
+	if isScalarKind(v.Type().Elem().Kind()) {
 		return 0
 	}
 	var total uint64
@@ -217,6 +212,22 @@ func (s *sizer) sizeOfArray(v reflect.Value) uint64 {
 		total += s.sizeOf(elem)
 	}
 	return total
+}
+
+// isScalarKind reports kinds that own nothing beyond their own bytes, so the element walk can be skipped entirely -
+// on a multi-GiB []byte arena the walk costs billions of reflect calls and adds zero.
+func isScalarKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32,
+		reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64,
+		reflect.Complex64, reflect.Complex128:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *sizer) exported(v reflect.Value) reflect.Value {

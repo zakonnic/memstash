@@ -7,8 +7,8 @@ import (
 	"github.com/zakonnic/memstash"
 )
 
-// BenchmarkMemstashGetHitSerial is the single-threaded twin of BenchmarkGetHit for memstash only: it isolates the latency of
-// the lock-free memory-hit path without RunParallel scheduling noise.
+// BenchmarkMemstashGetHitSerial is the single-threaded twin of BenchmarkGetHit: the lock-free hit path without
+// RunParallel scheduling noise.
 func BenchmarkMemstashGetHitSerial(b *testing.B) {
 	for _, tc := range []struct {
 		name   string

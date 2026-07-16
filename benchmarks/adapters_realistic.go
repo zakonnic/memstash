@@ -14,10 +14,9 @@ import (
 	"github.com/zakonnic/memstash"
 )
 
-// benchCacheBytes is the realistic-workload counterpart of benchCache: string keys, []byte values, and a byte
-// budget instead of an item count. Caches with native weight/cost support (memstash, ristretto, otter, theine)
-// are given the budget directly with cost = len(key)+len(value); byte-bounded caches (bigcache, freecache) take it
-// natively; the count-only hashicorp LRU approximates it as budget/avgEntry items.
+// benchCacheBytes is the realistic-workload counterpart of benchCache: string keys, []byte values, and a byte budget
+// instead of an item count. Weight-aware and byte-bounded caches take the budget directly with cost =
+// len(key)+len(value); the count-only hashicorp LRU approximates it as budget/avgEntry items.
 type benchCacheBytes interface {
 	Name() string
 	Get(key string) ([]byte, bool)
@@ -53,8 +52,8 @@ func (a *memstashBytesAdapter) Set(key string, value []byte, _ bool) {
 }
 func (a *memstashBytesAdapter) Close() { a.c.Close() }
 
-// GetSize The key/value payload lives in separate heap allocations outside cache. Here the cost function
-// is exactly len(key)+len(value), so Weight() is the payload byte total and the sum is the real footprint.
+// GetSize adds Weight() to the structural total: the payload lives in heap allocations outside the cache, and the
+// cost function here is exactly len(key)+len(value), so Weight() is the payload byte total.
 func (a *memstashBytesAdapter) GetSize() uint64 { return uint64(a.c.TotalWeight() + a.c.Weight()) }
 
 // --- ristretto ---
@@ -85,7 +84,7 @@ func (a *ristrettoBytesAdapter) Set(key string, value []byte, sync bool) {
 }
 func (a *ristrettoBytesAdapter) Close() { a.c.Close() }
 
-// GetSize see ristrettoAdapter.GetSize: no byte-accounting API, plain mutex-guarded Go map, reflection sees it all.
+// GetSize: see ristrettoAdapter.GetSize.
 func (a *ristrettoBytesAdapter) GetSize() uint64 {
 	a.c.Wait()
 	return SizeOf(a.c)
@@ -108,8 +107,7 @@ func (a *otterBytesAdapter) Get(key string) ([]byte, bool)        { return a.c.G
 func (a *otterBytesAdapter) Set(key string, value []byte, _ bool) { a.c.Set(key, value) }
 func (a *otterBytesAdapter) Close()                               { a.c.StopAllGoroutines() }
 
-// GetSize see otterAdapter.GetSize: no native byte total, hash table is an internal xsync.MapOf fork, so it is
-// simulated the same way.
+// GetSize: see otterAdapter.GetSize.
 func (a *otterBytesAdapter) GetSize() uint64 {
 	a.c.StopAllGoroutines()
 	estimatedSize := SizeOf(a.c)
@@ -136,7 +134,7 @@ func (a *theineBytesAdapter) Set(key string, value []byte, _ bool) {
 }
 func (a *theineBytesAdapter) Close() { a.c.Close() }
 
-// GetSize see theineAdapter.GetSize: plain sharded maps, no unsafe.Pointer indirection, reflection walks it all.
+// GetSize: see theineAdapter.GetSize.
 func (a *theineBytesAdapter) GetSize() uint64 {
 	a.c.Wait()
 	return SizeOf(a.c)

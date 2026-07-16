@@ -8,14 +8,13 @@ import (
 	"github.com/zakonnic/memstash"
 )
 
-// Workloads for comparing hit rate. Every generator is deterministic (the seed is fixed), so each cache receives
-// exactly the same stream.
+// Workloads for comparing hit rate. Every generator is seeded fixed, so each cache receives exactly the same stream.
 const (
-	keyspace = 4_000_000 // cardinality of the key space
-	requests = 4_000_000 // length of the request stream
+	keyspace = 4_000_000
+	requests = 4_000_000
 )
 
-// zipfTrace is a classic Zipfian popularity distribution (s close to 1): a small hot core and a long tail.
+// zipfTrace is a Zipfian popularity distribution (s close to 1): a small hot core and a long tail.
 func zipfTrace() []uint64 {
 	rng := rand.New(rand.NewSource(1))
 	zipf := rand.NewZipf(rng, 1.001, 10, keyspace-1)
@@ -26,8 +25,8 @@ func zipfTrace() []uint64 {
 	return trace
 }
 
-// scanTrace is a Zipfian stream into which a sequential scan of 100k unique keys is injected every 200k requests
-// (analytics, migration).
+// scanTrace injects a sequential scan of 100k unique keys into a Zipfian stream every 200k requests (analytics,
+// migration).
 func scanTrace() []uint64 {
 	rng := rand.New(rand.NewSource(2))
 	zipf := rand.NewZipf(rng, 1.001, 10, keyspace-1)
