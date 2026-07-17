@@ -259,21 +259,21 @@ func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
 // memory hit is a lock-free, allocation-free path.
 func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	if value, ok := c.getMemory(key); ok {
-		c.stats.incHits()
+		c.stats.incMemHits()
 		return value, true, nil
 	}
 	if c.l2Cache == nil {
-		c.stats.incMisses()
+		c.stats.incMemMisses()
 		var zero V
 		return zero, false, nil
 	}
 	value, ok, err := c.l2Cache.Get(ctx, key)
 	if err != nil || !ok {
-		c.stats.incMisses()
+		c.stats.incL2Misses()
 		var zero V
 		return zero, false, err
 	}
-	c.stats.incHits()
+	c.stats.incL2Hits()
 	c.setMemory(key, value)
 	return value, true, nil
 }
@@ -282,9 +282,9 @@ func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 	value, ok := c.getMemory(key)
 	if ok {
-		c.stats.incHits()
+		c.stats.incMemHits()
 	} else {
-		c.stats.incMisses()
+		c.stats.incMemMisses()
 	}
 	return value, ok
 }
@@ -613,15 +613,16 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		return zero, ErrNilLoader
 	}
 	if value, ok := c.getMemory(key); ok {
-		c.stats.incHits()
+		c.stats.incMemHits()
 		return value, nil
 	}
 
 	call := &flightCall[V]{done: make(chan struct{})}
 	if winner, loaded := c.flights.LoadOrStore(key, call); loaded {
 		// A flight is already in progress - wait for its result or for the context to be canceled (the owner keeps
-		// loading on behalf of everyone else). The key was not in the cache when this call looked: a miss.
-		c.stats.incMisses()
+		// loading on behalf of everyone else). The key was not in memory when this call looked, and this call itself
+		// never reaches L2 - the owner does: a memory miss.
+		c.stats.incMemMisses()
 		select {
 		case <-winner.done:
 			return winner.val, winner.err
@@ -656,22 +657,22 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error) {
 	if c.l2Cache == nil {
 		found := c.batchGetMemory(keys)
-		c.stats.addHits(int64(len(found)))
-		c.stats.addMisses(int64(len(keys) - len(found)))
+		c.stats.addMemHits(int64(len(found)))
+		c.stats.addMemMisses(int64(len(keys) - len(found)))
 		return found, nil
 	}
 	found, missing := c.batchGetMemoryWithMissing(keys)
-	c.stats.addHits(int64(len(found)))
+	c.stats.addMemHits(int64(len(found)))
 	if len(missing) == 0 {
 		return found, nil
 	}
 	fromL2, err := c.l2Cache.BatchGet(ctx, missing)
 	if err != nil {
-		c.stats.addMisses(int64(len(missing)))
+		c.stats.addL2Misses(int64(len(missing)))
 		return found, err
 	}
-	c.stats.addHits(int64(len(fromL2)))
-	c.stats.addMisses(int64(len(missing) - len(fromL2)))
+	c.stats.addL2Hits(int64(len(fromL2)))
+	c.stats.addL2Misses(int64(len(missing) - len(fromL2)))
 	for _, item := range fromL2 {
 		c.setMemory(item.Key, item.Value)
 		found = append(found, item)
@@ -731,14 +732,15 @@ func (c *Cache[K, V]) BatchGetOrLoad(ctx context.Context, keys []K, load BatchLo
 		return nil, ErrNilLoader
 	}
 	found, missing := c.batchGetMemoryWithMissing(keys)
-	c.stats.addHits(int64(len(found)))
+	c.stats.addMemHits(int64(len(found)))
 	if len(missing) == 0 {
 		return found, nil
 	}
 
 	joined, loadErr := c.singleflight(ctx, load, &found, missing)
-	// Joined keys were not in the cache when this call looked: misses (the owned keys are counted by batchLoad).
-	c.stats.addMisses(int64(len(joined)))
+	// Joined keys missed memory and go no further here - their owner does the L2 lookup (the owned keys are counted
+	// by batchLoad).
+	c.stats.addMemMisses(int64(len(joined)))
 
 	for _, flight := range joined {
 		select {
@@ -837,7 +839,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 			resolved = append(resolved, item)
 			resolvedKeys[item.Key] = struct{}{}
 		}
-		c.stats.addHits(int64(len(resolved)))
+		c.stats.addL2Hits(int64(len(resolved)))
 		if len(resolved) > 0 {
 			toLoad = make([]K, 0, len(keys)-len(resolved))
 			for _, key := range keys {
@@ -850,7 +852,11 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 	if len(toLoad) == 0 {
 		return resolved, nil
 	}
-	c.stats.addMisses(int64(len(toLoad)))
+	if c.l2Cache != nil {
+		c.stats.addL2Misses(int64(len(toLoad)))
+	} else {
+		c.stats.addMemMisses(int64(len(toLoad)))
+	}
 
 	loaded, err := load(ctx, toLoad)
 	if err != nil {
@@ -880,22 +886,24 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) (V, error) {
 	// A parallel flight may have finished while we were registering.
 	if value, ok := c.getMemory(key); ok {
-		c.stats.incHits()
+		c.stats.incMemHits()
 		return value, nil
 	}
 	if c.l2Cache != nil {
 		value, ok, err := c.l2Cache.Get(ctx, key)
 		switch {
 		case err == nil && ok:
-			c.stats.incHits()
+			c.stats.incL2Hits()
 			c.setMemory(key, value)
 			return value, nil
 		case err != nil:
 			// Fall back to the loader; report the L2 error via the callback.
 			c.reportL2Err(key, err)
 		}
+		c.stats.incL2Misses()
+	} else {
+		c.stats.incMemMisses()
 	}
-	c.stats.incMisses()
 	value, err := load(ctx, key)
 	if err != nil {
 		var zero V

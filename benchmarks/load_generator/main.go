@@ -113,6 +113,7 @@ func evenSplit(n int, totalRPS float64) []float64 {
 // buildCache builds a scenario's cache: L1-only when seeds is empty, else two-level over a rueidis client (which is
 // then non-nil and must be closed after the cache).
 func buildCache(seeds []string, opts ...memstash.Option) (*memstash.Cache[string, []byte], rueidislib.Client, error) {
+	opts = append(opts, memstash.WithStats()) // the monitor reports the cache's own counters
 	if len(seeds) == 0 {
 		c, err := memstash.New[string, []byte](opts...)
 		return c, nil, err

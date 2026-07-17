@@ -34,11 +34,18 @@ func TestStatsCounters(t *testing.T) {
 
 	s := c.Stats()
 	assert.Equal(t, int64(5), s.Hits())
+	assert.Equal(t, int64(5), s.MemoryHits(), "no L2: every hit is a memory hit")
+	assert.Zero(t, s.L2Hits())
 	assert.Equal(t, int64(3), s.Misses())
 	assert.Equal(t, int64(3), s.Sets())
 	assert.Equal(t, int64(3), s.Deletes())
 	assert.Equal(t, int64(8), s.Gets())
 	assert.InDelta(t, 5.0/8.0, s.HitRate(), 1e-9)
+	assert.InDelta(t, 5.0/8.0, s.MemoryHitRate(), 1e-9)
+	assert.Equal(t, int64(3), s.MemoryMisses(), "no L2: every miss stops at memory")
+	assert.Zero(t, s.L2Gets())
+	assert.Zero(t, s.L2Misses())
+	assert.Zero(t, s.L2HitRate(), "no L2: the 3 reads memory missed had nowhere to go")
 	assert.InDelta(t, 3.0/8.0, s.MissRate(), 1e-9)
 }
 
@@ -81,6 +88,8 @@ func TestStatsZeroRates(t *testing.T) {
 	s := c.Stats()
 	assert.Zero(t, s.Gets())
 	assert.Zero(t, s.HitRate())
+	assert.Zero(t, s.MemoryHitRate())
+	assert.Zero(t, s.L2HitRate())
 	assert.Zero(t, s.MissRate())
 }
 
@@ -114,8 +123,19 @@ func TestStatsCountsL2HitAsHit(t *testing.T) {
 
 	s := c.Stats()
 	assert.Equal(t, int64(1), s.Hits(), "a value found in L2 is a hit")
+	assert.Equal(t, int64(1), s.L2Gets())
+	assert.Equal(t, int64(1), s.L2Hits())
+	assert.Zero(t, s.MemoryHits(), "memory missed before L2 answered")
+	assert.Zero(t, s.MemoryMisses(), "the memory miss went on to L2, so it is not counted here")
 	assert.Zero(t, s.Misses())
 	assert.Zero(t, s.Sets(), "the L2-to-memory promotion is not a set")
+
+	_, ok, err = c.Get(ctx, "only-l2") // promoted by the previous Get: now a memory hit
+	require.NoError(t, err)
+	require.True(t, ok)
+	s = c.Stats()
+	assert.Equal(t, int64(1), s.MemoryHits())
+	assert.Equal(t, int64(1), s.L2Hits())
 
 	// The batch loader path: one key from L2 (hit), one from the loader (miss + set).
 	require.NoError(t, l2.Set(ctx, "batch-l2", "v", 0))
@@ -130,7 +150,23 @@ func TestStatsCountsL2HitAsHit(t *testing.T) {
 	require.NoError(t, err)
 
 	s = c.Stats()
-	assert.Equal(t, int64(2), s.Hits())
+	assert.Equal(t, int64(3), s.Hits())
+	assert.Equal(t, int64(2), s.L2Hits(), "batch-l2 came from L2")
+	assert.Equal(t, int64(1), s.MemoryHits())
 	assert.Equal(t, int64(1), s.Misses())
+	assert.Equal(t, int64(1), s.L2Misses(), "'loaded' reached L2 and was not there")
+	assert.Zero(t, s.MemoryMisses())
 	assert.Equal(t, int64(1), s.Sets())
+	assert.Equal(t, int64(3), s.L2Gets())
+	assert.InDelta(t, 1.0/4.0, s.MemoryHitRate(), 1e-9)
+	assert.InDelta(t, 2.0/3.0, s.L2HitRate(), 1e-9, "3 reads reached L2, it answered 2")
+
+	// A read that misses memory without reaching L2 must not dilute the L2 rate.
+	c.GetFromMemory("nope")
+	s = c.Stats()
+	assert.Equal(t, int64(1), s.MemoryMisses())
+	assert.Equal(t, int64(2), s.Misses(), "MemoryMisses + L2Misses")
+	assert.Equal(t, int64(3), s.L2Gets(), "GetFromMemory never reaches L2")
+	assert.InDelta(t, 2.0/3.0, s.L2HitRate(), 1e-9)
+	assert.Equal(t, s.Hits()+s.Misses(), s.Gets())
 }

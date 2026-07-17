@@ -15,7 +15,6 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v3"
 	rueidislib "github.com/redis/rueidis"
-
 	"github.com/zakonnic/memstash"
 )
 
@@ -49,7 +48,7 @@ type scenario struct {
 
 	logPath string
 
-	ops, gets, sets, hits, misses, errs atomic.Int64
+	ops, errs atomic.Int64
 }
 
 // keyFor builds the key for index n. The scenario-name prefix keeps scenarios that share a Redis L2 from colliding
@@ -154,14 +153,12 @@ func (s *scenario) doOp(rng *rand.Rand, reads, writes *rand.Zipf) {
 // doGet reads the key and checks any returned value against the source of truth. Cache/Redis errors and
 // verification failures both count as errors and are logged.
 func (s *scenario) doGet(ctx context.Context, key string) {
-	s.gets.Add(1)
 	got, ok, err := s.cache.Get(ctx, key)
 	switch {
 	case err != nil:
 		s.errs.Add(1)
 		s.errLog.opError(s.name, "get", key, 0, err)
 	case ok:
-		s.hits.Add(1)
 		if want, known := s.truth.Load(key); !known {
 			s.errs.Add(1)
 			s.errLog.anomaly(s.name, key, got) // a value for a key we never wrote
@@ -169,14 +166,11 @@ func (s *scenario) doGet(ctx context.Context, key string) {
 			s.errs.Add(1)
 			s.errLog.mismatch(s.name, key, got, want)
 		}
-	default:
-		s.misses.Add(1)
 	}
 }
 
 // doSet writes the key's source-of-truth value, so a later Get always has the right bytes to verify against.
 func (s *scenario) doSet(ctx context.Context, key string) {
-	s.sets.Add(1)
 	value, ok := s.truth.Load(key)
 	if !ok { // pre-filled for every write key; defensive fallback
 		value = s.value(key)
@@ -229,28 +223,35 @@ func (s *scenario) monitor(ctx context.Context) {
 	}
 }
 
-// meter is the previous snapshot the windowed rates (ops/sec, hit rate, CPU) are measured against.
+// meter is the previous snapshot the windowed rates (ops/sec, hit rates, CPU) are measured against.
 type meter struct {
-	t               time.Time
-	ops, gets, hits int64
-	cpu             time.Duration
+	t                                        time.Time
+	ops, gets, memHits, l2Gets, l2Hits, hits int64
+	cpu                                      time.Duration
 }
 
 func (s *scenario) logStats(logger *slog.Logger, start time.Time, prev meter) meter {
 	now := time.Now()
 	wall := now.Sub(prev.t).Seconds()
 
-	ops, gets, sets, hits, misses, errs := s.ops.Load(), s.gets.Load(), s.sets.Load(), s.hits.Load(), s.misses.Load(), s.errs.Load()
+	ops, errs := s.ops.Load(), s.errs.Load()
+	st := s.cache.Stats()
+	gets, sets := st.Gets(), st.Sets()
+	memHits, l2Gets, l2Hits, hits, misses := st.MemoryHits(), st.L2Gets(), st.L2Hits(), st.Hits(), st.Misses()
 
 	opsPerSec := float64(0)
 	if wall > 0 {
 		opsPerSec = float64(ops-prev.ops) / wall
 	}
-	// Hit rate over this interval, not since boot, so it reflects the current steady state rather than being dragged
+	// Rates over this interval, not since boot, so they reflect the current steady state rather than being dragged
 	// down forever by cold-start misses.
-	hitRate := float64(0)
+	hitRate, memHitRate, l2HitRate := float64(0), float64(0), float64(0)
 	if dg := gets - prev.gets; dg > 0 {
 		hitRate = float64(hits-prev.hits) / float64(dg) * 100
+		memHitRate = float64(memHits-prev.memHits) / float64(dg) * 100
+	}
+	if dl2 := l2Gets - prev.l2Gets; dl2 > 0 {
+		l2HitRate = float64(l2Hits-prev.l2Hits) / float64(dl2) * 100
 	}
 
 	var mem runtime.MemStats
@@ -271,9 +272,14 @@ func (s *scenario) logStats(logger *slog.Logger, start time.Time, prev meter) me
 		"gets_total", gets,
 		"sets_total", sets,
 		"hits_total", hits,
+		"mem_hits_total", memHits,
+		"l2_gets_total", l2Gets,
+		"l2_hits_total", l2Hits,
 		"misses_total", misses,
 		"errors_total", errs,
 		"hit_rate_pct", hitRate,
+		"mem_hit_rate_pct", memHitRate,
+		"l2_hit_rate_pct", l2HitRate,
 		"ops_per_sec", opsPerSec,
 		// Process-wide (shared with the other scenarios running in this client), not scenario-isolated.
 		"process_heap_alloc_bytes", mem.HeapAlloc,
@@ -286,5 +292,5 @@ func (s *scenario) logStats(logger *slog.Logger, start time.Time, prev meter) me
 	if cpuErr != nil {
 		cpu = prev.cpu // no fresh reading; keep the old baseline so the next interval measures from it
 	}
-	return meter{t: now, ops: ops, gets: gets, hits: hits, cpu: cpu}
+	return meter{t: now, ops: ops, gets: gets, memHits: memHits, l2Gets: l2Gets, l2Hits: l2Hits, hits: hits, cpu: cpu}
 }

@@ -4,11 +4,13 @@ import "github.com/puzpuzpuz/xsync/v3"
 
 // Stats is a snapshot of the cache's operation counters (see Cache.Stats). Batch operations count once per key.
 type Stats struct {
-	enabled bool
-	hits    xsync.Counter
-	misses  xsync.Counter
-	sets    xsync.Counter
-	deletes xsync.Counter
+	enabled   bool
+	memHits   xsync.Counter
+	memMisses xsync.Counter
+	l2Hits    xsync.Counter
+	l2Misses  xsync.Counter
+	sets      xsync.Counter
+	deletes   xsync.Counter
 }
 
 func newStats(enabled bool) Stats {
@@ -16,35 +18,61 @@ func newStats(enabled bool) Stats {
 		return Stats{}
 	}
 	return Stats{
-		enabled: true,
-		hits:    *xsync.NewCounter(),
-		misses:  *xsync.NewCounter(),
-		sets:    *xsync.NewCounter(),
-		deletes: *xsync.NewCounter(),
+		enabled:   true,
+		memHits:   *xsync.NewCounter(),
+		memMisses: *xsync.NewCounter(),
+		l2Hits:    *xsync.NewCounter(),
+		l2Misses:  *xsync.NewCounter(),
+		sets:      *xsync.NewCounter(),
+		deletes:   *xsync.NewCounter(),
 	}
 }
 
-func (s *Stats) incHits() {
+func (s *Stats) incMemHits() {
 	if s.enabled {
-		s.hits.Add(1)
+		s.memHits.Add(1)
 	}
 }
 
-func (s *Stats) addHits(n int64) {
+func (s *Stats) addMemHits(n int64) {
 	if s.enabled {
-		s.hits.Add(n)
+		s.memHits.Add(n)
 	}
 }
 
-func (s *Stats) incMisses() {
+func (s *Stats) incMemMisses() {
 	if s.enabled {
-		s.misses.Add(1)
+		s.memMisses.Add(1)
 	}
 }
 
-func (s *Stats) addMisses(n int64) {
+func (s *Stats) addMemMisses(n int64) {
 	if s.enabled {
-		s.misses.Add(n)
+		s.memMisses.Add(n)
+	}
+}
+
+func (s *Stats) incL2Hits() {
+	if s.enabled {
+		s.l2Hits.Add(1)
+	}
+}
+
+func (s *Stats) addL2Hits(n int64) {
+	if s.enabled {
+		s.l2Hits.Add(n)
+	}
+}
+
+func (s *Stats) incL2Misses() {
+	if s.enabled {
+		s.l2Misses.Add(1)
+	}
+}
+
+func (s *Stats) addL2Misses(n int64) {
+	if s.enabled {
+		s.l2Misses.Add(n)
 	}
 }
 
@@ -72,11 +100,28 @@ func (s *Stats) addDeletes(n int64) {
 	}
 }
 
-// Hits is the number of read keys found in the cache (in memory or in L2).
-func (s *Stats) Hits() int64 { return s.hits.Value() }
+// MemoryHits is the number of read keys served from memory.
+func (s *Stats) MemoryHits() int64 { return s.memHits.Value() }
 
-// Misses is the number of read keys found in neither level (absent, resolved by a loader, or failed with an error).
-func (s *Stats) Misses() int64 { return s.misses.Value() }
+// MemoryMisses is the number of read keys that missed memory and stopped there, never reaching L2: reads on a cache
+// without an L2, GetFromMemory, and calls that joined another key's in-flight load.
+func (s *Stats) MemoryMisses() int64 { return s.memMisses.Value() }
+
+// L2Hits is the number of read keys that missed memory and were found in L2. Always 0 without an L2.
+func (s *Stats) L2Hits() int64 { return s.l2Hits.Value() }
+
+// L2Misses is the number of read keys L2 was asked for and did not return, an L2 error included. Always 0 without
+// an L2.
+func (s *Stats) L2Misses() int64 { return s.l2Misses.Value() }
+
+// L2Gets is the number of read keys forwarded to L2: L2Hits() + L2Misses().
+func (s *Stats) L2Gets() int64 { return s.L2Hits() + s.L2Misses() }
+
+// Hits is the number of read keys found in the cache: MemoryHits() + L2Hits().
+func (s *Stats) Hits() int64 { return s.MemoryHits() + s.L2Hits() }
+
+// Misses is the number of read keys found in neither level: MemoryMisses() + L2Misses().
+func (s *Stats) Misses() int64 { return s.MemoryMisses() + s.L2Misses() }
 
 // Sets is the number of values written into the cache: Set, BatchSet and stored loader results. L2-to-memory
 // promotions are not counted - the value was already in the cache.
@@ -92,6 +137,22 @@ func (s *Stats) Gets() int64 { return s.Hits() + s.Misses() }
 func (s *Stats) HitRate() float64 {
 	if gets := s.Gets(); gets > 0 {
 		return float64(s.Hits()) / float64(gets)
+	}
+	return 0
+}
+
+// MemoryHitRate returns MemoryHits() / Gets(); 0 when nothing has been read yet.
+func (s *Stats) MemoryHitRate() float64 {
+	if gets := s.Gets(); gets > 0 {
+		return float64(s.MemoryHits()) / float64(gets)
+	}
+	return 0
+}
+
+// L2HitRate returns L2Hits() / L2Gets(); 0 when nothing reached L2 yet.
+func (s *Stats) L2HitRate() float64 {
+	if gets := s.L2Gets(); gets > 0 {
+		return float64(s.L2Hits()) / float64(gets)
 	}
 	return 0
 }
