@@ -1,9 +1,9 @@
 // Package memstash is an ultra-fast two-level cache.
 //
 // The first level is sharded: each shard owns a compact open-addressing slot table (8 bytes per slot, read
-// lock-free), a pool of reusable 16-byte state records and an eviction policy (Clock or S3-FIFO). An item's key and
-// value live in one immutable Entry box swapped atomically on overwrite, so a memory hit takes no locks and
-// allocates nothing. The second level is any adapter that implements L2Cache.
+// lock-free), a pool of reusable state records and an eviction policy (Clock or S3-FIFO). An item's key and value
+// live inline in its record next to the meta word, so a memory hit takes no locks and allocates nothing. The second
+// level is any adapter that implements L2Cache.
 package memstash
 
 import (
@@ -289,13 +289,13 @@ func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 	return value, ok
 }
 
-// getMemory is the lock-free memory-hit path. The slot's short hash is only a prefilter; the record's immutable
-// Entry box gives the exact key match and a value that can never be seen half-written - a racing writer either
-// swaps the whole box or kills the record, both of which the checks below observe.
+// getMemory is the lock-free memory-hit path. The slot's short hash is only a prefilter; the record's Entry snapshot
+// gives the exact key match and a value that can never be seen half-written.
 func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 	sh, keyHash := c.shardAndHash(key)
 	t := sh.table.Load()
 	shortHash := shortHashOf(keyHash)
+probe:
 	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
 		packed := t.slots[pos].Load()
 		slotShortHash := uint32(packed >> 32)
@@ -306,28 +306,33 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 			continue
 		}
 		state := c.registry.At(uint32(packed))
-		metaWord := state.Load()
-		if metaWord&itemstate.Dead != 0 {
-			continue
-		}
-		entry := state.Entry()
-		if entry == nil || entry.Key != key {
-			continue // short hash collision or a recycled record
-		}
-		expireOff := uint32((metaWord & itemstate.ExpireMask) >> itemstate.ExpireShift)
-		nowOff := c.nowOff.Load()
-		if expireOff == 0 || expireOff > nowOff {
-			if c.refreshOnGet {
-				if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && state.TouchAndRefreshExpire(metaWord, newOff) {
-					return entry.Value, true
-				}
+		for {
+			metaWord := state.Load()
+			if metaWord&itemstate.Dead != 0 {
+				continue probe
 			}
-			state.TouchWith(metaWord)
-			return entry.Value, true
+			entry, ok := state.Snapshot(metaWord)
+			if !ok {
+				continue // the copy raced a recycle or an overwrite: retry against the fresh meta word
+			}
+			if entry.Key != key {
+				continue probe // short hash collision or a recycled record
+			}
+			expireOff := uint32((metaWord & itemstate.ExpireMask) >> itemstate.ExpireShift)
+			nowOff := c.nowOff.Load()
+			if expireOff == 0 || expireOff > nowOff {
+				if c.refreshOnGet {
+					if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && state.TouchAndRefreshExpire(metaWord, newOff) {
+						return entry.Value, true
+					}
+				}
+				state.TouchWith(metaWord)
+				return entry.Value, true
+			}
+			// TTL has elapsed - drop the item lazily instead of waiting for the eviction queue to reach it.
+			c.dropExpired(sh, keyHash, key, uint32(packed))
+			break probe
 		}
-		// TTL has elapsed - drop the item lazily instead of waiting for the eviction queue to reach it.
-		c.dropExpired(sh, keyHash, key, uint32(packed))
-		break
 	}
 	var zero V
 	return zero, false
@@ -348,8 +353,8 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 	return nil
 }
 
-// setMemory puts the value into the first level. An overwrite swaps the record's Entry box in place (the record, its
-// queue node and its slot stay put); a new key claims a record and a slot. The only allocation is the box itself.
+// setMemory puts the value into the first level. An overwrite stores into the record in place (the record, its queue
+// node and its slot stay put); a new key claims a record and a slot. Neither path allocates.
 func (c *Cache[K, V]) setMemory(key K, value V) {
 	weight := c.rawCost(key, value)
 	sh, keyHash := c.shardAndHash(key)
@@ -399,9 +404,9 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 		if entry.Key != key {
 			continue
 		}
-		// Overwrite in place: swap the box.
+		// Overwrite in place; the old value is read for the weight delta before the store lands.
 		weightDelta = weight - c.rawCost(key, entry.Value)
-		state.SetEntry(&itemstate.Entry[K, V]{Key: key, Value: value})
+		state.SetValue(value)
 		if c.ttlSec != 0 {
 			c.refreshExpire(state)
 		}
@@ -929,9 +934,8 @@ func (c *Cache[K, V]) Iterator() iter.Seq2[K, V] {
 				if metaWord&itemstate.Dead != 0 || itemstate.Expired(metaWord, nowOff) {
 					continue
 				}
-				entry := state.Entry()
-				// The alive-and-same-generation re-check rejects a record recycled between the meta and box loads.
-				if entry == nil || state.Load()&itemstate.AliveGenMask != metaWord&itemstate.AliveGenMask {
+				entry, ok := state.Snapshot(metaWord)
+				if !ok {
 					continue
 				}
 				if !yield(entry.Key, entry.Value) {
@@ -966,14 +970,13 @@ func (c *Cache[K, V]) Weight() int64 {
 // xsyncBucketBytes is the fixed size of one xsync.MapOf bucket (the flights map).
 const xsyncBucketBytes = 64
 
-// TotalWeight estimates the total memory footprint of the cache's first-level structures: slot tables, pool chunks,
-// live Entry boxes, eviction bookkeeping and the fixed parts (the Cache struct, shards, flights buckets, write-back
-// buffer). Boxes of dead items not yet swept are not counted; the estimate catches up as reclamation runs.
+// TotalWeight estimates the total memory footprint of the cache's first-level structures: slot tables, pool chunks
+// (records carry their Entry inline), eviction bookkeeping and the fixed parts (the Cache struct, shards, flights
+// buckets, write-back buffer).
 //
-// An Entry box is counted at unsafe.Sizeof, so heap data referenced by K or V (anything behind a pointer) is not
-// included. When CostFunc measures those bytes, TotalWeight() + Weight() gives the full footprint.
+// An Entry is counted at its inline size, so heap data referenced by K or V is not included. When CostFunc measures
+// those bytes, TotalWeight() + Weight() gives the full footprint.
 func (c *Cache[K, V]) TotalWeight() int64 {
-	entryBytes := int64(unsafe.Sizeof(itemstate.Entry[K, V]{}))
 	total := int64(unsafe.Sizeof(*c))
 	total += int64(len(c.shards)) * int64(unsafe.Sizeof(shard[K, V]{}))
 	total += int64(c.flights.Stats().TotalBuckets) * xsyncBucketBytes
@@ -982,7 +985,7 @@ func (c *Cache[K, V]) TotalWeight() int64 {
 	for i := range c.shards {
 		sh := &c.shards[i]
 		sh.mu.Lock()
-		total += sh.table.Load().bytes() + int64(sh.live)*entryBytes + sh.pool.Bytes() + sh.policy.Bytes()
+		total += sh.table.Load().bytes() + sh.pool.Bytes() + sh.policy.Bytes()
 		sh.mu.Unlock()
 	}
 

@@ -7,9 +7,9 @@ import "github.com/zakonnic/memstash/internal/itemstate"
 // is recomputed from the live value.
 type QNode = itemstate.QNode
 
-// ItemState is a cached item's 16-byte state record: an atomic pointer to its immutable key/value box plus eviction
-// metadata (a dead bit, a 2-bit reference counter set by lock-free reads, the expiration offset and an occupancy
-// generation). See the Load/Entry/Kill/TouchWith/RevokeChance/ResetChances methods for what a policy may do with it.
+// ItemState is a cached item's state record: its key/value Entry alongside eviction metadata (a dead bit, a 2-bit
+// reference counter set by lock-free reads, the expiration offset and an occupancy generation). See
+// Load/Entry/Kill/TouchWith/RevokeChance/ResetChances for what a policy may do with it.
 type ItemState[K comparable, V any] = itemstate.State[K, V]
 
 // ItemStates resolves queue-node indices into item state records; the cache hands one to a custom eviction policy's

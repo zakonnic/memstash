@@ -1,16 +1,15 @@
-// Package itemstate holds the per-item bookkeeping primitives of the cache's first level: a 16-byte State record per
-// item (an immutable key/value box plus eviction metadata), a Pool that recycles those records slab-style, and the
-// chunked FIFO queue of nodes that reference them.
+// Package itemstate holds the per-item bookkeeping primitives of the cache's first level: a state record per item
+// (its key/value Entry next to an atomic meta word), a Pool that recycles those records slab-style, and the chunked
+// FIFO queue of nodes that reference them.
 package itemstate
-
-import "sync/atomic"
 
 // Layout of a state record's 64-bit meta word:
 //
 //	[dead:1][secondChance1:1][secondChance2:1][expireOff:29][gen:32]
 //
 // dead marks a tombstone the eviction queue skips; the two chance bits form a unary reference counter; expireOff is
-// the expiration time in seconds since the cache epoch (0 = no TTL); gen counts the record's occupancies.
+// the expiration time in seconds since the cache epoch (0 = no TTL); gen counts the record's occupancies and is
+// what lock-free readers validate their Entry snapshot against (see State.Snapshot).
 //
 // The unary counter is deliberate: increment is an idempotent OR and decrement an AND, and a saturated counter
 // performs no writes at all, so hot keys never bounce the cache line between cores.
@@ -34,27 +33,12 @@ const (
 	AliveGenMask = Dead | GenMask
 )
 
-// Entry is the immutable key/value box of one cached item: allocated once per Set, never mutated after publication.
-// That is what makes lock-free reads safe for arbitrary key and value types - a reader sees a whole box (old or
-// new), never a torn mix. Overwriting a key swaps the record's box pointer; everything else stays put.
+// Entry is the key/value pair of one cached item. Lock-free readers never touch it directly - they take a whole
+// copy through State.Snapshot and validate it against the record's generation.
 type Entry[K comparable, V any] struct {
 	Key   K
 	Value V
 }
-
-// State is a cached item's record: an atomic pointer to its Entry box plus eviction metadata. Fixed 16 bytes for any
-// key/value types; lives by value inside a pool chunk and is reused without allocations.
-type State[K comparable, V any] struct {
-	entry atomic.Pointer[Entry[K, V]]
-	meta  atomic.Uint64
-}
-
-// Entry returns the record's current box: nil only while the record rests on the pool freelist.
-func (s *State[K, V]) Entry() *Entry[K, V] { return s.entry.Load() }
-
-// SetEntry publishes a new box (an in-place value overwrite). Called under the shard mutex; concurrent readers see
-// either the old or the new box.
-func (s *State[K, V]) SetEntry(e *Entry[K, V]) { s.entry.Store(e) }
 
 // Gen returns the record's current occupancy generation.
 func (s *State[K, V]) Gen() uint32 { return uint32(s.meta.Load()) }

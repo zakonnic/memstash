@@ -2,8 +2,8 @@ package itemstate
 
 import "unsafe"
 
-// poolChunk is a block of poolChunkSize state records allocated as one object: with 16-byte records a chunk is
-// exactly 2 KiB - a malloc size class with zero slack.
+// poolChunk is a block of poolChunkSize state records allocated as one object. Chunk size follows the record's
+// inline Entry: 3 KiB for word-sized pairs, 6 KiB for string keys with slice values - exact malloc size classes.
 type poolChunk[K comparable, V any] struct {
 	states [poolChunkSize]State[K, V]
 }
@@ -28,8 +28,8 @@ func NewPool[K comparable, V any](reg *Registry[K, V]) Pool[K, V] { return Pool[
 func (p *Pool[K, V]) At(idx uint32) *State[K, V] { return p.reg.At(idx) }
 
 // Claim hands out a record for a key/value pair: from the freelist, or the next untouched record (registering a new
-// chunk when needed). The Entry box is published strictly before the meta word goes live, so a lock-free reader that
-// sees the record alive always finds the box in place. Returns the record, its new generation and its pool index.
+// chunk when needed). The Entry is written strictly before the meta word goes live, so a reader that sees the record
+// alive always finds the pair in place. Returns the record, its new generation and its pool index.
 func (p *Pool[K, V]) Claim(key K, value V, expireOff uint32) (*State[K, V], uint32, uint32) {
 	var record *State[K, V]
 	var idx uint32
@@ -50,15 +50,17 @@ func (p *Pool[K, V]) Claim(key K, value V, expireOff uint32) (*State[K, V], uint
 		idx = p.tailBase + uint32(p.tailUsed)
 		p.tailUsed++
 	}
-	record.entry.Store(&Entry[K, V]{Key: key, Value: value})
-	gen := uint32(record.meta.Load()) + 1
+	record.setEntry(Entry[K, V]{Key: key, Value: value})
+	// Occupancies advance by two: odd generations are SetValue's write-in-progress marker.
+	gen := (uint32(record.meta.Load()) + 2) &^ 1
 	record.meta.Store(uint64(expireOff)<<ExpireShift | uint64(gen))
 	return record, gen, idx
 }
 
-// Release returns a record to the freelist, dropping its Entry box so the key and value do not outlive the item.
+// Release returns a record to the freelist, clearing its Entry so the key and value do not outlive the item. The
+// record must already be a tombstone (Kill) - the dead bit is what shields stale readers from the cleared pair.
 func (p *Pool[K, V]) Release(idx uint32) {
-	p.reg.At(idx).entry.Store(nil)
+	p.reg.At(idx).clearEntry()
 	p.free = append(p.free, idx)
 }
 

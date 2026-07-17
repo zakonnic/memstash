@@ -68,3 +68,13 @@ check-new-libs: ## Checks for new versions of libraries
 		echo "All dependencies are up to date"; \
 	fi
 
+
+.PHONY: tag
+tag: ## Tag the root module and every l2 adapter module with the given version (make tag V=1.2.3), then 'make push'
+	@test -n "$(V)" || { echo "V is required, e.g. make tag V=1.2.3"; exit 1; }
+	@for tag in v$(V) $$(find l2 -name go.mod | xargs -n1 dirname | sort | sed 's|$$|/v$(V)|'); do \
+		git tag "$$tag" || exit 1; \
+		echo "tagged $$tag"; \
+	done
+push:
+	git push origin main --tags

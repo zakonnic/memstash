@@ -39,7 +39,7 @@ func TestPoolBytes(t *testing.T) {
 }
 
 // TestPoolClaimRelease verifies the index round trip: At resolves what Claim handed out, Release recycles the index,
-// drops the Entry box and bumps the generation on reuse.
+// clears the Entry and bumps the generation on reuse.
 func TestPoolClaimRelease(t *testing.T) {
 	var p Pool[string, string] // the zero value must self-host a private registry
 	record, gen, idx := p.Claim("a", "va", 0)
@@ -47,13 +47,16 @@ func TestPoolClaimRelease(t *testing.T) {
 	assert.Equal(t, "a", record.Entry().Key)
 	assert.Equal(t, "va", record.Entry().Value)
 
+	record.Kill() // only tombstones go back to the freelist
 	p.Release(idx)
-	assert.Nil(t, p.At(idx).Entry(), "Release must drop the Entry box")
+	if entry := p.At(idx).Entry(); entry != nil { // boxed drops the box, inline zeroes the pair
+		assert.Zero(t, *entry, "Release must clear the Entry so the pair does not outlive the item")
+	}
 
 	record2, gen2, idx2 := p.Claim("b", "vb", 0)
 	assert.Equal(t, idx, idx2, "the freelist must recycle the released index")
 	assert.Same(t, record, record2)
-	assert.Equal(t, gen+1, gen2, "reuse must bump the generation")
+	assert.Equal(t, gen+2, gen2, "reuse must advance the generation (by two: odd marks a write)")
 	assert.Equal(t, "b", record2.Entry().Key)
 }
 
@@ -77,10 +80,10 @@ func TestPoolSharedRegistry(t *testing.T) {
 	}
 }
 
-// TestStateSize pins the record's fixed footprint: 16 bytes regardless of the key/value types, so a pool chunk is
-// always exactly 2 KiB.
+// TestStateSize checks the layout invariants both builds share: records stay word-aligned inside a chunk and a chunk
+// is exactly poolChunkSize records. The inline build pins its exact sizes in state_inline_test.go.
 func TestStateSize(t *testing.T) {
-	assert.EqualValues(t, 16, unsafe.Sizeof(State[string, [3]int64]{}))
-	assert.EqualValues(t, 16, unsafe.Sizeof(State[int, int]{}))
-	assert.EqualValues(t, 2048, unsafe.Sizeof(poolChunk[string, string]{}))
+	assert.Zero(t, unsafe.Sizeof(State[int, int]{})%8, "records must stay 8-aligned inside a chunk")
+	assert.Zero(t, unsafe.Sizeof(State[string, [3]int64]{})%8)
+	assert.EqualValues(t, poolChunkSize*unsafe.Sizeof(State[string, string]{}), unsafe.Sizeof(poolChunk[string, string]{}))
 }
