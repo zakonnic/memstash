@@ -68,13 +68,34 @@ check-new-libs: ## Checks for new versions of libraries
 		echo "All dependencies are up to date"; \
 	fi
 
+L2_MODULES = \
+	l2/aerospike_adapter \
+	l2/badger_adapter \
+	l2/dynamo_adapter \
+	l2/gomemcache_adapter \
+	l2/goredis_adapter \
+	l2/mc_adapter \
+	l2/mongo_adapter \
+	l2/pgx_adapter \
+	l2/rainycape_adapter \
+	l2/redigo_adapter \
+	l2/redispipe_adapter \
+	l2/rueidis_adapter \
+	l2/sql_adapter \
+	l2/tarantool_adapter \
+	l2/valyala_adapter
 
 .PHONY: tag
 tag: ## Tag the root module and every l2 adapter module with the given version (make tag V=1.2.3), then 'make push'
 	@test -n "$(V)" || { echo "V is required, e.g. make tag V=1.2.3"; exit 1; }
-	@for tag in v$(V) $$(find l2 -name go.mod | xargs -n1 dirname | sort | sed 's|$$|/v$(V)|'); do \
-		git tag "$$tag" || exit 1; \
-		echo "tagged $$tag"; \
+	@for tag in v$(V) $(addsuffix /v$(V),$(L2_MODULES)); do \
+		if git rev-parse -q --verify "refs/tags/$$tag" > /dev/null; then \
+			echo "exists  $$tag"; \
+		else \
+			git tag "$$tag" || exit 1; \
+			echo "tagged  $$tag"; \
+		fi; \
 	done
+
 push:
 	git push origin main --tags
