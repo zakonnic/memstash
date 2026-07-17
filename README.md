@@ -12,13 +12,13 @@ v, ok, err := c.Get(ctx, "hello") // faster than getting from sync.Map
 
 ## Why memstash?
 
-- **Very fast.** Outperforms Ristretto by ~6× and Otter by ~2× in our [benchmarks](#benchmarks).
-- **Top-tier hit ratio.** The S3-FIFO policy keeps pace with the best W-TinyLFU caches (Otter, Theine) and leaves Ristretto far behind, holding up especially well under scans and one-hit wonders.
-- **Low memory overhead.** Memstash and bigcache trade the top spot depending on capacity, both comfortably ahead of the rest.
-- **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
-- **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No `interface{}`, no casts.
+- **Very fast.** Outperforms [Ristretto](https://github.com/dgraph-io/ristretto) by ~6× and [Otter](https://github.com/maypok86/otter) by ~2× in our [benchmarks](#benchmarks).
+- **Top-tier hit ratio.** The S3-FIFO policy keeps pace with the best W-TinyLFU caches (Otter, [Theine](https://github.com/Yiling-J/theine-go)) and leaves Ristretto far behind, holding up especially well under scans and one-hit wonders.
+- **Lowest memory overhead.** 1.8× smaller footprint than Otter or [Bigcache](https://github.com/allegro/bigcache), see [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
 - **Easy on the GC.** Inserts reuse memory blocks from a pool, so the steady state allocates nothing beyond the internal map entry.
-- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB, DynamoDB, Badger, Tarantool and Aerospike - each in its own module so the core stays clean.
+- **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No `interface{}`, no casts.
+- **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
+- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB, DynamoDB, Badger, Tarantool and Aerospike - each in its own module so the core stays clean. With **write-back** and **auto-batching**.
 - **Singleflight built in.** `GetOrLoad` collapses a stampede of concurrent misses on one key into a single load.
 
 ## Table of Contents
@@ -31,7 +31,6 @@ v, ok, err := c.Get(ctx, "hello") // faster than getting from sync.Map
 - [Advanced Configuration](#advanced-configuration)
 - [L2 Adapters](#l2-adapters)
 - [Benchmarks](#benchmarks)
-- [License](#license)
 
 ## Installation
 
@@ -101,11 +100,11 @@ lc, _ := memstash.NewLoadable(
 user, err := lc.GetOrLoad(ctx, "user:42")
 ```
 
-> Supports batch-loading with `NewBatchLoadable`, `BatchLoaderFunc`, `BatchGet`, etc.
+> Supports batch-loading with `NewBatchLoadable`, `BatchGetOrLoad`, etc.
 
 ### Two-level cache with Redis
 
-Add a shared L2 in one call. Memory serves the hot set; anything evicted from L1 (or missing after a restart) is fetched from Redis and promoted back into memory. Writes are **write-back by default**: `Set` returns immediately and a background worker flushes to Redis. The example uses rueidis, but every client in the [adapters table](#l2-adapters) works the same way.
+Add a shared L2 in one call. Memory serves the hot set; anything evicted from L1 (or missing after a restart) is fetched from Redis and promoted back into memory. Writes are **write-back by default**: `Set` returns immediately and a background worker flushes to Redis. Single **Sets are grouped into batches** asynchronously. The example uses rueidis, but every client in the [adapters table](#l2-adapters) works the same way.
 
 ```go
 import (
@@ -131,7 +130,7 @@ u, ok, err := c.Get(ctx, "user:42") // L1 hit → returns instantly; L1 miss →
 
 ## Advanced Configuration
 
-Memstash is configured with functional options passed to `New` (or to any adapter's `NewCache*`). Some common setups:
+Memstash is configured with functional options passed to `New` (or to any adapter's `New*Cache`). Some common setups:
 
 **Byte-budgeted cache** - bound by approximate resident bytes instead of item count; the per-item size (key, value, and the cache's own overhead) is estimated automatically:
 
@@ -142,6 +141,8 @@ c, _ := memstash.New[string, []byte](
 ```
 
 The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For anything more complex, construction fails with `ErrBudgetNeedsCostFunc` - provide the byte size yourself:
+
+It's used to calculate the cache capacity — the cache doesn't allocate a fixed block of memory.
 
 ```go
 c, _ := memstash.New[string, User](
@@ -166,7 +167,7 @@ _ = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b",
 _ = c.BatchDelete(ctx, []string{"a", "b"})                      // follows the write policy, like BatchSet
 ```
 
-**Observability and iteration** - `Stats()` returns the operation counters (collected with striped counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via `WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it - without it every getter reads 0. `Iterator()` walks the live first-level entries lock-free, independent of stats:
+**Observability and iteration** - `Stats()` returns operation counters (collected with striped counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via `WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it - otherwise counters stay at zero. `Iterator()` walks the live first-level entries lock-free, independent of stats:
 
 ```go
 c, _ := memstash.New[string, User](
@@ -373,3 +374,23 @@ The Size column is the cache's estimated memory footprint at the end of the one-
 | hashicorp-lru | 41.78% | 27.77% | 32.11% | 1.0 MB |
 | freecache | 40.16% | 26.79% | 30.58% | 6.6 MB |
 | ristretto | 18.24% | 12.56% | 16.79% | 807 kB |
+
+### Heap footprint, lower is better
+
+Each cache is filled with 100M `uint64 -> uint64` entries - 16 bytes of raw payload apiece - and the heap growth it
+causes is read back from the Go runtime, so these are real resident bytes rather than the cache's own estimate. The
+[measurements](benchmarks/results/heap-size-100kk.txt) run one contender at a time: a single pass costs several GiB. For string keys adapters key/value
+was converted from `uint64` to `[8]byte`.
+
+| Cache | Heap | B/entry |
+|---|--:|--:|
+| xsync.MapOf\* | 3.7 GiB | 39.24 |
+| **memstash-clock** | **4.1 GiB** | **43.89** |
+| ristretto | 4.3 GiB | 46.40 |
+| freecache | 5.7 GiB | 61.53 |
+| otter-wtinylfu | 7.6 GiB | 81.98 |
+| bigcache | 7.7 GiB | 84.84 |
+| hashicorp-lru | 9.7 GiB | 104.2 |
+| theine-wtinylfu | 11 GiB | 115.0 |
+
+\* `xsync.MapOf` performs no eviction - a lower-bound baseline, not a comparable cache.
