@@ -10,26 +10,27 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/zakonnic/memstash"
+	"github.com/zakonnic/memstash/tests/workload"
 )
 
 // Speed benchmarks of in-memory operations. The key sequence (Zipf over a hot set) is precomputed so the RNG does not
 // distort the measurement.
 const (
 	speedCapacity = 1 << 17
-	speedHotKeys  = 1 << 16 // fits entirely inside speedCapacity, so warmUp evicts nothing
+	seqHitMax     = speedCapacity * 3 / 4 // lower than capacity to make 100% hits
 	seqLen        = 1 << 20
 	seqMask       = seqLen - 1
 )
 
-var keySeq = func() []uint64 {
-	rng := rand.New(rand.NewSource(42))
-	zipf := rand.NewZipf(rng, 1.1, 10, speedHotKeys-1)
-	seq := make([]uint64, seqLen)
+func zipfSeq(len, max uint64) []uint64 {
+	rng := workload.Random()
+	zipf := rand.NewZipf(rng, 1.1, 10, max)
+	seq := make([]uint64, len)
 	for i := range seq {
 		seq[i] = zipf.Uint64()
 	}
 	return seq
-}()
+}
 
 func speedContenders() []benchCache {
 	return []benchCache{
@@ -47,9 +48,9 @@ func speedContenders() []benchCache {
 	}
 }
 
-func warmUp(c benchCache) {
-	for key := uint64(0); key < speedHotKeys; key++ {
-		c.Set(key, key, true)
+func warmUp(c benchCache, keyCount uint64) {
+	for key := uint64(0); key < keyCount; key++ {
+		c.Set(key, key)
 	}
 	c.Settle() // Must finish warm-up writes.
 }
@@ -58,15 +59,42 @@ var sinkU64 atomic.Uint64
 
 // BenchmarkGetHit measures reads at 100% hits (the main hot path).
 func BenchmarkGetHit(b *testing.B) {
+	// seqLen keys from 0 to seqHitMax-1, with speedCapacity cache size
+	keys := zipfSeq(seqLen, seqHitMax-1) // seqHitMax is less than capacity
 	for _, c := range speedContenders() {
-		warmUp(c)
+		warmUp(c, seqHitMax)
 		b.Run(c.Name(), func(b *testing.B) {
 			b.ReportAllocs()
 			b.RunParallel(func(pb *testing.PB) {
 				i := rand.Int()
 				local := uint64(0)
 				for pb.Next() {
-					v, _ := c.Get(keySeq[i&seqMask])
+					v, _ := c.Get(keys[i&seqMask])
+					local += v
+					i++
+				}
+				sinkU64.Store(local)
+			})
+		})
+		c.Close()
+	}
+}
+
+func BenchmarkGet(b *testing.B) {
+	keys := zipfSeq(seqLen, seqHitMax-1)
+	for _, c := range speedContenders() {
+		warmUp(c, seqHitMax)
+		b.Run(c.Name(), func(b *testing.B) {
+			b.ReportAllocs()
+			b.RunParallel(func(pb *testing.PB) {
+				i := rand.Int()
+				local := uint64(0)
+				for pb.Next() {
+					key := keys[i&seqMask]
+					if i%10 < 5 {
+						key += seqHitMax // hitrate 50%
+					}
+					v, _ := c.Get(key)
 					local += v
 					i++
 				}
@@ -88,7 +116,7 @@ func BenchmarkSet(b *testing.B) {
 				local := uint64(0)
 				for pb.Next() {
 					key := (i * 0x9E3779B97F4A7C15) % setSpace
-					c.Set(key, key, false)
+					c.Set(key, key)
 					i++
 				}
 				sinkU64.Add(local)
@@ -188,16 +216,17 @@ func BenchmarkShortCheckup(b *testing.B) {
 
 // BenchmarkMixed90_10 is the realistic mix: 90% reads, 10% writes.
 func BenchmarkMixed90_10(b *testing.B) {
+	keys := zipfSeq(seqLen, seqHitMax-1)
 	for _, c := range speedContenders() {
-		warmUp(c)
+		warmUp(c, seqHitMax)
 		b.Run(c.Name(), func(b *testing.B) {
 			b.ReportAllocs()
 			b.RunParallel(func(pb *testing.PB) {
 				i := rand.Int()
 				for pb.Next() {
-					key := keySeq[i&seqMask]
+					key := keys[i&seqMask]
 					if i%10 == 0 {
-						c.Set(key, key, false)
+						c.Set(key, key)
 					} else {
 						c.Get(key)
 					}

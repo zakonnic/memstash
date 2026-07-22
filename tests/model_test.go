@@ -3,11 +3,11 @@ package tests
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zakonnic/memstash"
+	"github.com/zakonnic/memstash/tests/workload"
 )
 
 // TestModelAgainstMap is a differential test of the first level's slot tables: a random stream of Set / overwrite /
@@ -30,7 +30,7 @@ func TestModelAgainstMap(t *testing.T) {
 				defer c.Close()
 
 				model := make(map[string]int)
-				rng := rand.New(rand.NewSource(7))
+				rng := workload.Random()
 				const keyspace = 2000
 
 				verifyKey := func(key string) {

@@ -59,7 +59,7 @@ func (s SessionScenario) withDefaults() SessionScenario {
 		s.ZipfS = 1.001
 	}
 	if s.Seed == 0 {
-		s.Seed = 11
+		s.Seed = Seed()
 	}
 	return s
 }

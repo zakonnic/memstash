@@ -16,6 +16,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v3"
 	rueidislib "github.com/redis/rueidis"
 	"github.com/zakonnic/memstash"
+	"github.com/zakonnic/memstash/tests/workload"
 )
 
 // scenario drives one cache with its own goroutines, key-space shape, and log file; all scenarios run in parallel.
@@ -104,7 +105,7 @@ func (s *scenario) worker(ctx context.Context, wg *sync.WaitGroup, idx int) {
 	if rps <= 0 {
 		return
 	}
-	rng := rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(idx)<<32 ^ int64(len(s.name))))
+	rng := workload.Random()
 	reads := newZipf(rng, s.keySpace, s.zipfS)
 	writes := newZipf(rng, s.writeKeySpace, s.zipfS)
 	opsPerTick := rps * workerTick.Seconds()

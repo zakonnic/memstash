@@ -8,16 +8,22 @@ import (
 	"github.com/zakonnic/memstash"
 )
 
-// Workloads for comparing hit rate. Every generator is seeded fixed, so each cache receives exactly the same stream.
+// Workloads for comparing hit rate. Seeded fixed, so the table is reproducible and every cache sees the same stream.
 const (
-	keyspace = 4_000_000
-	requests = 4_000_000
+	keyspace  = 4_000_000
+	requests  = 4_000_000
+	traceSeed = 0x5eed
+
+	zipfS = 1.005
+	zipfV = keyspace / 1000
 )
 
-// zipfTrace is a Zipfian popularity distribution (s close to 1): a small hot core and a long tail.
+func zipfStream(rng *rand.Rand) *rand.Zipf { return rand.NewZipf(rng, zipfS, zipfV, keyspace-1) }
+
+// zipfTrace is a stationary Zipfian popularity distribution: a broad hot head and a long cold tail.
 func zipfTrace() []uint64 {
-	rng := rand.New(rand.NewSource(1))
-	zipf := rand.NewZipf(rng, 1.001, 10, keyspace-1)
+	rng := rand.New(rand.NewSource(traceSeed))
+	zipf := zipfStream(rng)
 	trace := make([]uint64, requests)
 	for i := range trace {
 		trace[i] = zipf.Uint64()
@@ -28,8 +34,8 @@ func zipfTrace() []uint64 {
 // scanTrace injects a sequential scan of 100k unique keys into a Zipfian stream every 200k requests (analytics,
 // migration).
 func scanTrace() []uint64 {
-	rng := rand.New(rand.NewSource(2))
-	zipf := rand.NewZipf(rng, 1.001, 10, keyspace-1)
+	rng := rand.New(rand.NewSource(traceSeed))
+	zipf := zipfStream(rng)
 	trace := make([]uint64, 0, requests)
 	scanKey := uint64(10_000_000)
 	for len(trace) < requests {
@@ -46,8 +52,8 @@ func scanTrace() []uint64 {
 
 // oneHitTrace is 70% Zipf over a hot core plus 30% practically unique keys (one-hit wonders): a CDN/web-cache profile.
 func oneHitTrace() []uint64 {
-	rng := rand.New(rand.NewSource(3))
-	zipf := rand.NewZipf(rng, 1.05, 10, keyspace-1)
+	rng := rand.New(rand.NewSource(traceSeed))
+	zipf := zipfStream(rng)
 	trace := make([]uint64, requests)
 	unique := uint64(20_000_000)
 	for i := range trace {
@@ -69,9 +75,18 @@ func runTrace(c benchCache, trace []uint64) float64 {
 			hits++
 			continue
 		}
-		c.Set(key, key, true)
+		c.Set(key, key)
 	}
+	c.Settle()
 	return 100 * float64(hits) / float64(len(trace))
+}
+
+func distinctKeys(trace []uint64) int {
+	seen := make(map[uint64]struct{}, len(trace)/4)
+	for _, k := range trace {
+		seen[k] = struct{}{}
+	}
+	return len(seen)
 }
 
 func runHitRateSuite(t *testing.T) {
@@ -86,10 +101,12 @@ func runHitRateSuite(t *testing.T) {
 		{"zipf+scan", scanTrace()},
 		{"one-hit-30%", oneHitTrace()},
 	}
-	capacities := []int64{10_000, 100_000, 500_000} // ~1%, ~11% and ~54% of the ~930k unique keys a zipf trace touches
+	working := distinctKeys(traces[0].trace)
+	t.Logf("zipf trace: %d requests over %d distinct keys", requests, working)
+	capacities := []int64{10_000, 100_000, 500_000} // ~1%, ~9% and ~44% of the zipf working set
 
 	for _, capacity := range capacities {
-		t.Logf("---- capacity %d items ----", capacity)
+		t.Logf("---- capacity %d items (~%.0f%% of working set) ----", capacity, 100*float64(capacity)/float64(working))
 		t.Logf("%-18s %12s %12s %12s %12s", "cache", traces[0].name, traces[1].name, traces[2].name, "size estimate")
 		builders := []func() benchCache{
 			func() benchCache { return newMemstash(capacity, memstash.PolicyS3FIFO, "memstash-s3fifo") },

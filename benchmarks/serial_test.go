@@ -10,6 +10,7 @@ import (
 // BenchmarkMemstashGetHitSerial is the single-threaded twin of BenchmarkGetHit: the lock-free hit path without
 // RunParallel scheduling noise.
 func BenchmarkMemstashGetHitSerial(b *testing.B) {
+	keys := zipfSeq(seqLen, seqHitMax-1)
 	for _, tc := range []struct {
 		name   string
 		policy memstash.Policy
@@ -27,13 +28,13 @@ func BenchmarkMemstashGetHitSerial(b *testing.B) {
 			b.Fatal(err)
 		}
 		ctx := context.Background()
-		for key := uint64(0); key < speedHotKeys; key++ {
+		for key := uint64(0); key < seqHitMax; key++ {
 			_ = c.Set(ctx, key, key)
 		}
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				c.GetFromMemory(keySeq[i&seqMask])
+				c.GetFromMemory(keys[i&seqMask])
 			}
 		})
 		c.Close()

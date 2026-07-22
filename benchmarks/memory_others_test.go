@@ -76,43 +76,26 @@ func BenchmarkMemoryFootprintXsyncMap(b *testing.B) {
 	})
 }
 
-// BenchmarkMemoryFootprintRistretto measures ristretto. It is cost-bounded rather than item-bounded, but every Set
-// here costs 1, so MaxCost-RemainingCost is the reported live count.
-//
-// Two caveats make ristretto's numbers non-comparable at this workload, both flagged rather than hidden. First, its
-// Set drops on a full buffer, so the fill flushes periodically (asyncFill) to actually populate it. Second, and not
-// fixable here: ristretto retains only recently inserted keys - probing a fill shows the last window ~68% present,
-// the middle and start 0% - so the Get hit% stays low (hot samples the middle, full samples uniformly) and its cost
-// counter over-reports the retrievable set. Read the Get numbers as a miss-dominated path, per the hit% column.
+// BenchmarkMemoryFootprintRistretto measures ristretto.
 func BenchmarkMemoryFootprintRistretto(b *testing.B) {
 	runFootprint(b, footprintCase{
-		build: func() benchCache { return asyncFill{benchCache: newRistretto(bigBenchCapacity), n: new(int)} },
+		build: func() benchCache { return benchOtherCaches{benchCache: newRistretto(bigBenchCapacity), n: new(int)} },
 		live: func(c benchCache) int {
 			rc := c.Expose().(*ristretto.Cache[uint64, uint64])
 			rc.Wait()
 			return int(rc.MaxCost() - rc.RemainingCost())
 		},
-		// No sizeEstimate: GetSize()'s SizeOf would walk every entry of the store map - minutes of reflection plus a
-		// visited map larger than the cache.
 	})
 }
 
-// asyncFlushEvery bounds how many un-waited Sets an asyncFill lets pile up before forcing a sync flush: comfortably
-// under ristretto's 32K set buffer, so the fill drains it before it overflows and starts dropping entries, while the
-// Wait cost still amortizes over thousands of Sets instead of one per Set (which at 100M runs for many minutes).
-const asyncFlushEvery = 4096
-
-// asyncFill fills a contender whose Set is asynchronous and drops on a full buffer (ristretto): it ignores the
-// caller's sync flag and instead forces a sync flush every asyncFlushEvery Sets, draining the buffer before it can
-// overflow. The final partial batch is drained by the live count before it is read.
-type asyncFill struct {
+type benchOtherCaches struct {
 	benchCache
 	n *int
 }
 
-func (c asyncFill) Set(key, value uint64, _ bool) {
+func (c benchOtherCaches) Set(key, value uint64) {
 	*c.n++
-	c.benchCache.Set(key, value, *c.n%asyncFlushEvery == 0)
+	c.benchCache.Set(key, value)
 }
 
 // BenchmarkMemoryFootprintTheine measures theine (W-TinyLFU). Its Set is asynchronous too, hence the Wait before Len.
@@ -290,7 +273,7 @@ func runFootprint(b *testing.B, tc footprintCase) {
 	})
 
 	get := func(key uint64) bool { _, ok := c.Get(key); return ok }
-	set := func(key uint64) { c.Set(key, key, false) }
+	set := func(key uint64) { c.Set(key, key) }
 
 	// Each op is measured twice against the same filled cache: over a CPU-cache-resident window, then over the whole
 	// fill. Hot is the cache's own work; full adds the memory stalls of reaching into a multi-GiB heap.
@@ -308,8 +291,9 @@ func fillAndMeasure(b *testing.B, tc footprintCase) benchCache {
 	c := tc.build()
 	for i := 0; i < bigBenchCapacity; i++ {
 		k := fillKey(i)
-		c.Set(k, k, true)
+		c.Set(k, k)
 	}
+	c.Settle()
 
 	heapBytes := resident()
 	live := tc.live(c)
