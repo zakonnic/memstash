@@ -26,7 +26,7 @@ const (
 
 	// benchWorkingSet is the key range the hot half of each latency pair touches: small enough to stay CPU-cache
 	// friendly. Must be a power of two (hotWindow masks with it).
-	benchWorkingSet = 1 << 20
+	benchWorkingSet = 1 << 16
 
 	// latencyIters is the fixed op count of the latency sub-benchmarks (they ignore b.N, like the footprint pass).
 	latencyIters = 10_000_000
@@ -77,11 +77,16 @@ func BenchmarkMemoryFootprintXsyncMap(b *testing.B) {
 }
 
 // BenchmarkMemoryFootprintRistretto measures ristretto. It is cost-bounded rather than item-bounded, but every Set
-// here costs 1, so MaxCost-RemainingCost is the live count. Its Set is asynchronous and drops under pressure, so live
-// falls short of the nominal capacity.
+// here costs 1, so MaxCost-RemainingCost is the reported live count.
+//
+// Two caveats make ristretto's numbers non-comparable at this workload, both flagged rather than hidden. First, its
+// Set drops on a full buffer, so the fill flushes periodically (asyncFill) to actually populate it. Second, and not
+// fixable here: ristretto retains only recently inserted keys - probing a fill shows the last window ~68% present,
+// the middle and start 0% - so the Get hit% stays low (hot samples the middle, full samples uniformly) and its cost
+// counter over-reports the retrievable set. Read the Get numbers as a miss-dominated path, per the hit% column.
 func BenchmarkMemoryFootprintRistretto(b *testing.B) {
 	runFootprint(b, footprintCase{
-		build: func() benchCache { return asyncFill{newRistretto(bigBenchCapacity)} },
+		build: func() benchCache { return asyncFill{benchCache: newRistretto(bigBenchCapacity), n: new(int)} },
 		live: func(c benchCache) int {
 			rc := c.Expose().(*ristretto.Cache[uint64, uint64])
 			rc.Wait()
@@ -92,11 +97,23 @@ func BenchmarkMemoryFootprintRistretto(b *testing.B) {
 	})
 }
 
-// asyncFill drops the per-Set Wait of a contender whose adapter honours the sync flag: waiting 100M times never
-// finishes. Whatever the buffer still holds is drained by the live count before it is read.
-type asyncFill struct{ benchCache }
+// asyncFlushEvery bounds how many un-waited Sets an asyncFill lets pile up before forcing a sync flush: comfortably
+// under ristretto's 32K set buffer, so the fill drains it before it overflows and starts dropping entries, while the
+// Wait cost still amortizes over thousands of Sets instead of one per Set (which at 100M runs for many minutes).
+const asyncFlushEvery = 4096
 
-func (c asyncFill) Set(key, value uint64, _ bool) { c.benchCache.Set(key, value, false) }
+// asyncFill fills a contender whose Set is asynchronous and drops on a full buffer (ristretto): it ignores the
+// caller's sync flag and instead forces a sync flush every asyncFlushEvery Sets, draining the buffer before it can
+// overflow. The final partial batch is drained by the live count before it is read.
+type asyncFill struct {
+	benchCache
+	n *int
+}
+
+func (c asyncFill) Set(key, value uint64, _ bool) {
+	*c.n++
+	c.benchCache.Set(key, value, *c.n%asyncFlushEvery == 0)
+}
 
 // BenchmarkMemoryFootprintTheine measures theine (W-TinyLFU). Its Set is asynchronous too, hence the Wait before Len.
 func BenchmarkMemoryFootprintTheine(b *testing.B) {
@@ -146,14 +163,16 @@ func fillKey(i int) uint64 { return uint64(i) * 0x9E3779B97F4A7C15 }
 // keySource makes one worker's key generator. Every worker gets its own, so no state is shared across cores.
 type keySource func(seed uint64) func() uint64
 
-// hotWindow confines lookups to benchWorkingSet keys, which stay resident in the CPU caches. Workers start at
+// hotWindow confines lookups to benchWorkingSet keys from the middle of the fill: eviction during the fill trims
+// the oldest keys, so a window at offset 0 would measure the miss path for a chunk of its keys. Workers start at
 // independent offsets so they do not march in lockstep over the same line.
-func hotWindow() keySource {
+func hotWindow(fillSize int) keySource {
+	base := fillSize / 2
 	return func(seed uint64) func() uint64 {
 		i := seed
 		return func() uint64 {
 			i++
-			return fillKey(int(i & (benchWorkingSet - 1)))
+			return fillKey(base + int(i&(benchWorkingSet-1)))
 		}
 	}
 }
@@ -275,9 +294,9 @@ func runFootprint(b *testing.B, tc footprintCase) {
 
 	// Each op is measured twice against the same filled cache: over a CPU-cache-resident window, then over the whole
 	// fill. Hot is the cache's own work; full adds the memory stalls of reaching into a multi-GiB heap.
-	b.Run("Get/hot", func(b *testing.B) { runRead(b, hotWindow(), get) })
+	b.Run("Get/hot", func(b *testing.B) { runRead(b, hotWindow(bigBenchCapacity), get) })
 	b.Run("Get/full", func(b *testing.B) { runRead(b, fullRange(bigBenchCapacity), get) })
-	b.Run("Set/hot", func(b *testing.B) { runWrite(b, hotWindow(), set) })
+	b.Run("Set/hot", func(b *testing.B) { runWrite(b, hotWindow(bigBenchCapacity), set) })
 	b.Run("Set/full", func(b *testing.B) { runWrite(b, fullRange(bigBenchCapacity), set) })
 
 	c.Close()

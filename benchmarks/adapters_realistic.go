@@ -23,6 +23,7 @@ type benchCacheBytes interface {
 	Set(key string, value []byte, sync bool)
 	Close()
 	GetSize() uint64
+	Len() int
 }
 
 func entryCost(key string, value []byte) uint32 { return uint32(len(key) + len(value)) }
@@ -37,6 +38,7 @@ type memstashBytesAdapter struct {
 func newMemstashBytes(budget int64, policy memstash.Policy, name string) benchCacheBytes {
 	c, err := memstash.New[string, []byte](
 		memstash.WithMemoryBudget(budget),
+		memstash.WithCostFunc(entryCost),
 		memstash.WithPolicy(policy),
 	)
 	if err != nil {
@@ -55,6 +57,7 @@ func (a *memstashBytesAdapter) Close() { a.c.Close() }
 // GetSize adds Weight() to the structural total: the payload lives in heap allocations outside the cache, and the
 // cost function here is exactly len(key)+len(value), so Weight() is the payload byte total.
 func (a *memstashBytesAdapter) GetSize() uint64 { return uint64(a.c.TotalWeight() + a.c.Weight()) }
+func (a *memstashBytesAdapter) Len() int        { return a.c.Len() }
 
 // --- ristretto ---
 
@@ -65,6 +68,9 @@ type ristrettoBytesAdapter struct {
 func newRistrettoBytes(budget int64, avgEntry int) benchCacheBytes {
 	c, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
 		NumCounters: budget / int64(avgEntry) * 10,
+		Cost: func(value []byte) int64 {
+			return int64(len(value))
+		},
 		MaxCost:     budget,
 		BufferItems: 64,
 	})
@@ -88,6 +94,16 @@ func (a *ristrettoBytesAdapter) Close() { a.c.Close() }
 func (a *ristrettoBytesAdapter) GetSize() uint64 {
 	a.c.Wait()
 	return SizeOf(a.c)
+}
+
+func (a *ristrettoBytesAdapter) Len() int {
+	a.c.Wait()
+	count := 0
+	a.c.IterValues(func([]byte) bool {
+		count++
+		return false
+	})
+	return count
 }
 
 // --- otter (W-TinyLFU) ---
@@ -115,6 +131,8 @@ func (a *otterBytesAdapter) GetSize() uint64 {
 	return estimatedSize + simulateMapBucketBytes[string, otterNode[string, []byte]](count, func(i int) string { return strconv.Itoa(i) })
 }
 
+func (a *otterBytesAdapter) Len() int { return a.c.EstimatedSize() }
+
 // --- theine (W-TinyLFU) ---
 
 type theineBytesAdapter struct{ c *theine.Cache[string, []byte] }
@@ -140,6 +158,11 @@ func (a *theineBytesAdapter) GetSize() uint64 {
 	return SizeOf(a.c)
 }
 
+func (a *theineBytesAdapter) Len() int {
+	a.c.Wait() // Set is asynchronous
+	return a.c.Len()
+}
+
 // --- hashicorp/golang-lru ---
 
 type lruBytesAdapter struct{ c *lru.Cache[string, []byte] }
@@ -157,6 +180,7 @@ func (a *lruBytesAdapter) Get(key string) ([]byte, bool)        { return a.c.Get
 func (a *lruBytesAdapter) Set(key string, value []byte, _ bool) { a.c.Add(key, value) }
 func (a *lruBytesAdapter) Close()                               {}
 func (a *lruBytesAdapter) GetSize() uint64                      { return SizeOf(a.c) }
+func (a *lruBytesAdapter) Len() int                             { return a.c.Len() }
 
 // --- freecache ---
 
@@ -179,6 +203,7 @@ func (a *freecacheBytesAdapter) Set(key string, value []byte, _ bool) {
 }
 func (a *freecacheBytesAdapter) Close()          {}
 func (a *freecacheBytesAdapter) GetSize() uint64 { return SizeOf(a.c) }
+func (a *freecacheBytesAdapter) Len() int        { return int(a.c.EntryCount()) }
 
 // --- bigcache ---
 
@@ -209,3 +234,4 @@ func (a *bigcacheBytesAdapter) Get(key string) ([]byte, bool) {
 func (a *bigcacheBytesAdapter) Set(key string, value []byte, _ bool) { _ = a.c.Set(key, value) }
 func (a *bigcacheBytesAdapter) Close()                               { _ = a.c.Close() }
 func (a *bigcacheBytesAdapter) GetSize() uint64                      { return SizeOf(a.c) }
+func (a *bigcacheBytesAdapter) Len() int                             { return a.c.Len() }

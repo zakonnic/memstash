@@ -1,9 +1,14 @@
 package benchmarks
 
 import (
+	"context"
 	"math/rand"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/zakonnic/memstash"
 )
 
@@ -46,7 +51,10 @@ func warmUp(c benchCache) {
 	for key := uint64(0); key < speedHotKeys; key++ {
 		c.Set(key, key, true)
 	}
+	c.Settle() // Must finish warm-up writes.
 }
+
+var sinkU64 atomic.Uint64
 
 // BenchmarkGetHit measures reads at 100% hits (the main hot path).
 func BenchmarkGetHit(b *testing.B) {
@@ -56,10 +64,13 @@ func BenchmarkGetHit(b *testing.B) {
 			b.ReportAllocs()
 			b.RunParallel(func(pb *testing.PB) {
 				i := rand.Int()
+				local := uint64(0)
 				for pb.Next() {
-					c.Get(keySeq[i&seqMask])
+					v, _ := c.Get(keySeq[i&seqMask])
+					local += v
 					i++
 				}
+				sinkU64.Store(local)
 			})
 		})
 		c.Close()
@@ -74,15 +85,105 @@ func BenchmarkSet(b *testing.B) {
 			b.ReportAllocs()
 			b.RunParallel(func(pb *testing.PB) {
 				i := uint64(rand.Int63())
+				local := uint64(0)
 				for pb.Next() {
 					key := (i * 0x9E3779B97F4A7C15) % setSpace
 					c.Set(key, key, false)
 					i++
 				}
+				sinkU64.Add(local)
 			})
 		})
 		c.Close()
 	}
+}
+
+func BenchmarkShortCheckup(b *testing.B) {
+	ctx := context.Background()
+
+	const nKeys = 1 << 16
+	const keyMask = nKeys - 1
+	var sink atomic.Int64
+	strKeys := make([]string, nKeys)
+	for i := range strKeys {
+		strKeys[i] = "long-key:" + strconv.Itoa(i)
+	}
+
+	cStr, _ := memstash.New[string, int]()
+	mStr := sync.Map{}
+	for i, k := range strKeys {
+		_ = cStr.Set(ctx, k, i)
+		mStr.Store(k, i)
+	}
+	defer cStr.Close()
+
+	cUuid, _ := memstash.New[uuid.UUID, int]()
+	uids := make([]uuid.UUID, nKeys)
+	mUuid := sync.Map{}
+	for i := range nKeys {
+		uids[i] = uuid.Must(uuid.NewRandom())
+		_ = cUuid.Set(ctx, uids[i], i)
+		mUuid.Store(uids[i], i)
+	}
+	defer cUuid.Close()
+
+	b.Run("memstash-string", func(b *testing.B) {
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			i := rand.Int()
+			var local int
+			for pb.Next() {
+				v, _, _ := cStr.Get(ctx, strKeys[i&keyMask])
+				local += v
+				i++
+			}
+			sink.Add(int64(local))
+		})
+	})
+
+	b.Run("memstash-uuid", func(b *testing.B) {
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			i := rand.Int()
+			var local int
+			for pb.Next() {
+				v, _, _ := cUuid.Get(ctx, uids[i&keyMask])
+				local += v
+				i++
+			}
+			sink.Add(int64(local))
+		})
+	})
+
+	b.Run("sync.Map-string", func(b *testing.B) {
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			i := rand.Int()
+			var local int
+			for pb.Next() {
+				v, _ := mStr.Load(strKeys[i&keyMask])
+				local += v.(int)
+				i++
+			}
+			sink.Add(int64(local))
+		})
+	})
+
+	b.Run("sync.Map-uuid", func(b *testing.B) {
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			i := rand.Int()
+			var local int
+			for pb.Next() {
+				v, _ := mUuid.Load(uids[i&keyMask])
+				local += v.(int)
+				i++
+			}
+			sink.Add(int64(local))
+		})
+	})
+
+	b.Logf("output: %d", sink.Load())
 }
 
 // BenchmarkMixed90_10 is the realistic mix: 90% reads, 10% writes.

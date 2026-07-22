@@ -22,6 +22,8 @@ type benchCache interface {
 	Name() string
 	Get(key uint64) (uint64, bool)
 	Set(key uint64, value uint64, sync bool)
+	// Settle blocks until the async maintenance triggered by earlier writes has completed.
+	Settle()
 	Close()
 	Expose() any
 	GetSize() uint64
@@ -50,6 +52,7 @@ func (a *memstashAdapter) Get(key uint64) (uint64, bool) { return a.c.GetFromMem
 func (a *memstashAdapter) Set(key, value uint64, _ bool) {
 	_ = a.c.Set(context.Background(), key, value)
 }
+func (a *memstashAdapter) Settle()         {} // memory writes are synchronous;
 func (a *memstashAdapter) Close()          { a.c.Close() }
 func (a *memstashAdapter) Expose() any     { return a.c }
 func (a *memstashAdapter) GetSize() uint64 { return uint64(a.c.TotalWeight()) }
@@ -80,6 +83,7 @@ func (a *ristrettoAdapter) Set(key, value uint64, sync bool) {
 		a.c.Wait() // ristretto's Set is asynchronous: without Wait the hit-rate measurement is unfair
 	}
 }
+func (a *ristrettoAdapter) Settle()     { a.c.Wait() }
 func (a *ristrettoAdapter) Close()      { a.c.Close() }
 func (a *ristrettoAdapter) Expose() any { return a.c }
 
@@ -104,8 +108,12 @@ func newOtter(capacity int64) benchCache {
 func (a *otterAdapter) Name() string                  { return "otter-wtinylfu" }
 func (a *otterAdapter) Get(key uint64) (uint64, bool) { return a.c.GetIfPresent(key) }
 func (a *otterAdapter) Set(key, value uint64, _ bool) { a.c.Set(key, value) }
-func (a *otterAdapter) Close()                        { a.c.StopAllGoroutines() }
-func (a *otterAdapter) Expose() any                   { return a.c }
+
+// Settle runs pending maintenance synchronously. Without it the lazy frequency-sketch init
+// races into the timed section and flips the read path mid-run.
+func (a *otterAdapter) Settle()     { a.c.CleanUp() }
+func (a *otterAdapter) Close()      { a.c.StopAllGoroutines() }
+func (a *otterAdapter) Expose() any { return a.c }
 
 type otterNode[K comparable, V any] struct {
 	key       K
@@ -140,6 +148,7 @@ func newTheine(capacity int64) benchCache {
 func (a *theineAdapter) Name() string                  { return "theine-wtinylfu" }
 func (a *theineAdapter) Get(key uint64) (uint64, bool) { return a.c.Get(key) }
 func (a *theineAdapter) Set(key, value uint64, _ bool) { a.c.Set(key, value, 1) }
+func (a *theineAdapter) Settle()                       { a.c.Wait() }
 func (a *theineAdapter) Close()                        { a.c.Close() }
 func (a *theineAdapter) Expose() any                   { return a.c }
 
@@ -165,6 +174,7 @@ func newLRU(capacity int64) benchCache {
 func (a *lruAdapter) Name() string                  { return "hashicorp-lru" }
 func (a *lruAdapter) Get(key uint64) (uint64, bool) { return a.c.Get(key) }
 func (a *lruAdapter) Set(key, value uint64, _ bool) { a.c.Add(key, value) }
+func (a *lruAdapter) Settle()                       {}
 func (a *lruAdapter) Close()                        {}
 func (a *lruAdapter) Expose() any                   { return a.c }
 
@@ -199,6 +209,7 @@ func (a *freecacheAdapter) Set(key, value uint64, _ bool) {
 	binary.LittleEndian.PutUint64(buf[:], value)
 	_ = a.c.SetInt(int64(key), buf[:], 0) // expireSeconds=0: never expire, only size-based eviction
 }
+func (a *freecacheAdapter) Settle()     {}
 func (a *freecacheAdapter) Close()      {}
 func (a *freecacheAdapter) Expose() any { return a.c }
 
@@ -260,6 +271,7 @@ func bigcacheKey(key uint64) string {
 	binary.LittleEndian.PutUint64(buf[:], key)
 	return string(buf[:])
 }
+func (a *bigcacheAdapter) Settle()     {}
 func (a *bigcacheAdapter) Close()      { _ = a.c.Close() }
 func (a *bigcacheAdapter) Expose() any { return a.c }
 
@@ -282,6 +294,7 @@ func (a *syncMapAdapter) Get(key uint64) (uint64, bool) {
 	return value.(uint64), true
 }
 func (a *syncMapAdapter) Set(key, value uint64, _ bool) { a.m.Store(key, value) }
+func (a *syncMapAdapter) Settle()                       {}
 func (a *syncMapAdapter) Close()                        {}
 func (a *syncMapAdapter) Expose() any                   { return &a.m }
 
@@ -298,6 +311,7 @@ func newXsyncMap() benchCache { return &xsyncMapAdapter{m: xsync.NewMapOf[uint64
 func (a *xsyncMapAdapter) Name() string                  { return "xsync.MapOf" }
 func (a *xsyncMapAdapter) Get(key uint64) (uint64, bool) { return a.m.Load(key) }
 func (a *xsyncMapAdapter) Set(key, value uint64, _ bool) { a.m.Store(key, value) }
+func (a *xsyncMapAdapter) Settle()                       {}
 func (a *xsyncMapAdapter) Close()                        {}
 func (a *xsyncMapAdapter) Expose() any                   { return a.m }
 
