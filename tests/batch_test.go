@@ -7,10 +7,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/zakonnic/memstash"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zakonnic/memstash"
 )
 
 func TestBatchSetGet(t *testing.T) {
@@ -148,4 +147,40 @@ func TestLoadableCacheBatch(t *testing.T) {
 	v, ok := lc.Cache().GetFromMemory(5)
 	require.True(t, ok)
 	assert.Equal(t, "v5", v)
+}
+
+func TestBatchGetFromMemory(t *testing.T) {
+	ctx := context.Background()
+	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 1000})
+
+	keys := make([]string, 0, 50)
+	for i := 0; i < 50; i++ {
+		key := "k" + string(rune('A'+i%26)) + string(rune('0'+i/26))
+		keys = append(keys, key)
+		if i%3 != 0 { // every third key stays absent
+			require.NoError(t, c.Set(ctx, key, "v-"+key))
+		}
+	}
+	require.NoError(t, c.Delete(ctx, keys[1])) // present, then deleted: the chain walks past a tombstone
+	require.NoError(t, c.Set(ctx, keys[2], "overwritten"))
+
+	dst := make(memstash.List[string, string], 0, len(keys))
+	dst = c.BatchGetFromMemory(keys, dst[:0])
+
+	want := map[string]string{}
+	for i, key := range keys {
+		if i%3 != 0 && i != 1 {
+			want[key] = "v-" + key
+		}
+	}
+	want[keys[2]] = "overwritten"
+	assert.Equal(t, want, dst.ToMap())
+
+	// Reuse: a second call into the same backing array must not allocate.
+	base := &dst[:1][0]
+	dst = c.BatchGetFromMemory(keys, dst[:0])
+	assert.Same(t, base, &dst[0], "a reused dst must keep its backing array")
+	assert.Equal(t, want, dst.ToMap())
+
+	assert.Empty(t, c.BatchGetFromMemory(nil, nil))
 }
