@@ -51,10 +51,10 @@ type Config[K comparable, V any] struct {
 	// takes precedence over Policy. The factory must not return nil.
 	CustomPolicy EvictionPolicyFactory[K, V]
 
-	// Shards is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to a
-	// power of two. 0 means automatic: GOMAXPROCS, but no more than 128 and such that each shard gets at least 64 weight
-	// units. Capacity and ghost are divided evenly between shards; eviction operates within a single shard. Shards: 1
-	// yields a globally deterministic eviction order (useful in tests).
+	// Shards is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to
+	// a power of two and capped at 128; shards are also halved until each holds at least 64 weight units. 0 means
+	// automatic: GOMAXPROCS. Capacity and ghost are divided evenly between shards; eviction operates within a single
+	// shard. Shards: 1 yields a globally deterministic eviction order (useful in tests).
 	Shards int
 
 	// L2Cache is the optional second level.
