@@ -112,7 +112,7 @@ func WithMemoryCapacity(capacity int64) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.memoryCapacity = &capacity }}
 }
 
-// WithMemoryBudget sets Config.MemoryBudget: the first-level bound in approximate resident bytes. Mutually exclusive
+// WithMemoryBudget sets Config.MemoryBudget: the first-level bound in data bytes (keys and values). Mutually exclusive
 // with WithMemoryCapacity; see Config.MemoryBudget for the key/value types the automatic size estimator supports.
 func WithMemoryBudget(bytes int64) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.memoryBudget = &bytes }}

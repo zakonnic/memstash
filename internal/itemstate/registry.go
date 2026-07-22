@@ -7,7 +7,7 @@ import (
 )
 
 // maxChunks caps the global index space at 2^32 records (maxChunks * poolChunkSize).
-const maxChunks = 1 << 25
+const maxChunks = (1 << 32) / poolChunkSize
 
 // MaxRecords is the largest number of records a Registry can address: idx is a uint32 shared by every shard's Pool,
 // a cache-wide ceiling that adding shards cannot raise.

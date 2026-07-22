@@ -3,7 +3,7 @@ package itemstate
 import "unsafe"
 
 // poolChunk is a block of poolChunkSize state records allocated as one object. Chunk size follows the record's
-// inline Entry: 3 KiB for word-sized pairs, 6 KiB for string keys with slice values - exact malloc size classes.
+// inline Entry: 12 KiB for word-sized pairs, 24 KiB for string keys with slice values - exact malloc size classes.
 type poolChunk[K comparable, V any] struct {
 	states [poolChunkSize]State[K, V]
 }

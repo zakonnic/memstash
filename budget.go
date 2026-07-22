@@ -9,14 +9,9 @@ import (
 	"github.com/zakonnic/memstash/internal/itemstate"
 )
 
-// perEntryOverheadBytes approximates the L1 cache item overhead: the 16-byte state record, the table slot,
-// the eviction-queue node and the allocator rounding of the box itself.
-const perEntryOverheadBytes = 48
-
-// GetAutoCostFunc builds the automatic CostFunc behind Config.MemoryBudget. The cost of an item is its estimated
-// resident size in bytes: unsafe.Sizeof(Entry) covers the inline part of the key and value, the payload sizers add
-// the heap bytes they reference, and perEntryOverheadBytes accounts the cache's own bookkeeping. With such costs the
-// sum of weights tracks the cache's real footprint, so MemoryCapacity can be the byte budget itself.
+// GetAutoCostFunc builds the automatic CostFunc behind Config.MemoryBudget. The cost of an item is the byte size of
+// its data alone: unsafe.Sizeof(Entry) for the inline part of the key and value, plus the heap bytes they reference.
+// MemoryBudget bounds the stored data, the cache footprint is not counted.
 func GetAutoCostFunc[K comparable, V any]() (func(key K, value V) uint32, error) {
 	keySize, ok := payloadSizer[K]()
 	if !ok {
@@ -26,7 +21,7 @@ func GetAutoCostFunc[K comparable, V any]() (func(key K, value V) uint32, error)
 	if !ok {
 		return nil, fmt.Errorf("%w (value type %s)", ErrBudgetNeedsCostFunc, reflect.TypeFor[V]())
 	}
-	fixed := int64(unsafe.Sizeof(itemstate.Entry[K, V]{})) + perEntryOverheadBytes
+	fixed := int64(unsafe.Sizeof(itemstate.Entry[K, V]{}))
 	if keySize == nil && valSize == nil {
 		// Both types are fixed-size: every item costs the same.
 		cost := uint32(min(fixed, math.MaxUint32))

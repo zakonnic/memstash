@@ -2,9 +2,10 @@ package itemstate
 
 import "unsafe"
 
-// poolChunkSize is the number of state records in a single pool chunk; allocations are amortized to 1/128 of an
-// insert.
-const poolChunkSize = 128
+// poolChunkSize is the number of state records in a single pool chunk. Sized so the registry's chunk directory stays
+// small enough to live in L1/L2 - the directory load sits on the Get path's dependent-load chain between the two
+// unavoidable cache misses (hash table slot, state record), so it must not become a third one.
+const poolChunkSize = 512
 
 // queueChunkSize is the number of nodes in a single queue chunk: 127 8-byte nodes plus the next pointer make the
 // chunk exactly 1 KiB.

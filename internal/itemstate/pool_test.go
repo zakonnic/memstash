@@ -49,9 +49,7 @@ func TestPoolClaimRelease(t *testing.T) {
 
 	record.Kill() // only tombstones go back to the freelist
 	p.Release(idx)
-	if entry := p.At(idx).Entry(); entry != nil { // boxed drops the box, inline zeroes the pair
-		assert.Zero(t, *entry, "Release must clear the Entry so the pair does not outlive the item")
-	}
+	assert.Zero(t, *p.At(idx).Entry(), "Release must clear the Entry so the pair does not outlive the item")
 
 	record2, gen2, idx2 := p.Claim("b", "vb", 0)
 	assert.Equal(t, idx, idx2, "the freelist must recycle the released index")
@@ -80,8 +78,6 @@ func TestPoolSharedRegistry(t *testing.T) {
 	}
 }
 
-// TestStateSize checks the layout invariants both builds share: records stay word-aligned inside a chunk and a chunk
-// is exactly poolChunkSize records. The inline build pins its exact sizes in state_inline_test.go.
 func TestStateSize(t *testing.T) {
 	assert.Zero(t, unsafe.Sizeof(State[int, int]{})%8, "records must stay 8-aligned inside a chunk")
 	assert.Zero(t, unsafe.Sizeof(State[string, [3]int64]{})%8)

@@ -132,11 +132,11 @@ u, ok, err := c.Get(ctx, "user:42") // L1 hit → returns instantly; L1 miss →
 
 Memstash is configured with functional options passed to `New` (or to any adapter's `New*Cache`). Some common setups:
 
-**Byte-budgeted cache** - bound by approximate resident bytes instead of item count; the per-item size (key, value, and the cache's own overhead) is estimated automatically:
+**Byte-budgeted cache** - bound by the byte size of stored data instead of item count; the per-item size (key and value bytes) is estimated automatically:
 
 ```go
 c, _ := memstash.New[string, []byte](
-	memstash.WithMemoryBudget(512 << 20), // ~512 MiB resident
+	memstash.WithMemoryBudget(512 << 20), // ~512 MiB of keys and values
 )
 ```
 
@@ -232,7 +232,7 @@ Full option list:
 | Option | Purpose |
 |---|---|
 | `WithMemoryCapacity(n)` | L1 capacity in weight units (defaults to 20 000). |
-| `WithMemoryBudget(bytes)` | L1 bound in approximate resident bytes; derives a size-based cost function automatically (mutually exclusive with `WithMemoryCapacity`). |
+| `WithMemoryBudget(bytes)` | L1 bound in bytes of stored keys and values; derives a size-based cost function automatically (mutually exclusive with `WithMemoryCapacity`). |
 | `WithCostFunc(fn)` | Per-item weight function (e.g. size in bytes). |
 | `WithTTL(d)` | Item lifetime (1-second resolution); applied to L2 writes too. |
 | `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`. |

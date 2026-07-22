@@ -295,7 +295,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 	sh, keyHash := c.shardAndHash(key)
 	t := sh.table.Load()
 	shortHash := shortHashOf(keyHash)
-probe:
+probe: // loop label for hashSlots table operations optimization - couldn't inline, so it lives here.
 	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
 		packed := t.slots[pos].Load()
 		slotShortHash := uint32(packed >> 32)

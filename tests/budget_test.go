@@ -77,8 +77,8 @@ func TestMemoryBudgetValidation(t *testing.T) {
 	})
 }
 
-// TestMemoryBudgetFixedTypes pins down the arithmetic on fixed-size types: every uint64/uint64 item costs the same
-// (Entry box + per-item overhead), so a single-shard cache must settle at exactly budget/cost items.
+// TestMemoryBudgetFixedTypes pins down the arithmetic on fixed-size types: every uint64/uint64 item costs exactly its
+// 16-byte Entry, so a single-shard cache must settle at exactly budget/cost items.
 func TestMemoryBudgetFixedTypes(t *testing.T) {
 	const budget = 64 << 10
 	c, err := memstash.NewWithConfig(&memstash.Config[uint64, uint64]{
@@ -98,8 +98,8 @@ func TestMemoryBudgetFixedTypes(t *testing.T) {
 	require.Positive(t, c.Len())
 	perItem := c.Weight() / int64(c.Len())
 	assert.Equal(t, int64(budget/perItem), int64(c.Len()), "a full single-shard cache must sit exactly at the budget")
-	// Entry box (16 bytes) + bookkeeping: the estimated per-item cost must be a small constant, not a wild guess.
-	assert.InDelta(t, 64, perItem, 32, "per-item byte estimate for uint64/uint64 drifted")
+	// Data bytes only: the estimate for uint64/uint64 is the 16-byte Entry, no cache bookkeeping on top.
+	assert.EqualValues(t, 16, perItem, "per-item byte estimate for uint64/uint64 drifted")
 }
 
 // TestMemoryBudgetVariablePayload checks byte accounting for string/[]byte: the cache under a byte budget must hold
@@ -124,7 +124,7 @@ func TestMemoryBudgetVariablePayload(t *testing.T) {
 			weight := c.Weight()
 			require.LessOrEqual(t, weight, int64(budget), "weight above the byte budget")
 			require.Greater(t, weight, int64(budget/2), "cache did not fill up to the budget")
-			// ~1KB payload plus a fixed overhead per item: the retained count must reflect byte, not item, accounting.
+			// ~1KB payload plus the Entry headers and key bytes: the retained count must reflect byte, not item, accounting.
 			assert.InDelta(t, budget/1100, c.Len(), float64(budget)/1100/4, "item count inconsistent with ~1.1KB per-item cost")
 		})
 	}
