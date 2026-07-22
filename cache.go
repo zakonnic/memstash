@@ -81,8 +81,9 @@ type Cache[K comparable, V any] struct {
 	closeOnce sync.Once
 }
 
-// New creates a cache configured by the options. The returned cache must be closed with Close if a TTL is set
-// or WriteBack is used (by default, but only when L2 Cache is used - background goroutines are stopped); otherwise Close is optional.
+// New creates a cache configured by the options. The returned cache must be closed with Close when background
+// goroutines run - a TTL is set, or an L2 cache is written with WriteBack (the default write policy); otherwise
+// Close is optional.
 func New[K comparable, V any](opts ...Option) (*Cache[K, V], error) {
 	cfg, err := buildConfig[K, V](opts)
 	if err != nil {
@@ -259,21 +260,21 @@ func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
 // memory hit is a lock-free, allocation-free path.
 func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	if value, ok := c.getMemory(key); ok {
-		c.stats.incMemHits()
+		c.stats.addMemHits(1)
 		return value, true, nil
 	}
 	if c.l2Cache == nil {
-		c.stats.incMemMisses()
+		c.stats.addMemMisses(1)
 		var zero V
 		return zero, false, nil
 	}
 	value, ok, err := c.l2Cache.Get(ctx, key)
 	if err != nil || !ok {
-		c.stats.incL2Misses()
+		c.stats.addL2Misses(1)
 		var zero V
 		return zero, false, err
 	}
-	c.stats.incL2Hits()
+	c.stats.addL2Hits(1)
 	c.setMemory(key, value)
 	return value, true, nil
 }
@@ -282,37 +283,42 @@ func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 	value, ok := c.getMemory(key)
 	if ok {
-		c.stats.incMemHits()
+		c.stats.addMemHits(1)
 	} else {
-		c.stats.incMemMisses()
+		c.stats.addMemMisses(1)
 	}
 	return value, ok
 }
 
-// getMemory is the lock-free memory-hit path. The slot's short hash is only a prefilter; the record's Entry snapshot
-// gives the exact key match and a value that can never be seen half-written.
+// getMemory is the lock-free memory-hit path. It locates the index in the linear hash table, then uses the record's
+// Entry snapshot to confirm an exact key match and to obtain a value that is never observed half-written.
+//
+// The body inlines the shardAndHash computation and the snapshot into a single stack slot, avoiding a call frame and
+// extra Entry copies. Those overheads would either slow things down directly or clog the works so the CPU can't do
+// something else while waiting.
 func (c *Cache[K, V]) getMemory(key K) (V, bool) {
-	sh, keyHash := c.shardAndHash(key)
+	keyHash := maphash.Comparable(c.seed, key)
+	sh := &c.shards[uint32(keyHash)&c.shardMask]
 	t := sh.table.Load()
 	shortHash := shortHashOf(keyHash)
+	var entry itemstate.Entry[K, V]
 probe: // loop label for hashSlots table operations optimization - couldn't inline, so it lives here.
-	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
-		packed := t.slots[pos].Load()
-		slotShortHash := uint32(packed >> 32)
+	for pos := t.home(keyHash); ; pos++ {
+		packed := t.slot(pos).Load()
+		slotShortHash := slotHash(packed)
 		if slotShortHash == emptyShortHash {
 			break // end of the probe chain: not present
 		}
 		if slotShortHash != shortHash { // covers tombstones too - tombShortHash never matches a key short hash
 			continue
 		}
-		state := c.registry.At(uint32(packed))
+		state := c.registry.At(slotIdx(packed))
 		for {
 			metaWord := state.Load()
 			if metaWord&itemstate.Dead != 0 {
 				continue probe
 			}
-			entry, ok := state.Snapshot(metaWord)
-			if !ok {
+			if !state.SnapshotInto(&entry, metaWord) {
 				continue // the copy raced a recycle or an overwrite: retry against the fresh meta word
 			}
 			if entry.Key != key {
@@ -330,7 +336,7 @@ probe: // loop label for hashSlots table operations optimization - couldn't inli
 				return entry.Value, true
 			}
 			// TTL has elapsed - drop the item lazily instead of waiting for the eviction queue to reach it.
-			c.dropExpired(sh, keyHash, key, uint32(packed))
+			c.dropExpired(sh, keyHash, key, slotIdx(packed))
 			break probe
 		}
 	}
@@ -342,7 +348,7 @@ probe: // loop label for hashSlots table operations optimization - couldn't inli
 // write.
 func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 	c.setMemory(key, value)
-	c.stats.incSets()
+	c.stats.addSets(1)
 	if c.l2WritePolicy == WriteDisabled {
 		return nil
 	}
@@ -370,33 +376,33 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 	t := sh.table.Load()
 	shortHash := shortHashOf(keyHash)
 	weightDelta := weight
-	reuseAt := -1
-	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
-		packed := t.slots[pos].Load()
-		slotShortHash := uint32(packed >> 32)
+	reuse, hasReuse := uint32(0), false
+	for pos := t.home(keyHash); ; pos++ {
+		packed := t.slot(pos).Load()
+		slotShortHash := slotHash(packed)
 		if slotShortHash == emptyShortHash {
 			// New key: claim a record and link a slot (reusing the first tombstone seen on the way).
 			_, _, idx := sh.pool.Claim(key, value, c.expireOffset())
-			if reuseAt >= 0 {
-				pos = uint32(reuseAt)
+			if hasReuse {
+				pos = reuse
 				sh.dirty--
 			}
-			t.slots[pos].Store(packSlot(shortHash, idx))
+			t.slot(pos).Store(packSlot(shortHash, idx))
 			sh.live++
 			sh.policy.Add(itemstate.QNode{Idx: idx, Cost: uint32(weight)})
 			c.maybeRebuild(sh, t)
 			break
 		}
 		if slotShortHash == tombShortHash {
-			if reuseAt < 0 {
-				reuseAt = int(pos)
+			if !hasReuse {
+				reuse, hasReuse = pos, true
 			}
 			continue
 		}
 		if slotShortHash != shortHash {
 			continue
 		}
-		state := c.registry.At(uint32(packed))
+		state := c.registry.At(slotIdx(packed))
 		if state.Load()&itemstate.Dead != 0 {
 			continue
 		}
@@ -408,7 +414,7 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 		weightDelta = weight - c.rawCost(key, entry.Value)
 		state.SetValue(value)
 		if c.ttlSec != 0 {
-			c.refreshExpire(state)
+			state.RefreshExpire(c.expireOffset())
 		}
 		break
 	}
@@ -423,36 +429,25 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 // policy's queues (exactly one node per record); readers finish on the superseded table just fine. Called under the
 // shard mutex.
 func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *hashSlots) {
-	if (sh.live+sh.dirty)*4 < len(t.slots)*3 {
+	if (sh.live+sh.dirty)*4 < t.slotCount()*3 {
 		return
 	}
-	newSize := len(t.slots)
+	newSize := t.slotCount()
 	if sh.live*2 >= newSize {
 		newSize *= 2
 	}
-	hashSlots := newHashSlots(newSize)
+	fresh := newHashSlots(newSize)
 	live := 0
 	sh.policy.Range(func(node itemstate.QNode) {
 		state := sh.pool.At(node.Idx)
 		if state.Load()&itemstate.Dead != 0 {
 			return
 		}
-		keyHash := maphash.Comparable(c.seed, state.Entry().Key)
-		for pos := homeSlot(keyHash, hashSlots.mask); ; pos = (pos + 1) & hashSlots.mask {
-			if hashSlots.slots[pos].Load() == 0 {
-				hashSlots.slots[pos].Store(packSlot(shortHashOf(keyHash), node.Idx))
-				break
-			}
-		}
+		fresh.insertFresh(maphash.Comparable(c.seed, state.Entry().Key), node.Idx)
 		live++
 	})
 	sh.live, sh.dirty = live, 0
-	sh.table.Store(hashSlots)
-}
-
-// refreshExpire extends the item's TTL.
-func (c *Cache[K, V]) refreshExpire(state *itemstate.State[K, V]) {
-	state.RefreshExpire(c.expireOffset())
+	sh.table.Store(fresh)
 }
 
 // evictShard evicts items from the shard while its weight exceeds the capacity. Called under the shard mutex.
@@ -472,25 +467,12 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V]) {
 // (Delete, lazy TTL removal) both already happened - the probe finds nothing and nothing changes. Called under the
 // shard mutex.
 func (c *Cache[K, V]) unlink(sh *shard[K, V], victimIdx uint32) {
-	victim := sh.pool.At(victimIdx)
-	entry := victim.Entry()
+	entry := sh.pool.At(victimIdx).Entry()
 	keyHash := maphash.Comparable(c.seed, entry.Key)
-	t := sh.table.Load()
-	shortHash := shortHashOf(keyHash)
-	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
-		packed := t.slots[pos].Load()
-		slotShortHash := uint32(packed >> 32)
-		if slotShortHash == emptyShortHash {
-			return
-		}
-		if slotShortHash != shortHash || uint32(packed) != victimIdx {
-			continue // another key's slot, or the key is already backed by a different record
-		}
-		t.slots[pos].Store(tombSlot)
+	if sh.table.Load().unlink(keyHash, victimIdx) {
 		sh.live--
 		sh.dirty++
 		sh.weight.Add(-c.rawCost(entry.Key, entry.Value))
-		return
 	}
 }
 
@@ -502,15 +484,20 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K, idx uint32) 
 	// The idx match and the Expired re-check reject the races: a re-claimed record or a refreshed TTL means the item
 	// survives.
 	if ok && foundIdx == idx && itemstate.Expired(state.Load(), c.nowOff.Load()) {
-		entry := state.Entry()
-		state.Kill()
-		slot.Store(tombSlot)
-		sh.live--
-		sh.dirty++
-		sh.weight.Add(-c.rawCost(key, entry.Value))
-		c.noteDead(sh)
+		c.killAt(sh, slot, state, key)
 	}
 	sh.mu.Unlock()
+}
+
+// killAt tombs the found slot, kills its record and subtracts the item's weight. Called under the shard mutex.
+func (c *Cache[K, V]) killAt(sh *shard[K, V], slot *atomic.Uint64, state *itemstate.State[K, V], key K) {
+	entry := state.Entry()
+	state.Kill()
+	slot.Store(tombSlot)
+	sh.live--
+	sh.dirty++
+	sh.weight.Add(-c.rawCost(key, entry.Value))
+	c.noteDead(sh)
 }
 
 // findSlot probes the shard's current table for the key's live slot: (slot, pool index, record, true) when found.
@@ -518,21 +505,20 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K, idx uint32) 
 func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (*atomic.Uint64, uint32, *itemstate.State[K, V], bool) {
 	t := sh.table.Load()
 	shortHash := shortHashOf(keyHash)
-	for pos := homeSlot(keyHash, t.mask); ; pos = (pos + 1) & t.mask {
-		packed := t.slots[pos].Load()
-		slotShortHash := uint32(packed >> 32)
-		if slotShortHash == emptyShortHash {
+	for pos := t.home(keyHash); ; pos++ {
+		packed := t.slot(pos).Load()
+		if slotHash(packed) == emptyShortHash {
 			return nil, 0, nil, false
 		}
-		if slotShortHash != shortHash {
+		if slotHash(packed) != shortHash {
 			continue
 		}
-		state := c.registry.At(uint32(packed))
+		state := c.registry.At(slotIdx(packed))
 		if state.Load()&itemstate.Dead != 0 {
 			continue
 		}
 		if entry := state.Entry(); entry.Key == key {
-			return &t.slots[pos], uint32(packed), state, true
+			return t.slot(pos), slotIdx(packed), state, true
 		}
 	}
 }
@@ -557,13 +543,7 @@ func (c *Cache[K, V]) noteDead(sh *shard[K, V]) {
 // mutex; a missing key is a no-op.
 func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K) {
 	if slot, _, state, ok := c.findSlot(sh, keyHash, key); ok {
-		entry := state.Entry()
-		state.Kill()
-		slot.Store(tombSlot)
-		sh.live--
-		sh.dirty++
-		sh.weight.Add(-c.rawCost(key, entry.Value))
-		c.noteDead(sh)
+		c.killAt(sh, slot, state, key)
 	}
 }
 
@@ -574,7 +554,7 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	sh.mu.Lock()
 	c.deleteLocked(sh, keyHash, key)
 	sh.mu.Unlock()
-	c.stats.incDeletes()
+	c.stats.addDeletes(1)
 
 	if c.l2WritePolicy != WriteDisabled {
 		return c.l2Cache.Delete(ctx, key)
@@ -613,7 +593,7 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		return zero, ErrNilLoader
 	}
 	if value, ok := c.getMemory(key); ok {
-		c.stats.incMemHits()
+		c.stats.addMemHits(1)
 		return value, nil
 	}
 
@@ -622,7 +602,7 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		// A flight is already in progress - wait for its result or for the context to be canceled (the owner keeps
 		// loading on behalf of everyone else). The key was not in memory when this call looked, and this call itself
 		// never reaches L2 - the owner does: a memory miss.
-		c.stats.incMemMisses()
+		c.stats.addMemMisses(1)
 		select {
 		case <-winner.done:
 			return winner.val, winner.err
@@ -886,23 +866,23 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) (V, error) {
 	// A parallel flight may have finished while we were registering.
 	if value, ok := c.getMemory(key); ok {
-		c.stats.incMemHits()
+		c.stats.addMemHits(1)
 		return value, nil
 	}
 	if c.l2Cache != nil {
 		value, ok, err := c.l2Cache.Get(ctx, key)
 		switch {
 		case err == nil && ok:
-			c.stats.incL2Hits()
+			c.stats.addL2Hits(1)
 			c.setMemory(key, value)
 			return value, nil
 		case err != nil:
 			// Fall back to the loader; report the L2 error via the callback.
 			c.reportL2Err(key, err)
 		}
-		c.stats.incL2Misses()
+		c.stats.addL2Misses(1)
 	} else {
-		c.stats.incMemMisses()
+		c.stats.addMemMisses(1)
 	}
 	value, err := load(ctx, key)
 	if err != nil {
@@ -910,7 +890,7 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 		return zero, err
 	}
 	c.setMemory(key, value)
-	c.stats.incSets()
+	c.stats.addSets(1)
 	if c.l2WritePolicy != WriteDisabled {
 		if c.l2WritePolicy == WriteThrough {
 			// The value is already in hand - an L2 write error must not fail the read.
@@ -929,21 +909,21 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 // yielded pair is never torn.
 func (c *Cache[K, V]) Iterator() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
+		var entry itemstate.Entry[K, V]
 		for i := range c.shards {
 			t := c.shards[i].table.Load()
 			nowOff := c.nowOff.Load()
-			for pos := range t.slots {
-				packed := t.slots[pos].Load()
-				if uint32(packed>>32) < minKeyShortHash {
+			for pos := uint32(0); pos <= t.mask; pos++ {
+				packed := t.slot(pos).Load()
+				if slotHash(packed) < minKeyShortHash {
 					continue // empty or tombstone
 				}
-				state := c.registry.At(uint32(packed))
+				state := c.registry.At(slotIdx(packed))
 				metaWord := state.Load()
 				if metaWord&itemstate.Dead != 0 || itemstate.Expired(metaWord, nowOff) {
 					continue
 				}
-				entry, ok := state.Snapshot(metaWord)
-				if !ok {
+				if !state.SnapshotInto(&entry, metaWord) {
 					continue
 				}
 				if !yield(entry.Key, entry.Value) {

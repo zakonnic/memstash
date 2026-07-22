@@ -28,21 +28,9 @@ func newStats(enabled bool) Stats {
 	}
 }
 
-func (s *Stats) incMemHits() {
-	if s.enabled {
-		s.memHits.Add(1)
-	}
-}
-
 func (s *Stats) addMemHits(n int64) {
 	if s.enabled {
 		s.memHits.Add(n)
-	}
-}
-
-func (s *Stats) incMemMisses() {
-	if s.enabled {
-		s.memMisses.Add(1)
 	}
 }
 
@@ -52,21 +40,9 @@ func (s *Stats) addMemMisses(n int64) {
 	}
 }
 
-func (s *Stats) incL2Hits() {
-	if s.enabled {
-		s.l2Hits.Add(1)
-	}
-}
-
 func (s *Stats) addL2Hits(n int64) {
 	if s.enabled {
 		s.l2Hits.Add(n)
-	}
-}
-
-func (s *Stats) incL2Misses() {
-	if s.enabled {
-		s.l2Misses.Add(1)
 	}
 }
 
@@ -76,21 +52,9 @@ func (s *Stats) addL2Misses(n int64) {
 	}
 }
 
-func (s *Stats) incSets() {
-	if s.enabled {
-		s.sets.Add(1)
-	}
-}
-
 func (s *Stats) addSets(n int64) {
 	if s.enabled {
 		s.sets.Add(n)
-	}
-}
-
-func (s *Stats) incDeletes() {
-	if s.enabled {
-		s.deletes.Add(1)
 	}
 }
 
