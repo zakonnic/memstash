@@ -162,9 +162,10 @@ c, _ := rueidis_adapter.NewJSONCache[string, Session](client,
 **Batch operations** - amortize the network round trip; adapters use native pipelining / multi-get where the client supports it:
 
 ```go
-found, _ := c.BatchGet(ctx, []string{"a", "b", "c"})            // one round trip to L2 for the misses
-_ = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b", Value: b}})
-_ = c.BatchDelete(ctx, []string{"a", "b"})                      // follows the write policy, like BatchSet
+found, err := c.BatchGet(ctx, []string{"a", "b", "c"})            // one round trip to L2 for the misses
+dst = c.BatchGetFromMemory([]string{"a", "b"}, dst)
+err = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b", Value: b}})
+err = c.BatchDelete(ctx, []string{"a", "b"})                      // follows the write policy, like BatchSet
 ```
 
 **Observability and iteration** - `Stats()` returns operation counters (collected with striped counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via `WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it - otherwise counters stay at zero. `Iterator()` walks the live first-level entries lock-free, independent of stats:
@@ -292,19 +293,19 @@ go -C benchmarks test -run TestHitRate -v
 
 ### Throughput - ns/op, lower is better
 
-| Cache | GetHit | Set | 90 Get / 10 Set | Set alloc |
-|---|--:|--:|----------------:|--:|
-| **memstash-s3fifo** | **0.89** | 31.4 |            4.70 | 16 B / 1 |
-| **memstash-clock** | **0.91** | 32.1 |            4.57 | 17 B / 1 |
-| **memstash-wtinylfu** | **0.91** | 33.8 |            4.56 | 17 B / 1 |
-| **memstash-sieve** | **1.02** | 31.9 |            4.52 | 16 B / 1 |
-| theine-wtinylfu | 3.42 | 311.6 |           52.43 | 44 B / 0 |
-| ristretto | 5.75 | 87.4 |           14.00 | 90 B / 1 |
-| otter-wtinylfu | 5.78 | 419.9 |           50.56 | 48 B / 1 |
-| bigcache | 8.72 | 38.2 |           23.70 | 23 B / 1 |
-| freecache | 13.69 | 21.3 |           14.42 |  0 B / 0 |
-| hashicorp-lru | 91.72 | 138.1 |           95.65 | 71 B / 0 |
-| sync.Map\* | 1.56 | 11.2 |            4.08 | 63 B / 2 |
+| Cache | GetHit | Get (50% hitrate) | Set | 90 Get / 10 Set | Set alloc |
+|---|--:|------------------:|--:|----------------:|--:|
+| **memstash-s3fifo** | **0.86** |          **1.16** | 26.7 |            3.97 | 0 B / 0 |
+| **memstash-clock** | **0.86** |          **1.16** | 27.2 |            3.91 | 1 B / 0 |
+| **memstash-wtinylfu** | **0.87** |          **1.14** | 27.5 |            3.84 | 0 B / 0 |
+| **memstash-sieve** | **0.87** |          **1.11** | 26.2 |            4.01 | 0 B / 0 |
+| theine-wtinylfu | 3.35 |              3.40 | 323.2 |           50.78 | 35 B / 0 |
+| ristretto | 5.91 |              5.55 | 80.5 |           12.91 | 88 B / 1 |
+| otter-wtinylfu | 6.07 |              1.72 | 387.2 |           51.18 | 48 B / 1 |
+| bigcache | 9.10 |              7.43 | 37.8 |           21.46 | 24 B / 2 |
+| freecache | 13.84 |             11.56 | 20.9 |           14.40 |  0 B / 0 |
+| hashicorp-lru | 96.94 |             86.49 | 138.0 |           98.94 | 73 B / 0 |
+| sync.Map\* | 1.64 |              1.80 | 11.6 |            4.19 | 63 B / 2 |
 
 \* `sync.Map` performs no eviction - a lower-bound baseline, not a comparable cache.
 
@@ -312,68 +313,68 @@ go -C benchmarks test -run TestHitRate -v
 
 | Cache | 100% reads | 75% reads | 50% reads | 25% reads | 0% (writes only) |
 |---|--:|--:|--:|--:|-----------------:|
-| **memstash-s3fifo** | **1010** | **125** | **72** | **47** |           **41** |
-| **memstash-clock** | **1007** | **125** | **72** | **49** |           **43** |
-| **memstash-wtinylfu** | **1007** | **126** | **65** | **53** |           **40** |
-| **memstash-sieve** | **998** | **116** | **70** | **52** |           **43** |
-| otter-wtinylfu | 469 | 9.7 | 5.3 | 3.6 |              2.8 |
-| theine-wtinylfu | 294 | 11 | 6.0 | 4.5 |              3.3 |
-| ristretto | 175 | 37 | 19 | 7.9 |               11 |
-| bigcache | 114 | 31 | 24 | 22 |               26 |
-| freecache | 72 | 67 | 68 | 67 |               67 |
-| hashicorp-lru | 10 | 8.5 | 9.8 | 9.6 |              9.4 |
-| sync.Map\* | 608 | 150 | 107 | 84 |               74 |
+| **memstash-s3fifo** | **1070** | **139** | **85** | **62** |           **48** |
+| **memstash-clock** | **1072** | **138** | **84** | **58** |           **47** |
+| **memstash-wtinylfu** | **1063** | **140** | **84** | **55** |           **48** |
+| **memstash-sieve** | **1072** | **142** | **78** | **64** |           **48** |
+| otter-wtinylfu | 446 | 9.5 | 5.3 | 3.6 |              2.8 |
+| theine-wtinylfu | 287 | 10 | 5.8 | 4.3 |              3.6 |
+| ristretto | 169 | 28 | 18 | 12 |              9.2 |
+| bigcache | 108 | 34 | 27 | 24 |               28 |
+| freecache | 72 | 69 | 69 | 67 |               67 |
+| hashicorp-lru | 10 | 10 | 9.6 | 9.8 |              9.6 |
+| sync.Map\* | 563 | 156 | 110 | 86 |               75 |
 
-Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash stays within about 2× of the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **11–14× their throughput.**
+Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash stays within about 2× of the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **13–16× their throughput.**
 
 ### Hit ratio - higher is better
 
-The Size column is the cache's estimated memory footprint at the end of the one-hit-30% run (key + value bytes plus each implementation's own bookkeeping).
+The "Est. Size" column is the cache's estimated memory footprint at the end of the one-hit-30% run (key + value bytes plus each implementation's own bookkeeping).
 
-**Capacity = 500k items (~54% of the key space):**
+**Capacity = 500k items (~36% of the working set):**
 
-| Cache | Zipf | Zipf+scan | One-hit 30% | Cache Size |
-|---|--:|--:|--:|-----------:|
-| **memstash-s3fifo** | **75.00%** | **47.25%** | **53.10%** |      33 MB |
-| memstash-wtinylfu | 74.99% | 47.14% | 53.07% |      33 MB |
-| memstash-sieve | 74.99% | 47.01% | 52.99% |      34 MB |
-| memstash-clock | 74.94% | 46.56% | 52.71% |      29 MB |
-| theine-wtinylfu | 74.79% | 47.14% | 52.82% |      54 MB |
-| hashicorp-lru | 74.62% | 45.67% | 52.10% |      45 MB |
-| otter-wtinylfu | 74.14% | 46.35% | 52.13% |      41 MB |
-| freecache | 73.35% | 43.56% | 50.45% |      54 MB |
-| bigcache | 73.18% | 44.04% | 50.22% |      25 MB |
-| ristretto | 50.31% | 34.62% | 41.37% |      27 MB |
+| Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
+|---|--:|--:|--:|----------:|
+| **memstash-s3fifo** | **58.12%** | **34.65%** | **36.39%** |     29 MB |
+| memstash-wtinylfu | 57.96% | 34.78% | 36.40% |     29 MB |
+| memstash-sieve | 57.73% | 34.07% | 35.86% |     30 MB |
+| theine-wtinylfu | 57.28% | 34.52% | 35.72% |     54 MB |
+| memstash-clock | 57.04% | 33.01% | 34.63% |     25 MB |
+| otter-wtinylfu | 55.95% | 33.07% | 34.50% |     41 MB |
+| hashicorp-lru | 55.64% | 31.61% | 32.99% |     45 MB |
+| bigcache | 51.29% | 27.95% | 29.23% |     25 MB |
+| freecache | 51.01% | 28.32% | 29.57% |     54 MB |
+| ristretto | 11.57% | 9.01% | 8.82% |     26 MB |
 
-**Capacity = 100k items (~11% of the key space):**
+**Capacity = 100k items (~7% of the working set):**
 
-| Cache | Zipf | Zipf+scan | One-hit 30% | Cache Size |
+| Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
 |---|--:|--:|--:|--:|
-| memstash-wtinylfu | 67.13% | 43.56% | 49.58% | 7.3 MB |
-| **memstash-s3fifo** | **67.05%** | **43.49%** | **49.57%** | 7.3 MB |
-| theine-wtinylfu | 66.80% | 42.96% | 49.18% | 12 MB |
-| memstash-sieve | 66.12% | 42.84% | 48.68% | 7.2 MB |
-| otter-wtinylfu | 64.99% | 41.60% | 47.57% | 7.3 MB |
-| memstash-clock | 63.55% | 39.13% | 46.10% | 6.2 MB |
-| hashicorp-lru | 61.97% | 36.29% | 44.82% | 9.6 MB |
-| bigcache | 60.62% | 36.35% | 43.21% | 6.1 MB |
-| freecache | 58.56% | 36.29% | 42.08% | 18 MB |
-| ristretto | 35.53% | 24.93% | 30.88% | 4.7 MB |
+| memstash-wtinylfu | 41.83% | 26.30% | 27.06% | 6.8 MB |
+| theine-wtinylfu | 41.15% | 26.07% | 26.42% | 12 MB |
+| **memstash-s3fifo** | **41.10%** | **26.33%** | **27.18%** | 6.8 MB |
+| memstash-sieve | 39.62% | 25.20% | 25.14% | 6.7 MB |
+| otter-wtinylfu | 37.10% | 22.90% | 23.03% | 7.3 MB |
+| memstash-clock | 33.11% | 18.22% | 18.94% | 5.7 MB |
+| hashicorp-lru | 30.03% | 15.62% | 16.53% | 9.6 MB |
+| bigcache | 28.26% | 15.71% | 15.48% | 6.1 MB |
+| freecache | 25.65% | 14.51% | 13.95% | 19 MB |
+| ristretto | 3.84% | 2.72% | 2.82% | 4.7 MB |
 
-**Capacity = 10k items (~1% of the key space):**
+**Capacity = 10k items (~1% of the working set):**
 
-| Cache | Zipf | Zipf+scan | One-hit 30% | Cache Size |
+| Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
 |---|--:|--:|--:|--:|
-| memstash-wtinylfu | 51.96% | 33.87% | 40.74% | 912 kB |
-| **memstash-s3fifo** | **51.48%** | **34.66%** | **41.41%** | 912 kB |
-| theine-wtinylfu | 51.38% | 33.90% | 40.99% | 1.5 MB |
-| memstash-sieve | 51.06% | 34.17% | 40.55% | 894 kB |
-| otter-wtinylfu | 48.65% | 31.44% | 37.85% | 806 kB |
-| bigcache | 48.14% | 31.66% | 35.64% | 1.5 MB |
-| memstash-clock | 43.78% | 28.90% | 33.71% | 749 kB |
-| hashicorp-lru | 41.78% | 27.77% | 32.11% | 1.0 MB |
-| freecache | 40.16% | 26.79% | 30.58% | 6.6 MB |
-| ristretto | 18.24% | 12.56% | 16.79% | 807 kB |
+| theine-wtinylfu | 15.38% | 9.25% | 10.26% | 1.5 MB |
+| **memstash-s3fifo** | **14.78%** | **9.88%** | **10.29%** | 947 kB |
+| memstash-wtinylfu | 14.47% | 8.33% | 8.63% | 946 kB |
+| memstash-sieve | 13.51% | 8.83% | 8.82% | 929 kB |
+| otter-wtinylfu | 13.10% | 7.60% | 8.04% | 804 kB |
+| bigcache | 11.75% | 7.46% | 6.09% | 1.5 MB |
+| freecache | 6.00% | 3.93% | 3.03% | 7.1 MB |
+| memstash-clock | 5.34% | 3.50% | 2.62% | 781 kB |
+| hashicorp-lru | 5.01% | 3.30% | 2.49% | 1.0 MB |
+| ristretto | 0.48% | 0.28% | 0.31% | 807 kB |
 
 ### Heap footprint, lower is better
 
@@ -385,7 +386,7 @@ was converted from `uint64` to `[8]byte`.
 | Cache | Heap | B/entry |
 |---|--:|--:|
 | xsync.MapOf\* | 3.7 GiB | 39.24 |
-| **memstash-clock** | **4.1 GiB** | **43.89** |
+| **memstash-s3fifo** | **4.1 GiB** | **43.92** |
 | ristretto | 4.3 GiB | 46.40 |
 | freecache | 5.7 GiB | 61.53 |
 | otter-wtinylfu | 7.6 GiB | 81.98 |

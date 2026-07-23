@@ -19,50 +19,50 @@
 
   <!-- bars -->
   <g font-size="12.5" fill="#1f2328">
-    <!-- memstash-s3fifo 1010 -->
+    <!-- memstash-s3fifo 1070 -->
     <text x="168" y="92" text-anchor="end" font-weight="700">memstash-s3fifo</text>
-    <rect x="176" y="72" width="504" height="30" rx="3" fill="#10b981"/>
-    <text x="688" y="92" font-size="12" fill="#57606a" font-weight="700">1010</text>
+    <rect x="176" y="72" width="534" height="30" rx="3" fill="#10b981"/>
+    <text x="718" y="92" font-size="12" fill="#57606a" font-weight="700">1070</text>
 
-    <!-- memstash-clock 1007 -->
+    <!-- memstash-clock 1072 -->
     <text x="168" y="132" text-anchor="end" font-weight="700">memstash-clock</text>
-    <rect x="176" y="112" width="503" height="30" rx="3" fill="#10b981"/>
-    <text x="687" y="132" font-size="12" fill="#57606a" font-weight="700">1007</text>
+    <rect x="176" y="112" width="535" height="30" rx="3" fill="#10b981"/>
+    <text x="719" y="132" font-size="12" fill="#57606a" font-weight="700">1072</text>
 
-    <!-- memstash-wtinylfu 1007 -->
+    <!-- memstash-wtinylfu 1063 -->
     <text x="168" y="172" text-anchor="end" font-weight="700">memstash-wtinylfu</text>
-    <rect x="176" y="152" width="503" height="30" rx="3" fill="#10b981"/>
-    <text x="687" y="172" font-size="12" fill="#57606a" font-weight="700">1007</text>
+    <rect x="176" y="152" width="530" height="30" rx="3" fill="#10b981"/>
+    <text x="714" y="172" font-size="12" fill="#57606a" font-weight="700">1063</text>
 
-    <!-- memstash-sieve 998 -->
+    <!-- memstash-sieve 1072 -->
     <text x="168" y="212" text-anchor="end" font-weight="700">memstash-sieve</text>
-    <rect x="176" y="192" width="498" height="30" rx="3" fill="#10b981"/>
-    <text x="682" y="212" font-size="12" fill="#57606a" font-weight="700">998</text>
+    <rect x="176" y="192" width="535" height="30" rx="3" fill="#10b981"/>
+    <text x="719" y="212" font-size="12" fill="#57606a" font-weight="700">1072</text>
 
-    <!-- sync.Map 608 (baseline) -->
+    <!-- sync.Map 563 (baseline) -->
     <text x="168" y="252" text-anchor="end" fill="#57606a">sync.Map*</text>
-    <rect x="176" y="232" width="303" height="30" rx="3" fill="#cbd5e1"/>
-    <text x="487" y="252" font-size="12" fill="#8c959f">608</text>
+    <rect x="176" y="232" width="281" height="30" rx="3" fill="#cbd5e1"/>
+    <text x="465" y="252" font-size="12" fill="#8c959f">563</text>
 
-    <!-- otter-wtinylfu 469 -->
+    <!-- otter-wtinylfu 446 -->
     <text x="168" y="292" text-anchor="end">otter-wtinylfu</text>
-    <rect x="176" y="272" width="234" height="30" rx="3" fill="#64748b"/>
-    <text x="418" y="292" font-size="12" fill="#8c959f">469</text>
+    <rect x="176" y="272" width="223" height="30" rx="3" fill="#64748b"/>
+    <text x="407" y="292" font-size="12" fill="#8c959f">446</text>
 
-    <!-- theine-wtinylfu 294 -->
+    <!-- theine-wtinylfu 287 -->
     <text x="168" y="332" text-anchor="end">theine-wtinylfu</text>
-    <rect x="176" y="312" width="147" height="30" rx="3" fill="#64748b"/>
-    <text x="331" y="332" font-size="12" fill="#8c959f">294</text>
+    <rect x="176" y="312" width="143" height="30" rx="3" fill="#64748b"/>
+    <text x="327" y="332" font-size="12" fill="#8c959f">287</text>
 
-    <!-- ristretto 175 -->
+    <!-- ristretto 169 -->
     <text x="168" y="372" text-anchor="end">ristretto</text>
-    <rect x="176" y="352" width="87" height="30" rx="3" fill="#64748b"/>
-    <text x="271" y="372" font-size="12" fill="#8c959f">175</text>
+    <rect x="176" y="352" width="84" height="30" rx="3" fill="#64748b"/>
+    <text x="268" y="372" font-size="12" fill="#8c959f">169</text>
 
-    <!-- bigcache 114 -->
+    <!-- bigcache 108 -->
     <text x="168" y="412" text-anchor="end">bigcache</text>
-    <rect x="176" y="392" width="57" height="30" rx="3" fill="#64748b"/>
-    <text x="241" y="412" font-size="12" fill="#8c959f">114</text>
+    <rect x="176" y="392" width="54" height="30" rx="3" fill="#64748b"/>
+    <text x="238" y="412" font-size="12" fill="#8c959f">108</text>
 
     <!-- freecache 72 -->
     <text x="168" y="452" text-anchor="end">freecache</text>

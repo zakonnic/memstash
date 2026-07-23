@@ -2,13 +2,14 @@ goos: windows
 goarch: amd64
 pkg: memstash-bench
 cpu: AMD Ryzen 9 9900X 12-Core Processor
-BenchmarkMemoryFootprintMemstash/100,000,000-entries-24                        1        15550046200 ns/op               42.88 B/entry-estimate          43.89 B/entry-heap            4184 MiB-heap-total                2.743 x-payload
+BenchmarkMemoryFootprintMemstash/100,000,000-entries-24                        1        19420096900 ns/op               42.91 B/entry-estimate          43.92 B/entry-heap            4187 MiB-heap-total                2.745 x-payload
 --- BENCH: BenchmarkMemoryFootprintMemstash/100,000,000-entries-24
-    memory_test.go:76: capacity=100000000 live=99979361 heap=4.1 GiB size-estimate=4.0 GiB
-BenchmarkMemoryFootprintMemstash/GetFromMemory/hot-24                   1000000000               5.090 ns/op           196.5 Mops/s             98.08 hit%
-BenchmarkMemoryFootprintMemstash/GetFromMemory/full-24                  1000000000              15.87 ns/op             63.00 Mops/s            99.98 hit%
-BenchmarkMemoryFootprintMemstash/Set/hot-24                             1000000000              21.42 ns/op             46.68 Mops/s
-BenchmarkMemoryFootprintMemstash/Set/full-24                            1000000000              34.81 ns/op             28.73 Mops/s
+    memory_test.go:78: capacity=100000000 live=99970142 heap=4.1 GiB size-estimate=4.0 GiB
+BenchmarkMemoryFootprintMemstash/GetFromMemory/hot-24                   1000000000               1.981 ns/op           504.8 Mops/s            100.0 hit%
+BenchmarkMemoryFootprintMemstash/GetFromMemory/full-24                  1000000000              11.99 ns/op             83.42 Mops/s            99.98 hit%
+BenchmarkMemoryFootprintMemstash/BatchGetFromMemory/full-24             1000000000               6.772 ns/op           147.7 Mops/s             99.98 hit%
+BenchmarkMemoryFootprintMemstash/Set/hot-24                             1000000000              17.33 ns/op             57.71 Mops/s
+BenchmarkMemoryFootprintMemstash/Set/full-24                            1000000000              33.62 ns/op             29.74 Mops/s
 BenchmarkMemoryFootprintOtter/100,000,000-entries-24                   1        29191946700 ns/op               81.98 B/entry-heap            7819 MiB-heap-total                5.124 x-payload
 --- BENCH: BenchmarkMemoryFootprintOtter/100,000,000-entries-24
     memory_others_test.go:252: capacity=100000000 live=100000000 heap=7.6 GiB size-estimate=0 B
