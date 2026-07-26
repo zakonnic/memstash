@@ -25,6 +25,21 @@ const (
 	// ItemChanceMask isolates the meta word's reference counter: non-zero means the item was read since the counter
 	// was last cleared.
 	ItemChanceMask = itemstore.ChanceMask
+
+	// --- DeletionCause ---
+
+	// CauseInvalidation is an explicit Delete or BatchDelete.
+	CauseInvalidation DeletionCause = iota
+	// CauseReplacement is a Set over a live key; the handler receives the value that was replaced.
+	CauseReplacement
+	// CauseExpiration is an elapsed TTL. It is reported when the item is actually reclaimed - by the read that finds
+	// it expired, or by the eviction pass that reaches it - not at the instant the deadline passes.
+	CauseExpiration
+	// CauseEviction is capacity pressure: the policy picked this item as its victim.
+	CauseEviction
+	// CauseOverflow is a Set whose item alone outweighs the whole shard: the new value is not stored, and the value
+	// already under that key is dropped so it stops serving reads.
+	CauseOverflow
 )
 
 // ItemExpired reports whether the meta word's TTL has elapsed at the given coarse clock value (the nowOff passed to
@@ -60,3 +75,50 @@ type EvictionPolicy[K comparable, V any] interface {
 // shardCap is the shard's capacity in weight units. The cache calls it once per shard, so per-shard state is
 // naturally private.
 type EvictionPolicyFactory[K comparable, V any] func(items Items[K, V], shardCap int64) EvictionPolicy[K, V]
+
+// DeletionCause tells why an item left the first level.
+type DeletionCause uint8
+
+// Automatic reports whether the cache removed the item on its own rather than on an explicit Delete or an overwriting
+// Set - the filter a handler needs when only the cache's own decisions matter.
+func (c DeletionCause) Automatic() bool {
+	return c == CauseExpiration || c == CauseEviction || c == CauseOverflow
+}
+
+func (c DeletionCause) String() string {
+	switch c {
+	case CauseInvalidation:
+		return "invalidation"
+	case CauseReplacement:
+		return "replacement"
+	case CauseExpiration:
+		return "expiration"
+	case CauseEviction:
+		return "eviction"
+	case CauseOverflow:
+		return "overflow"
+	}
+	return "unknown"
+}
+
+// deletion is one recorded removal, buffered under the shard mutex and delivered once it is released.
+type deletion[K comparable, V any] struct {
+	key   K
+	value V
+	cause DeletionCause
+}
+
+// addDeletion records a removal for delivery after the shard mutex is released. Neither this nor callOnDeletion is
+// inlinable, so call sites check onDeletion themselves - that keeps a cache without a handler free of the call.
+func (c *Cache[K, V]) addDeletion(deletions *[]deletion[K, V], key K, value V, cause DeletionCause) {
+	*deletions = append(*deletions, deletion[K, V]{key: key, value: value, cause: cause})
+}
+
+// callOnDeletion runs the handler for the recorded removals, in the order the items died. Must be called with no
+// shard mutex held: a handler may take any amount of time and may call back into the cache.
+func (c *Cache[K, V]) callOnDeletion(deletions []deletion[K, V]) {
+	for i := range deletions {
+		d := &deletions[i]
+		c.onDeletion(d.key, d.value, d.cause)
+	}
+}

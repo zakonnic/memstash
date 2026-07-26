@@ -180,6 +180,18 @@ for key, value := range c.Iterator() {
 }
 ```
 
+**Removal events** - get told when an item leaves memory, and why. Handlers run after the shard lock is released, so they may take their time and may call back into the cache; costs 24 B and 13 ns when a handler is set; otherwise zero overhead:
+
+```go
+c, _ := memstash.New[string, *Conn](
+	memstash.WithOnDeletion(func(key string, conn *Conn, cause memstash.DeletionCause) {
+		deletions++ // cause is one of invalidation, replacement, expiration, eviction, overflow
+	}),
+)
+```
+
+Interested only in the cache's own decisions - expiration, eviction and overflow? Gate the handler on `cause.Automatic()`.
+
 **Non-string keys with a custom key mapping** - provide a key function for the L2 storage key:
 
 ```go

@@ -216,11 +216,15 @@ func (c *Cache[K, V]) enqueueL2(write l2Write[K, V]) {
 // which always coalesces them into BatchDelete batches regardless of WriteBackBatching. An error can come only
 // from the synchronous batch delete.
 func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	for _, key := range keys {
 		sh, keyHash := c.shardAndHash(key)
 		sh.mu.Lock()
-		c.deleteLocked(sh, keyHash, key)
+		c.deleteLocked(sh, keyHash, key, CauseInvalidation, &deletions)
 		sh.mu.Unlock()
+	}
+	if len(deletions) > 0 {
+		c.callOnDeletion(deletions)
 	}
 	c.stats.addDeletes(int64(len(keys)))
 	switch c.l2WritePolicy {

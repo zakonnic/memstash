@@ -200,6 +200,13 @@ func WithOnL2Error[K comparable, V any](handler func(key K, err error)) Option {
 	}}
 }
 
+// WithOnDeletion sets Config.OnDeletion: the handler for every item leaving the first level.
+func WithOnDeletion[K comparable, V any](handler func(key K, value V, cause DeletionCause)) Option {
+	return Option{ApplyTyped: func(target any) error {
+		return applyToConfig(target, func(cfg *Config[K, V]) { cfg.OnDeletion = handler })
+	}}
+}
+
 // WithStats sets Config.StatsEnabled: turns on the operation counters returned by Cache.Stats(). Off by default.
 func WithStats() Option {
 	return Option{ApplyField: func(f *FieldOverrides) {

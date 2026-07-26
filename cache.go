@@ -58,7 +58,10 @@ type Cache[K comparable, V any] struct {
 
 	shards    []shard[K, V]
 	shardMask uint32
-	seed      maphash.Seed
+	// onDeletion sits with the fields the write path already touches: every removal site tests it, so a cache without
+	// a handler pays one predicted branch off a hot cache line.
+	onDeletion func(key K, value V, cause DeletionCause)
+	seed       maphash.Seed
 
 	// Coarse clock for cheap TTL checks: nowOff is the time since epoch in expireUnit steps, refreshed by a background
 	// ticker (started only when TTL > 0). Offsets are 18-bit values on a wrapping scale, so the unit adapts to the
@@ -156,6 +159,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		l2WritePolicy:     cfg.WritePolicy,
 		writeBackBatching: cfg.WriteBackBatching,
 		onL2Error:         cfg.OnL2Error,
+		onDeletion:        cfg.OnDeletion,
 		flights:           xsync.NewMapOf[K, *flightCall[V]](),
 		stats:             newStats(cfg.StatsEnabled),
 		stop:              make(chan struct{}),
@@ -364,11 +368,15 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 func (c *Cache[K, V]) setMemory(key K, value V) {
 	weight := c.rawCost(key, value)
 	sh, keyHash := c.shardAndHash(key)
+	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	if weight > sh.cap {
 		// Does not fit at all; drop the older value too so it stops serving reads.
 		sh.mu.Lock()
-		c.deleteLocked(sh, keyHash, key)
+		c.deleteLocked(sh, keyHash, key, CauseOverflow, &deletions)
 		sh.mu.Unlock()
+		if len(deletions) > 0 {
+			c.callOnDeletion(deletions)
+		}
 		return
 	}
 
@@ -410,6 +418,9 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 		}
 		// Overwrite in place; the old value is read for the weight delta before the store lands.
 		weightDelta = weight - c.rawCost(key, entry.Value)
+		if c.onDeletion != nil {
+			c.addDeletion(&deletions, key, entry.Value, CauseReplacement)
+		}
 		item.SetValue(value)
 		if c.ttlOff != 0 {
 			item.RefreshExpire(c.expireOffset())
@@ -417,9 +428,12 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 		break
 	}
 	if sh.weight.Add(weightDelta) > sh.cap {
-		c.evictShard(sh)
+		c.evictShard(sh, &deletions)
 	}
 	sh.mu.Unlock()
+	if len(deletions) > 0 {
+		c.callOnDeletion(deletions)
+	}
 }
 
 // maybeRebuild replaces the shard's table when it passes 3/4 occupancy (tombstones included): doubled when live
@@ -452,7 +466,7 @@ func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *itemstore.FlatHashMap[K, 
 // evictShard evicts items from the shard while its weight exceeds the capacity. The policy only picks and dequeues
 // the victim; the alive -> dead transition (and so the weight accounting) happens here - for items that died earlier
 // (Delete, lazy TTL removal) Kill reports false and everything is already accounted. Called under the shard mutex.
-func (c *Cache[K, V]) evictShard(sh *shard[K, V]) {
+func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 	nowOff := c.nowOff.Load()
 	storage := sh.items.GetStorage()
 	for sh.weight.Load() > sh.cap {
@@ -467,6 +481,14 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V]) {
 			storage.ForgetDisplaced(storage.Home(maphash.Comparable(c.seed, entry.Key)), victimIdx)
 			sh.live--
 			sh.dirty++
+			if c.onDeletion != nil {
+				// The policy hands over expired items too; the meta word says which of the two it was.
+				cause := CauseEviction
+				if itemstore.Expired(item.Load(), nowOff) {
+					cause = CauseExpiration
+				}
+				c.addDeletion(deletions, entry.Key, entry.Value, cause)
+			}
 		}
 		item.MakeFree() // the queue node is gone: the slot may serve a new key
 	}
@@ -479,17 +501,25 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K, idx uint32) 
 	foundIdx, item, ok := c.findSlot(sh, h, key)
 	// The idx match and the Expired re-check reject the races: a re-claimed slot or a refreshed TTL means the item
 	// survives.
+	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	if ok && foundIdx == idx && itemstore.Expired(item.Load(), c.nowOff.Load()) {
-		c.killAt(sh, h, foundIdx, item)
+		c.killAt(sh, h, foundIdx, item, CauseExpiration, &deletions)
 	}
 	sh.mu.Unlock()
+	if len(deletions) > 0 {
+		c.callOnDeletion(deletions)
+	}
 }
 
 // killAt kills the item in its slot and subtracts its weight; the slot stays a non-reusable tombstone until
 // its queue node is swept. Called under the shard mutex.
-func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *itemstore.Item[K, V]) {
+func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *itemstore.Item[K, V],
+	cause DeletionCause, deletions *[]deletion[K, V]) {
 	entry := item.Entry()
 	sh.weight.Add(-c.rawCost(entry.Key, entry.Value))
+	if c.onDeletion != nil {
+		c.addDeletion(deletions, entry.Key, entry.Value, cause)
+	}
 	item.Kill()
 	storage := sh.items.GetStorage()
 	storage.ForgetDisplaced(storage.Home(keyHash), idx)
@@ -542,9 +572,10 @@ func (c *Cache[K, V]) noteDead(sh *shard[K, V]) {
 
 // deleteLocked tombs the key's table slot, kills its item and subtracts its weight. Called under the shard
 // mutex; a missing key is a no-op.
-func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K) {
+func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K, cause DeletionCause,
+	deletions *[]deletion[K, V]) {
 	if idx, item, ok := c.findSlot(sh, keyHash, key); ok {
-		c.killAt(sh, keyHash, idx, item)
+		c.killAt(sh, keyHash, idx, item, cause, deletions)
 	}
 }
 
@@ -552,9 +583,13 @@ func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K) {
 // held is reclaimed on the next eviction pass or tombstone sweep.
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	sh, keyHash := c.shardAndHash(key)
+	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	sh.mu.Lock()
-	c.deleteLocked(sh, keyHash, key)
+	c.deleteLocked(sh, keyHash, key, CauseInvalidation, &deletions)
 	sh.mu.Unlock()
+	if len(deletions) > 0 {
+		c.callOnDeletion(deletions)
+	}
 	c.stats.addDeletes(1)
 
 	if c.l2WritePolicy != WriteDisabled {

@@ -79,6 +79,12 @@ type Config[K comparable, V any] struct {
 	// (write-back, the write after a load in GetOrLoad, the L2Cache read inside GetOrLoad before the loader runs).
 	OnL2Error func(key K, err error)
 
+	// OnDeletion is an optional handler called once for every item that leaves the first level, whatever the cause,
+	// with the value the item held. It runs after the shard mutex is released, in the order the items died, on the
+	// goroutine whose operation removed them - so a slow handler slows that caller down, not the whole shard.
+	// Filter with DeletionCause.Automatic to see only the removals the cache decided on its own.
+	OnDeletion func(key K, value V, cause DeletionCause)
+
 	// StatsEnabled turns on the operation counters returned by Stats(). Off by default - adds 0.6 ns overhead.
 	StatsEnabled bool
 }
