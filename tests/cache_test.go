@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zakonnic/memstash"
-	"github.com/zakonnic/memstash/internal/itemstate"
+	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
 // policies is the eviction-policy axis shared by the table-driven tests.
@@ -288,13 +288,13 @@ func TestNewValidation(t *testing.T) {
 		},
 		{
 			name:    "capacity beyond the 32-bit pool index space",
-			opts:    []memstash.Option{memstash.WithMemoryCapacity(itemstate.MaxRecords + 1)},
+			opts:    []memstash.Option{memstash.WithMemoryCapacity(itemstore.MaxRecords + 1)},
 			wantErr: memstash.ErrCapacityTooLarge,
 		},
 		{
 			name: "capacity beyond the 32-bit pool index space is not checked when a cost function is set",
 			opts: []memstash.Option{
-				memstash.WithMemoryCapacity(itemstate.MaxRecords + 1),
+				memstash.WithMemoryCapacity(itemstore.MaxRecords + 1),
 				memstash.WithCostFunc(func(string, string) uint32 { return 1 }),
 			},
 		},

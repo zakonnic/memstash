@@ -222,7 +222,7 @@ c, err := rueidis_adapter.NewCache[int, Point](client, pointCodec{},
 
 ```go
 c, err := memstash.New[string, User](
-	memstash.WithCustomEvictionPolicy(func(states memstash.ItemStates[string, User], shardCap int64) memstash.EvictionPolicy[string, User] {
+	memstash.WithCustomEvictionPolicy(func(items memstash.Items[string, User], shardCap int64) memstash.EvictionPolicy[string, User] {
 		return newMyPolicy(states, shardCap) // states resolves QNode indices to item records
 	}),
 )

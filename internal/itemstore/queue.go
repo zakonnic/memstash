@@ -1,17 +1,12 @@
-package itemstate
+package itemstore
 
 import "unsafe"
-
-// poolChunkSize is the number of state records in a single pool chunk. Sized so the registry's chunk directory stays
-// small enough to live in L1/L2 - the directory load sits on the Get path's dependent-load chain between the two
-// unavoidable cache misses (hash table slot, state record), so it must not become a third one.
-const poolChunkSize = 512
 
 // queueChunkSize is the number of nodes in a single queue chunk: 127 8-byte nodes plus the next pointer make the
 // chunk exactly 1 KiB.
 const queueChunkSize = 127
 
-// QNode is an eviction-queue element: the pool index of a state record plus the item's weight when enqueued (the
+// QNode is an eviction-queue element: the slot index of a state record plus the item's weight when enqueued (the
 // index instead of a pointer keeps the node at 8 bytes). The weight lets S3-FIFO balance its small queue without
 // touching the record; it may drift after an overwrite, but only queue selection depends on it - the global
 // accounting is recomputed from the live value.
@@ -66,14 +61,14 @@ func (q *EvictQueue) Push(item QNode) {
 
 // SweepQueue rotates the queue once, handing the nodes of dead items to onDrop and pushing live ones back, so their
 // FIFO order and reference counters are preserved. It reclaims in bulk the tombstones that eviction would otherwise
-// only reach under capacity pressure. The pool resolves node indices.
-func SweepQueue[K comparable, V any](q *EvictQueue, pool *Pool[K, V], onDrop func(QNode)) {
+// only reach under capacity pressure. The table resolves node indices.
+func SweepQueue[K comparable, V any](q *EvictQueue, storage *FlatHashMap[K, V], onDrop func(QNode)) {
 	for n := q.size; n > 0; n-- {
 		node, ok := q.Pop()
 		if !ok {
 			return
 		}
-		if pool.At(node.Idx).Load()&Dead != 0 {
+		if storage.At(node.Idx).Load()&Dead != 0 {
 			onDrop(node)
 		} else {
 			q.Push(node)
@@ -81,9 +76,24 @@ func SweepQueue[K comparable, V any](q *EvictQueue, pool *Pool[K, V], onDrop fun
 	}
 }
 
-// Range calls f for every queued node in FIFO order without disturbing the queue. Every claimed record has exactly
-// one node across its shard's queues, so ranging a policy's queues visits each record once - which is what table
-// rebuilds rely on.
+// RebuildQueue re-links a queue after a table swap: remap turns an old slot index into the new one, or reports the
+// node dead - those drop out, going through onDrop when it is not nil.
+func RebuildQueue(q *EvictQueue, remap func(oldIdx uint32) (uint32, bool), onDrop func(QNode)) {
+	for n := q.size; n > 0; n-- {
+		node, ok := q.Pop()
+		if !ok {
+			return
+		}
+		if newIdx, live := remap(node.Idx); live {
+			node.Idx = newIdx
+			q.Push(node)
+		} else if onDrop != nil {
+			onDrop(node)
+		}
+	}
+}
+
+// Range calls f for every queued node in FIFO order without disturbing the queue.
 func (q *EvictQueue) Range(f func(QNode)) {
 	start := q.headIdx
 	for chunk := q.head; chunk != nil; chunk = chunk.next {

@@ -3,7 +3,7 @@ package eviction
 import (
 	"unsafe"
 
-	"github.com/zakonnic/memstash/internal/itemstate"
+	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
 // noLink marks an absent list neighbor / an unset hand.
@@ -12,7 +12,7 @@ const noLink int32 = -1
 // sieveNode is one element of the SIEVE list: the queue node plus doubly-linked neighbors. prev points toward the
 // newer end (head), next toward the older end (tail); next doubles as the freelist link for removed slots.
 type sieveNode struct {
-	item       itemstate.QNode
+	item       itemstore.QNode
 	prev, next int32
 }
 
@@ -25,7 +25,7 @@ type sieveNode struct {
 // The list lives in one slice of 16-byte nodes with an intrusive freelist, so eviction's mid-list removal is O(1)
 // and allocations amortize to one slice growth per capacity doubling.
 type SievePolicy[K comparable, V any] struct {
-	pool  *itemstate.Pool[K, V]
+	slots *itemstore.StorageProxy[K, V]
 	nodes []sieveNode
 	free  int32 // freelist head through sieveNode.next; noLink when empty
 	head  int32 // newest item; noLink when the list is empty
@@ -35,11 +35,11 @@ type SievePolicy[K comparable, V any] struct {
 }
 
 // NewSieve creates a SIEVE policy.
-func NewSieve[K comparable, V any](pool *itemstate.Pool[K, V]) *SievePolicy[K, V] {
-	return &SievePolicy[K, V]{pool: pool, free: noLink, head: noLink, tail: noLink, hand: noLink}
+func NewSieve[K comparable, V any](slots *itemstore.StorageProxy[K, V]) *SievePolicy[K, V] {
+	return &SievePolicy[K, V]{slots: slots, free: noLink, head: noLink, tail: noLink, hand: noLink}
 }
 
-func (p *SievePolicy[K, V]) Add(node itemstate.QNode) {
+func (p *SievePolicy[K, V]) Add(node itemstore.QNode) {
 	cur := p.alloc()
 	p.nodes[cur] = sieveNode{item: node, prev: noLink, next: p.head}
 	if p.head != noLink {
@@ -65,19 +65,15 @@ func (p *SievePolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 			cur = p.tail // wrap: resume from the oldest item
 		}
 		node := &p.nodes[cur]
-		state := p.pool.At(node.item.Idx)
-		metaWord := state.Load()
+		item := p.slots.At(node.item.Idx)
+		metaWord := item.Load()
 		switch {
-		case metaWord&itemstate.Dead != 0:
-			return p.removeAt(cur, node), true // died earlier (Delete/TTL); weight already subtracted
-		case itemstate.Expired(metaWord, nowOff):
-			state.Kill()
+		case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
 			return p.removeAt(cur, node), true
-		case metaWord&itemstate.ChanceMask != 0:
-			state.ResetChances()
+		case metaWord&itemstore.ChanceMask != 0:
+			item.ResetChances()
 			p.hand = node.prev // survived in place; the hand moves on toward the newer end
 		default:
-			state.Kill()
 			return p.removeAt(cur, node), true
 		}
 	}
@@ -93,10 +89,11 @@ func (p *SievePolicy[K, V]) removeAt(cur int32, node *sieveNode) uint32 {
 }
 
 func (p *SievePolicy[K, V]) Sweep(release func(idx uint32)) {
+	storage := p.slots.GetStorage()
 	for cur := p.head; cur != noLink; {
 		node := &p.nodes[cur]
 		next := node.next
-		if p.pool.At(node.item.Idx).Load()&itemstate.Dead != 0 {
+		if storage.At(node.item.Idx).Load()&itemstore.Dead != 0 {
 			if p.hand == cur {
 				// The walk goes head to tail, so prev nodes are already swept: the hand lands on a live node.
 				p.hand = node.prev
@@ -108,11 +105,20 @@ func (p *SievePolicy[K, V]) Sweep(release func(idx uint32)) {
 	}
 }
 
-func (p *SievePolicy[K, V]) Range(f func(itemstate.QNode)) {
-	// Oldest first, like the queue-based policies: table rebuilds insert in Range order, so ranging the long-lived
-	// (usually hot) items first gives them the short probe chains.
-	for cur := p.tail; cur != noLink; cur = p.nodes[cur].prev {
-		f(p.nodes[cur].item)
+func (p *SievePolicy[K, V]) Rebuild(remap func(oldIdx uint32) (uint32, bool)) {
+	// Oldest first: rebuilds insert in this order, so the long-lived (usually hot) items get the short probe chains.
+	for cur := p.tail; cur != noLink; {
+		node := &p.nodes[cur]
+		prev := node.prev
+		if newIdx, live := remap(node.item.Idx); live {
+			node.item.Idx = newIdx
+		} else {
+			if p.hand == cur {
+				p.hand = prev
+			}
+			p.unlink(cur, node)
+		}
+		cur = prev
 	}
 }
 
@@ -139,7 +145,7 @@ func (p *SievePolicy[K, V]) unlink(cur int32, node *sieveNode) {
 	} else {
 		p.tail = node.prev
 	}
-	node.item = itemstate.QNode{}
+	node.item = itemstore.QNode{}
 	node.next = p.free
 	p.free = cur
 	p.size--

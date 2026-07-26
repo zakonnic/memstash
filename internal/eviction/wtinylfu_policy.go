@@ -5,7 +5,7 @@ import (
 	"math/bits"
 	"unsafe"
 
-	"github.com/zakonnic/memstash/internal/itemstate"
+	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
 // WTinyLFUPolicy is W-TinyLFU adapted to lock-free reads: a small admission window (~1% of the shard capacity) in
@@ -19,10 +19,10 @@ import (
 // untouched one must beat the frequency estimate of main's next victim, otherwise it is evicted on the spot and
 // main stays intact (scan resistance).
 type WTinyLFUPolicy[K comparable, V any] struct {
-	pool   *itemstate.Pool[K, V]
+	items  *itemstore.StorageProxy[K, V]
 	seed   maphash.Seed
-	window itemstate.EvictQueue
-	main   itemstate.EvictQueue
+	window itemstore.EvictQueue
+	main   itemstore.EvictQueue
 	sketch freqSketch
 
 	windowWeight int64 // total weight of nodes in window (including tombstones not yet reclaimed)
@@ -31,13 +31,13 @@ type WTinyLFUPolicy[K comparable, V any] struct {
 
 // NewWTinyLFU creates a W-TinyLFU policy for a shard with the given capacity; sketchKeys sizes the frequency sketch
 // (in keys, like the S3-FIFO ghost size).
-func NewWTinyLFU[K comparable, V any](pool *itemstate.Pool[K, V], shardCap int64, sketchKeys int) *WTinyLFUPolicy[K, V] {
+func NewWTinyLFU[K comparable, V any](items *itemstore.StorageProxy[K, V], shardCap int64, sketchKeys int) *WTinyLFUPolicy[K, V] {
 	windowCap := shardCap / 100
 	if windowCap < 1 {
 		windowCap = 1
 	}
 	return &WTinyLFUPolicy[K, V]{
-		pool:      pool,
+		items:     items,
 		seed:      maphash.MakeSeed(),
 		sketch:    newFreqSketch(sketchKeys),
 		windowCap: windowCap,
@@ -46,8 +46,8 @@ func NewWTinyLFU[K comparable, V any](pool *itemstate.Pool[K, V], shardCap int64
 
 func (p *WTinyLFUPolicy[K, V]) keyHash(key K) uint64 { return maphash.Comparable(p.seed, key) }
 
-func (p *WTinyLFUPolicy[K, V]) Add(node itemstate.QNode) {
-	p.sketch.increment(p.keyHash(p.pool.At(node.Idx).Entry().Key))
+func (p *WTinyLFUPolicy[K, V]) Add(node itemstore.QNode) {
+	p.sketch.increment(p.keyHash(p.items.At(node.Idx).Entry().Key))
 	p.window.Push(node)
 	p.windowWeight += int64(node.Cost)
 }
@@ -59,17 +59,18 @@ func (p *WTinyLFUPolicy[K, V]) Bytes() int64 {
 }
 
 func (p *WTinyLFUPolicy[K, V]) Sweep(release func(idx uint32)) {
+	storage := p.items.GetStorage()
 	// Dead nodes leaving window give their weight back, as in evictWindowOnce.
-	itemstate.SweepQueue(&p.window, p.pool, func(node itemstate.QNode) {
+	itemstore.SweepQueue(&p.window, storage, func(node itemstore.QNode) {
 		p.windowWeight -= int64(node.Cost)
 		release(node.Idx)
 	})
-	itemstate.SweepQueue(&p.main, p.pool, func(node itemstate.QNode) { release(node.Idx) })
+	itemstore.SweepQueue(&p.main, storage, func(node itemstore.QNode) { release(node.Idx) })
 }
 
-func (p *WTinyLFUPolicy[K, V]) Range(f func(itemstate.QNode)) {
-	p.window.Range(f)
-	p.main.Range(f)
+func (p *WTinyLFUPolicy[K, V]) Rebuild(remap func(oldIdx uint32) (uint32, bool)) {
+	itemstore.RebuildQueue(&p.window, remap, func(node itemstore.QNode) { p.windowWeight -= int64(node.Cost) })
+	itemstore.RebuildQueue(&p.main, remap, nil)
 }
 
 func (p *WTinyLFUPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
@@ -105,26 +106,22 @@ func (p *WTinyLFUPolicy[K, V]) evictWindowOnce(nowOff uint32) (uint32, bool) {
 	}
 	p.windowWeight -= int64(candidate.Cost)
 
-	state := p.pool.At(candidate.Idx)
-	metaWord := state.Load()
+	item := p.items.At(candidate.Idx)
+	metaWord := item.Load()
 	switch {
-	case metaWord&itemstate.Dead != 0:
+	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
 		return candidate.Idx, true
-	case itemstate.Expired(metaWord, nowOff):
-		state.Kill()
-		return candidate.Idx, true
-	case metaWord&itemstate.ChanceMask != 0:
+	case metaWord&itemstore.ChanceMask != 0:
 		// Touched while in the window: record the reuse and admit without consulting the filter.
-		p.sketch.increment(p.keyHash(state.Entry().Key))
-		state.ResetChances()
+		p.sketch.increment(p.keyHash(item.Entry().Key))
+		item.ResetChances()
 		p.main.Push(candidate)
 		return 0, false
 	default:
-		if p.admit(state.Entry().Key) {
+		if p.admit(item.Entry().Key) {
 			p.main.Push(candidate)
 			return 0, false
 		}
-		state.Kill()
 		return candidate.Idx, true
 	}
 }
@@ -136,8 +133,8 @@ func (p *WTinyLFUPolicy[K, V]) admit(candidateKey K) bool {
 	if !ok {
 		return true
 	}
-	victimState := p.pool.At(victim.Idx)
-	if victimState.Load()&itemstate.Dead != 0 {
+	victimState := p.items.At(victim.Idx)
+	if victimState.Load()&itemstore.Dead != 0 {
 		return true
 	}
 	return p.sketch.estimate(p.keyHash(candidateKey)) > p.sketch.estimate(p.keyHash(victimState.Entry().Key))
@@ -149,21 +146,17 @@ func (p *WTinyLFUPolicy[K, V]) evictMainOnce(nowOff uint32) (uint32, bool) {
 	if !ok {
 		return 0, false
 	}
-	state := p.pool.At(candidate.Idx)
-	metaWord := state.Load()
+	item := p.items.At(candidate.Idx)
+	metaWord := item.Load()
 	switch {
-	case metaWord&itemstate.Dead != 0:
+	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
 		return candidate.Idx, true
-	case itemstate.Expired(metaWord, nowOff):
-		state.Kill()
-		return candidate.Idx, true
-	case metaWord&itemstate.ChanceMask != 0:
-		state.RevokeChance(metaWord)
-		p.sketch.increment(p.keyHash(state.Entry().Key))
+	case metaWord&itemstore.ChanceMask != 0:
+		item.RevokeChance(metaWord)
+		p.sketch.increment(p.keyHash(item.Entry().Key))
 		p.main.Push(candidate)
 		return 0, false
 	default:
-		state.Kill()
 		return candidate.Idx, true
 	}
 }

@@ -105,6 +105,30 @@ func BenchmarkGet(b *testing.B) {
 	}
 }
 
+// BenchmarkGetHighEviction reads a cache warmed far past its capacity: eviction leaves the table full of tombstones,
+// so most reads miss and walk churned probe chains.
+func BenchmarkGetHighEviction(b *testing.B) {
+	const keySpace = speedCapacity * 8
+	keys := zipfSeq(seqLen, keySpace-1)
+	for _, c := range speedContenders() {
+		warmUp(c, keySpace)
+		b.Run(c.Name(), func(b *testing.B) {
+			b.ReportAllocs()
+			b.RunParallel(func(pb *testing.PB) {
+				i := rand.Int()
+				local := uint64(0)
+				for pb.Next() {
+					v, _ := c.Get(keys[i&seqMask])
+					local += v
+					i++
+				}
+				sinkU64.Store(local)
+			})
+		})
+		c.Close()
+	}
+}
+
 // BenchmarkSet writes into a key space twice the capacity: eviction runs constantly in the evicting caches.
 func BenchmarkSet(b *testing.B) {
 	const setSpace = speedCapacity * 2

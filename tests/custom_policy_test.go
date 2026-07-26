@@ -13,9 +13,9 @@ import (
 // fifoPolicy is a minimal custom eviction policy built purely on the public contract: plain FIFO, no second chances.
 // It doubles as the compile-time proof that memstash.EvictionPolicy is implementable outside the module.
 type fifoPolicy[K comparable, V any] struct {
-	states memstash.ItemStates[K, V]
-	nodes  []memstash.QNode
-	head   int
+	items memstash.Items[K, V]
+	nodes []memstash.QNode
+	head  int
 }
 
 var _ memstash.EvictionPolicy[string, int] = (*fifoPolicy[string, int])(nil)
@@ -27,15 +27,10 @@ func (p *fifoPolicy[K, V]) Len() int { return len(p.nodes) - p.head }
 func (p *fifoPolicy[K, V]) Bytes() int64 { return int64(cap(p.nodes) * 8) }
 
 func (p *fifoPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
-	for p.head < len(p.nodes) {
+	if p.head < len(p.nodes) {
 		node := p.nodes[p.head]
 		p.head++
-		state := p.states.At(node.Idx)
-		if state.Load()&memstash.ItemDead != 0 {
-			return node.Idx, true // died earlier: just reclaim
-		}
-		state.Kill()
-		return node.Idx, true
+		return node.Idx, true // the cache kills and accounts the victim
 	}
 	return 0, false
 }
@@ -43,7 +38,7 @@ func (p *fifoPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 func (p *fifoPolicy[K, V]) Sweep(release func(idx uint32)) {
 	kept := p.nodes[:0]
 	for _, node := range p.nodes[p.head:] {
-		if p.states.At(node.Idx).Load()&memstash.ItemDead != 0 {
+		if p.items.At(node.Idx).Load()&memstash.ItemDead != 0 {
 			release(node.Idx)
 		} else {
 			kept = append(kept, node)
@@ -52,14 +47,19 @@ func (p *fifoPolicy[K, V]) Sweep(release func(idx uint32)) {
 	p.nodes, p.head = kept, 0
 }
 
-func (p *fifoPolicy[K, V]) Range(f func(memstash.QNode)) {
+func (p *fifoPolicy[K, V]) Rebuild(remap func(oldIdx uint32) (uint32, bool)) {
+	kept := p.nodes[:0]
 	for _, node := range p.nodes[p.head:] {
-		f(node)
+		if newIdx, live := remap(node.Idx); live {
+			node.Idx = newIdx
+			kept = append(kept, node)
+		}
 	}
+	p.nodes, p.head = kept, 0
 }
 
-func newFIFOPolicy[K comparable, V any](states memstash.ItemStates[K, V], _ int64) memstash.EvictionPolicy[K, V] {
-	return &fifoPolicy[K, V]{states: states}
+func newFIFOPolicy[K comparable, V any](items memstash.Items[K, V], _ int64) memstash.EvictionPolicy[K, V] {
+	return &fifoPolicy[K, V]{items: items}
 }
 
 // TestCustomEvictionPolicy runs the cache on the FIFO policy above: strict FIFO order with one shard, capacity
@@ -105,7 +105,7 @@ func TestCustomEvictionPolicyErrors(t *testing.T) {
 		_, err := memstash.New[string, int](
 			memstash.WithMemoryCapacity(8),
 			memstash.WithCustomEvictionPolicy(
-				func(memstash.ItemStates[string, int], int64) memstash.EvictionPolicy[string, int] { return nil }),
+				func(memstash.Items[string, int], int64) memstash.EvictionPolicy[string, int] { return nil }),
 		)
 		require.ErrorIs(t, err, memstash.ErrNilCustomPolicy)
 	})

@@ -3,7 +3,7 @@ package memstash
 import (
 	"context"
 
-	"github.com/zakonnic/memstash/internal/itemstate"
+	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
 // batchGroupSize is the pipeline width of the batched memory lookups: enough independent loads in flight to cover
@@ -14,10 +14,9 @@ const batchGroupSize = 12
 type batchGroup[K comparable, V any] struct {
 	keyHash [batchGroupSize]uint64
 	sh      [batchGroupSize]*shard[K, V]
-	table   [batchGroupSize]*hashSlots
-	packed  [batchGroupSize]uint64
+	table   [batchGroupSize]*itemstore.FlatHashMap[K, V]
 	pos     [batchGroupSize]uint32
-	state   [batchGroupSize]*itemstate.State[K, V]
+	item    [batchGroupSize]*itemstore.Item[K, V]
 	meta    [batchGroupSize]uint64
 	value   [batchGroupSize]V
 	hit     [batchGroupSize]bool
@@ -63,68 +62,64 @@ func (c *Cache[K, V]) batchGetMemory(keys []K, dst List[K, V], missing []K) (Lis
 // Anything off the straight path (a dead or mismatched candidate, a racing write) falls back to the single-key
 // getMemory: rare, and its slot lines are already warm.
 func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
-	// hash, home slot, and the group's first slot loads.
+	// hash, home slot, and the group's first meta loads.
 	for i := range keys {
 		sh, keyHash := c.shardAndHash(keys[i])
-		t := sh.table.Load()
-		pos := t.home(keyHash)
-		g.sh[i], g.keyHash[i], g.table[i], g.pos[i] = sh, keyHash, t, pos
-		g.packed[i] = t.slot(pos).Load()
+		storage := sh.items.GetStorage()
+		pos := storage.Home(keyHash)
+		g.sh[i], g.keyHash[i], g.table[i], g.pos[i] = sh, keyHash, storage, pos
+		g.meta[i] = storage.At(pos).Load()
 	}
-	// walk each probe chain to its first candidate (or a definite miss) and load the candidate's meta word.
-	// The walk itself compares only slot short hashes: after the first load the chain stays line-local.
+	// walk each probe chain to its first candidate (or a definite miss); a candidate's record is its slot, so the
+	// walk already loaded the line the validation stage needs.
 	for i := range keys {
 		t := g.table[i]
-		shortHash := shortHashOf(g.keyHash[i])
-		packed, pos := g.packed[i], g.pos[i]
+		tagged := itemstore.TagOf(g.keyHash[i])
+		home := g.pos[i]
+		groupEnd := (home | 7) + 1
+		metaWord, pos := g.meta[i], home
 		for {
-			slotShortHash := slotHash(packed)
-			if slotShortHash == emptyShortHash {
-				g.state[i] = nil // end of the probe chain: a definite miss
+			if metaWord == 0 || (pos == groupEnd && !t.Overflowed(home)) {
+				g.item[i] = nil // end of the probe chain: a definite miss
 				break
 			}
-			if slotShortHash == shortHash {
-				state := c.registry.At(slotIdx(packed))
-				g.state[i] = state
-				g.meta[i] = state.Load()
-				g.packed[i] = packed
+			if metaWord&itemstore.DeadOrTag == tagged {
+				g.item[i] = t.At(pos)
+				g.meta[i] = metaWord
+				g.pos[i] = t.Wrap(pos)
 				break
 			}
 			pos++
-			packed = t.slot(pos).Load()
+			metaWord = t.At(pos).Load()
 		}
 	}
 	// validate the candidates against the now-loaded records.
-	var entry itemstate.Entry[K, V]
+	var entry itemstore.Entry[K, V]
 	for i := range keys {
-		state := g.state[i]
-		if state == nil {
+		item := g.item[i]
+		if item == nil {
 			g.hit[i] = false
 			continue
 		}
 		metaWord := g.meta[i]
-		if metaWord&itemstate.Dead != 0 {
-			g.value[i], g.hit[i] = c.getMemory(keys[i]) // the chain continues past a tombstone
+		if !item.SnapshotInto(&entry, metaWord) || entry.Key != keys[i] {
+			g.value[i], g.hit[i] = c.getMemory(keys[i]) // tag collision or a racing write
 			continue
 		}
-		if !state.SnapshotInto(&entry, metaWord) || entry.Key != keys[i] {
-			g.value[i], g.hit[i] = c.getMemory(keys[i]) // short-hash collision or a racing write
-			continue
-		}
-		expireOff := uint32((metaWord & itemstate.ExpireMask) >> itemstate.ExpireShift)
 		nowOff := c.nowOff.Load()
-		if expireOff != 0 && expireOff <= nowOff {
-			c.dropExpired(g.sh[i], g.keyHash[i], keys[i], slotIdx(g.packed[i]))
+		if itemstore.Expired(metaWord, nowOff) {
+			c.dropExpired(g.sh[i], g.keyHash[i], keys[i], g.pos[i])
 			g.hit[i] = false
 			continue
 		}
 		if c.refreshOnGet {
-			if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && state.TouchAndRefreshExpire(metaWord, newOff) {
+			expireOff := uint32(metaWord & itemstore.ExpireMask >> itemstore.ExpireShift)
+			if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && item.TouchAndRefreshExpire(metaWord, newOff) {
 				g.value[i], g.hit[i] = entry.Value, true
 				continue
 			}
 		}
-		state.TouchWith(metaWord)
+		item.TouchWith(metaWord)
 		g.value[i], g.hit[i] = entry.Value, true
 	}
 }

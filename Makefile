@@ -53,14 +53,18 @@ cover-func: cover-gen ## Show coverage by func
 cover: cover-gen ## Show coverage html
 	go tool cover -html=var/coverage.out
 
+bench-short: ## ShortCheckup benchmark
+	go -C benchmarks test -run=xxx -bench='^Benchmark(ShortCheckup)$$' ./...
 bench-speed: ## Run the speed_test.go benchmarks (Zipf hot-set micro-benchmarks)
-	go -C benchmarks test -run=xxx -bench='^Benchmark(GetHit|Get|Set|Mixed90_10|Throughput)$$' -benchtime=3s ./...
+	go -C benchmarks test -run=xxx -bench='^Benchmark(ShortCheckup|GetHit|Get|Set|Mixed90_10|Throughput)$$' ./...
 bench-speed-random: ## Run the speed_random_test.go benchmarks (realistic random load)
 	go -C benchmarks test -run=xxx -bench='^BenchmarkRandom' ./...
 bench-hitrate: ## Run hitrate benchmarks
 	go -C benchmarks test -run='^TestHitRate$$' -v
-bench-hitrate-real: ## Run hitrate benchmarks
+bench-real: ## Run hitrate benchmarks
+	go -C benchmarks test -run='^Benchmark(MemstashGetHitSerial|Get|Set|Mixed90_10|Throughput)$$' -v
 	go -C benchmarks test -run='^TestHitRateRealistic$$' -v
+
 .PHONY: bench
 bench: bench-speed bench-hitrate ## Run benchmarks
 bench-100kk:

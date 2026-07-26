@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"unsafe"
 
-	"github.com/zakonnic/memstash/internal/itemstate"
+	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
 // GetAutoCostFunc builds the automatic CostFunc behind Config.MemoryBudget. The cost of an item is the byte size of
@@ -21,7 +21,7 @@ func GetAutoCostFunc[K comparable, V any]() (func(key K, value V) uint32, error)
 	if !ok {
 		return nil, fmt.Errorf("%w (value type %s)", ErrBudgetNeedsCostFunc, reflect.TypeFor[V]())
 	}
-	fixed := int64(unsafe.Sizeof(itemstate.Entry[K, V]{}))
+	fixed := int64(unsafe.Sizeof(itemstore.Entry[K, V]{}))
 	if keySize == nil && valSize == nil {
 		// Both types are fixed-size: every item costs the same.
 		cost := uint32(min(fixed, math.MaxUint32))
