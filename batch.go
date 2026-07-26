@@ -147,7 +147,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error
 	c.stats.addL2Hits(int64(len(fromL2)))
 	c.stats.addL2Misses(int64(len(missing) - len(fromL2)))
 	for _, item := range fromL2 {
-		c.setMemory(item.Key, item.Value)
+		c.setMemory(item.Key, item.Value, c.expireOffset())
 		found = append(found, item)
 	}
 	return found, nil
@@ -158,7 +158,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error
 // batch write.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items List[K, V]) error {
 	for _, item := range items {
-		c.setMemory(item.Key, item.Value)
+		c.setMemory(item.Key, item.Value, c.expireOffset())
 	}
 	c.stats.addSets(int64(len(items)))
 	switch c.l2WritePolicy {
@@ -350,7 +350,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 			}
 		}
 		for _, item := range fromL2 {
-			c.setMemory(item.Key, item.Value)
+			c.setMemory(item.Key, item.Value, c.expireOffset())
 			resolved = append(resolved, item)
 			resolvedKeys[item.Key] = struct{}{}
 		}
@@ -378,7 +378,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 		return resolved, err
 	}
 	for _, item := range loaded {
-		c.setMemory(item.Key, item.Value)
+		c.setMemory(item.Key, item.Value, c.expireOffset())
 		resolved = append(resolved, item)
 	}
 	c.stats.addSets(int64(len(loaded)))

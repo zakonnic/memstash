@@ -192,7 +192,29 @@ c, _ := memstash.New[string, *Conn](
 
 Interested only in the cache's own decisions - expiration, eviction and overflow? Gate the handler on `cause.Automatic()`.
 
-**Non-string keys with a custom key mapping** - provide a key function for the L2 storage key:
+**Snapshots** — dump the hot set to a file on shutdown and start warm instead of cold. `SaveTo` streams every live item through the codecs you give it; `LoadFrom` reads it back through the normal write path, so the capacity, the cost function and the eviction policy all still apply:
+
+```go
+f, _ := os.Create("cache.snapshot")
+_ = c.SaveTo(f, l2.StringCodec(), l2.JSONCodec[User]()) // keys and values get their own codec
+_ = f.Close()
+
+// ...on the next start
+f, _ = os.Open("cache.snapshot")
+_ = c.LoadFrom(ctx, f, l2.StringCodec(), l2.JSONCodec[User](), memstash.LoadWithTTL)
+```
+
+Loading takes options:
+
+| Option | Effect |
+|---|---|
+| `LoadWithCurrentTTL` | Every item gets a full, fresh lifetime, exactly as `Set` would. The default. |
+| `LoadWithTTL` | Expirations are restored on their original schedule: the snapshot records what each item had left plus the moment it was taken, so time spent in the file counts and items already past their deadline are skipped. Capped at the loading cache's own TTL. |
+| `LoadToL2` | Also write every loaded item to the second level, following `WritePolicy`. |
+
+Without `LoadToL2` only the first level is touched, and `ctx` goes unused. A truncated or foreign file is rejected with `ErrBadSnapshot`.
+
+**Non-string keys with a custom key mapping** — provide a key function for the L2 storage key:
 
 ```go
 c, _ := rueidis_adapter.NewJSONCache[int, User](client,

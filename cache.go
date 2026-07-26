@@ -281,7 +281,7 @@ func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 		return zero, false, err
 	}
 	c.stats.addL2Hits(1)
-	c.setMemory(key, value)
+	c.setMemory(key, value, c.expireOffset())
 	return value, true, nil
 }
 
@@ -351,7 +351,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 // Set stores the value in memory and in L2 according to WritePolicy. An error can come only from a synchronous L2
 // write.
 func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
-	c.setMemory(key, value)
+	c.setMemory(key, value, c.expireOffset())
 	c.stats.addSets(1)
 	if c.l2WritePolicy == WriteDisabled {
 		return nil
@@ -363,9 +363,10 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 	return nil
 }
 
-// setMemory puts the value into the first level. An overwrite stores into the item in place (the item, its queue
+// setMemory puts the value into the first level with the given expiration offset (0 = no TTL; callers that just
+// want the configured TTL pass expireOffset()). An overwrite stores into the item in place (the item, its queue
 // node and its slot stay put); a new key claims a free slot. Neither path allocates.
-func (c *Cache[K, V]) setMemory(key K, value V) {
+func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	weight := c.rawCost(key, value)
 	sh, keyHash := c.shardAndHash(key)
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
@@ -395,7 +396,7 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 				pos, item = reuse, storage.At(reuse)
 				sh.dirty--
 			}
-			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, c.expireOffset())
+			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff)
 			storage.NoteDisplaced(home, pos)
 			sh.live++
 			sh.policy.Add(itemstore.QNode{Idx: storage.Wrap(pos), Cost: uint32(weight)})
@@ -422,8 +423,8 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 			c.addDeletion(&deletions, key, entry.Value, CauseReplacement)
 		}
 		item.SetValue(value)
-		if c.ttlOff != 0 {
-			item.RefreshExpire(c.expireOffset())
+		if expireOff != 0 {
+			item.RefreshExpire(expireOff)
 		}
 		break
 	}
@@ -658,7 +659,7 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 		switch {
 		case err == nil && ok:
 			c.stats.addL2Hits(1)
-			c.setMemory(key, value)
+			c.setMemory(key, value, c.expireOffset())
 			return value, nil
 		case err != nil:
 			// Fall back to the loader; report the L2 error via the callback.
@@ -673,7 +674,7 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 		var zero V
 		return zero, err
 	}
-	c.setMemory(key, value)
+	c.setMemory(key, value, c.expireOffset())
 	c.stats.addSets(1)
 	if c.l2WritePolicy != WriteDisabled {
 		if c.l2WritePolicy == WriteThrough {
@@ -693,25 +694,54 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 // yielded pair is never torn.
 func (c *Cache[K, V]) Iterator() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
-		var entry itemstore.Entry[K, V]
-		for i := range c.shards {
-			storage := c.shards[i].items.GetStorage()
-			nowOff := c.nowOff.Load()
-			for pos := 0; pos < storage.SlotCount(); pos++ {
-				item := storage.At(uint32(pos))
-				metaWord := item.Load()
-				if metaWord == 0 || metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff) {
-					continue
-				}
-				if !item.SnapshotInto(&entry, metaWord) {
-					continue
-				}
-				if !yield(entry.Key, entry.Value) {
-					return
-				}
+		c.iterateWithLife(func(key K, value V, _ time.Duration) bool { return yield(key, value) })
+	}
+}
+
+// iterateWithLife is the Iterator walk, plus how much life each item has left (0 when it has no TTL). SaveTo needs
+// the lifetime, and one walk is easier to keep correct than two.
+func (c *Cache[K, V]) iterateWithLife(yield func(K, V, time.Duration) bool) {
+	var entry itemstore.Entry[K, V]
+	for i := range c.shards {
+		storage := c.shards[i].items.GetStorage()
+		nowOff := c.nowOff.Load()
+		for pos := 0; pos < storage.SlotCount(); pos++ {
+			item := storage.At(uint32(pos))
+			metaWord := item.Load()
+			if metaWord == 0 || metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff) {
+				continue
+			}
+			if !item.SnapshotInto(&entry, metaWord) {
+				continue
+			}
+			if !yield(entry.Key, entry.Value, c.lifeLeft(metaWord, nowOff)) {
+				return
 			}
 		}
 	}
+}
+
+// lifeLeft turns an alive item's expiration offset into the wall time it has left; 0 means no TTL.
+func (c *Cache[K, V]) lifeLeft(metaWord uint64, nowOff uint32) time.Duration {
+	expireOff := uint32(metaWord & itemstore.ExpireMask >> itemstore.ExpireShift)
+	if expireOff == 0 {
+		return 0
+	}
+	return time.Duration((expireOff-nowOff)&itemstore.ExpireWrapMask) * c.expireUnit
+}
+
+// expireOffsetIn is expireOffset for an item that should outlive now by remaining, capped at the cache's own TTL.
+// Rounding is upwards so a restored item never expires earlier than it would have.
+func (c *Cache[K, V]) expireOffsetIn(remaining time.Duration) uint32 {
+	if c.ttlOff == 0 || remaining <= 0 {
+		return 0
+	}
+	units := min(uint32((remaining+c.expireUnit-1)/c.expireUnit), c.ttlOff)
+	expireOff := (c.nowOff.Load() + units + 1) & itemstore.ExpireWrapMask
+	if expireOff == 0 {
+		expireOff = 1
+	}
+	return expireOff
 }
 
 // Len returns the number of first-level items (including expired ones not yet swept).
