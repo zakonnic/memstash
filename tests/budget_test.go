@@ -97,7 +97,7 @@ func TestMemoryBudgetFixedTypes(t *testing.T) {
 	require.LessOrEqual(t, c.Weight(), int64(budget), "weight above the byte budget")
 	require.Positive(t, c.Len())
 	perItem := c.Weight() / int64(c.Len())
-	assert.Equal(t, int64(budget/perItem), int64(c.Len()), "a full single-shard cache must sit exactly at the budget")
+	assert.Equal(t, budget/perItem, int64(c.Len()), "a full single-shard cache must sit exactly at the budget")
 	// Data bytes only: the estimate for uint64/uint64 is the 16-byte Entry, no cache bookkeeping on top.
 	assert.EqualValues(t, 16, perItem, "per-item byte estimate for uint64/uint64 drifted")
 }

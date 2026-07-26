@@ -940,13 +940,16 @@ type flightCall[V any] struct {
 	ok   bool
 }
 
+// KeyVal is one key/value pair of a batch result.
 type KeyVal[K comparable, V any] struct {
 	Key   K
 	Value V
 }
 
+// List is the result of a batch operation: the pairs that were found, in no particular order.
 type List[K comparable, V any] []KeyVal[K, V]
 
+// ToMap collects the pairs into a map.
 func (t List[K, V]) ToMap() map[K]V {
 	m := make(map[K]V, len(t))
 	for _, item := range t {

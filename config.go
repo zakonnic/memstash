@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// Errors reported by New and NewWithConfig for a configuration that cannot produce a working cache.
 var (
 	ErrBadCapacity         = errors.New("memstash: MemoryCapacity must be positive")
 	ErrCapacityTooLarge    = errors.New("memstash: MemoryCapacity exceeds the addressable table index space (2^32 items)")

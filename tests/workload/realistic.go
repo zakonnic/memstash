@@ -43,7 +43,7 @@ func splitmix(x uint64) uint64 {
 	return x ^ (x >> 31)
 }
 
-// --- web session store: Zipf over a token catalogue, ~350-650 byte JSON documents ---
+// --- web session store: Zipf over a token catalog, ~350-650 byte JSON documents ---
 
 // SessionScenario is a session-cookie lookup cache in front of an auth service: Zipf-popular requests over Catalog
 // distinct tokens. ZipfS and Seed default to 1.001 and 11 when zero.
@@ -91,7 +91,7 @@ func (SessionScenario) Value(blob []byte, key string) []byte {
 	return append(v, '"', '}')
 }
 
-// --- CDN / static assets: mostly-Zipf catalogue + one-hit wonders, bimodal small/large values ---
+// --- CDN / static assets: mostly-Zipf catalog + one-hit wonders, bimodal small/large values ---
 
 // CDNScenario is a static-asset cache: Zipf-popular requests over Catalog objects, plus one-hit-wonder requests
 // (cache-busting URLs, crawlers) minting a fresh key beyond Catalog every OneHitEvery-th request. Values are bimodal
