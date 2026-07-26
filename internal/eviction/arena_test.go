@@ -2,7 +2,7 @@ package eviction
 
 import "github.com/zakonnic/memstash/internal/itemstore"
 
-// arena is the tests' stand-in for a shard's slot table: records are published at sequential positions, mimicking
+// arena is the tests' stand-in for a shard's slot table: items are published at sequential positions, mimicking
 // what Cache.setMemory does through the probe.
 type arena struct {
 	items itemstore.StorageProxy[string, string]
@@ -29,7 +29,7 @@ func (a *arena) release(idx uint32) {
 	item.MakeFree()
 }
 
-// addFromPool registers a fresh record's node with the policy, mirroring what Cache.setMemory does. Returns the
+// addFromPool registers a fresh item's node with the policy, mirroring what Cache.setMemory does. Returns the
 // node's slot index.
 func addFromPool(p interface{ Add(itemstore.QNode) }, a *arena, key string) uint32 {
 	idx := a.claim(key)
@@ -37,7 +37,7 @@ func addFromPool(p interface{ Add(itemstore.QNode) }, a *arena, key string) uint
 	return idx
 }
 
-// touch sets one reference-counter bit on the record, as a lock-free reader would.
+// touch sets one reference-counter bit on the item, as a lock-free reader would.
 func touch(a *arena, idx uint32) {
 	item := a.items.At(idx)
 	item.TouchWith(item.Load())

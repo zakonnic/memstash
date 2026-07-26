@@ -9,7 +9,7 @@ import (
 
 var (
 	ErrBadCapacity         = errors.New("memstash: MemoryCapacity must be positive")
-	ErrCapacityTooLarge    = errors.New("memstash: MemoryCapacity exceeds the addressable pool index space (2^32 records)")
+	ErrCapacityTooLarge    = errors.New("memstash: MemoryCapacity exceeds the addressable table index space (2^32 items)")
 	ErrBadBudget           = errors.New("memstash: MemoryBudget must be positive")
 	ErrBudgetAndCapacity   = errors.New("memstash: MemoryBudget and MemoryCapacity are mutually exclusive")
 	ErrBudgetNeedsCostFunc = errors.New("memstash: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly")

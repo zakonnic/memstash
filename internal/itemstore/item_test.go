@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestRecordSize pins the record footprints: the meta word plus the Entry and nothing else.
-func TestRecordSize(t *testing.T) {
+// TestItemSize pins the item footprints: the meta word plus the Entry and nothing else.
+func TestItemSize(t *testing.T) {
 	assert.EqualValues(t, 24, unsafe.Sizeof(Item[uint64, uint64]{}))
 	assert.EqualValues(t, 48, unsafe.Sizeof(Item[string, []byte]{}))
 }
@@ -16,15 +16,15 @@ func TestRecordSize(t *testing.T) {
 // TestSnapshotSeqlock: a multi-word overwrite must invalidate a snapshot taken against the pre-overwrite meta word,
 // a single-word one must not bump the generation at all.
 func TestSnapshotSeqlock(t *testing.T) {
-	record := NewFlatHashMap[string, string](64).At(0)
-	record.Publish(Entry[string, string]{Key: "k", Value: "old"}, 0, 0)
-	before := record.Load()
+	item := NewFlatHashMap[string, string](64).At(0)
+	item.Publish(Entry[string, string]{Key: "k", Value: "old"}, 0, 0)
+	before := item.Load()
 
-	record.SetValue("new")
-	assert.Equal(t, before+2, record.Load(), "a multi-word overwrite must advance the generation twice")
-	_, ok := record.Snapshot(before)
+	item.SetValue("new")
+	assert.Equal(t, before+2, item.Load(), "a multi-word overwrite must advance the generation twice")
+	_, ok := item.Snapshot(before)
 	assert.False(t, ok, "a snapshot against the pre-overwrite meta word must fail validation")
-	entry, ok := record.Snapshot(record.Load())
+	entry, ok := item.Snapshot(item.Load())
 	assert.True(t, ok)
 	assert.Equal(t, "new", entry.Value)
 
@@ -41,30 +41,30 @@ func TestSnapshotSeqlock(t *testing.T) {
 // TestSnapshotRejectsWriteInProgress covers the reader that lives entirely inside one write window: an odd meta word
 // must fail validation even though it never changed.
 func TestSnapshotRejectsWriteInProgress(t *testing.T) {
-	record := NewFlatHashMap[string, string](64).At(0)
-	record.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
+	item := NewFlatHashMap[string, string](64).At(0)
+	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
 
-	record.beginWrite()
-	mid := record.Load()
+	item.beginWrite()
+	mid := item.Load()
 	assert.NotZero(t, mid&1, "beginWrite must leave the generation odd")
-	_, ok := record.Snapshot(mid)
+	_, ok := item.Snapshot(mid)
 	assert.False(t, ok, "a snapshot inside a write window must fail even with a stable meta word")
-	record.endWrite()
-	assert.Zero(t, record.Load()&1, "endWrite must settle the generation even")
+	item.endWrite()
+	assert.Zero(t, item.Load()&1, "endWrite must settle the generation even")
 }
 
-// TestGenWrapNeverLooksEmpty covers the generation wrapping on a record that carries nothing else: no TTL and a zero
-// tag leave gen as the only non-zero field, so landing on 0 would make a live record read as a never-occupied slot.
+// TestGenWrapNeverLooksEmpty covers the generation wrapping on a item that carries nothing else: no TTL and a zero
+// tag leave gen as the only non-zero field, so landing on 0 would make a live item read as a never-occupied slot.
 func TestGenWrapNeverLooksEmpty(t *testing.T) {
 	lastEven := GenMask - 1
 
-	record := NewFlatHashMap[string, string](64).At(0)
-	record.meta.Store(lastEven)
-	record.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
-	assert.NotZero(t, record.Load(), "a wrapped occupancy must not publish an empty-slot meta word")
+	item := NewFlatHashMap[string, string](64).At(0)
+	item.meta.Store(lastEven)
+	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
+	assert.NotZero(t, item.Load(), "a wrapped occupancy must not publish an empty-slot meta word")
 
-	record.meta.Store(lastEven)
-	record.SetValue("wrapped")
-	assert.NotZero(t, record.Load(), "a wrapped in-place write must not leave an empty-slot meta word")
-	assert.Zero(t, record.Load()&1, "endWrite must settle the generation even")
+	item.meta.Store(lastEven)
+	item.SetValue("wrapped")
+	assert.NotZero(t, item.Load(), "a wrapped in-place write must not leave an empty-slot meta word")
+	assert.Zero(t, item.Load()&1, "endWrite must settle the generation even")
 }

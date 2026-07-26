@@ -1,9 +1,9 @@
 // Package memstash is an ultra-fast two-level cache.
 //
-// The first level is sharded: each shard owns an open-addressing table whose slots are the item records themselves,
-// plus an eviction policy. An item's key and value live inline in its slot next to the meta word, so a memory hit is
-// one cache line deep, takes no locks and allocates nothing. The second level is any adapter that implements
-// L2Cache.
+// The first level is sharded: each shard owns an open-addressing table whose slots - the positions of a flat array -
+// hold the items themselves, plus an eviction policy. An item's key and value sit inline next to its meta word, so a
+// memory hit is one lookup deep, takes no locks and allocates nothing. The second level is any adapter that
+// implements L2Cache.
 package memstash
 
 import (
@@ -38,10 +38,10 @@ const (
 
 // shard is an independent segment of the first level: a key is always served by the same shard (by hash), and all
 // mutations for that key are serialized by the shard mutex. Readers never take it: they probe the atomically
-// published table and verify candidates against the records themselves.
+// published table and verify candidates against the items themselves.
 type shard[K comparable, V any] struct {
 	mu        sync.Mutex
-	items     itemstore.StorageProxy[K, V] // the record table, swapped wholesale on growth/purge
+	items     itemstore.StorageProxy[K, V] // the item table, swapped wholesale on growth/purge
 	policy    EvictionPolicy[K, V]
 	weight    atomic.Int64
 	cap       int64
@@ -66,7 +66,7 @@ type Cache[K comparable, V any] struct {
 	epoch        time.Time
 	nowOff       atomic.Uint32
 	ttlOff       uint32
-	expireUnit   time.Duration
+	expireUnit   time.Duration // wall time per offset step: ceil(TTL/ExpireMax), the smallest unit that fits the TTL
 	ttl          time.Duration
 	refreshOnGet bool
 
@@ -129,8 +129,8 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		}
 		cfg.MemoryCapacity = DefaultMemoryCapacity
 	}
-	// Cache can hold up to MaxRecords, but with CostFunc MemoryCapacity can be bigger than number of records.
-	if cfg.CostFunc == nil && cfg.MemoryCapacity > itemstore.MaxRecords {
+	// Cache can hold up to MaxItems, but with CostFunc MemoryCapacity can be bigger than the number of items.
+	if cfg.CostFunc == nil && cfg.MemoryCapacity > itemstore.MaxItems {
 		return nil, ErrCapacityTooLarge
 	}
 	if cfg.CustomPolicy == nil {
@@ -293,7 +293,7 @@ func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 }
 
 // getMemory is the lock-free memory-hit path. It probes the slot table by meta word (tag prefilter), then uses the
-// record's Entry snapshot to confirm an exact key match and to obtain a value that is never observed half-written.
+// item's Entry snapshot to confirm an exact key match and to obtain a value that is never observed half-written.
 //
 // The body inlines the shardAndHash computation and the snapshot into a single stack slot, avoiding a call frame and
 // extra Entry copies. Those overheads would either slow things down directly or clog the works so the CPU can't do
@@ -324,7 +324,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 				continue // the copy raced a recycle or an overwrite: retry against the fresh meta word
 			}
 			if entry.Key != key {
-				break // tag collision or a recycled record
+				break // tag collision or a recycled slot
 			}
 			nowOff := c.nowOff.Load()
 			if !itemstore.Expired(metaWord, nowOff) {
@@ -359,8 +359,8 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 	return nil
 }
 
-// setMemory puts the value into the first level. An overwrite stores into the record in place (the record, its queue
-// node and its slot stay put); a new key claims a record and a slot. Neither path allocates.
+// setMemory puts the value into the first level. An overwrite stores into the item in place (the item, its queue
+// node and its slot stay put); a new key claims a free slot. Neither path allocates.
 func (c *Cache[K, V]) setMemory(key K, value V) {
 	weight := c.rawCost(key, value)
 	sh, keyHash := c.shardAndHash(key)
@@ -423,7 +423,7 @@ func (c *Cache[K, V]) setMemory(key K, value V) {
 }
 
 // maybeRebuild replaces the shard's table when it passes 3/4 occupancy (tombstones included): doubled when live
-// items need the space, same-size otherwise - either way tombstones are purged. Records move, so the policy re-links
+// items need the space, same-size otherwise - either way tombstones are purged. Items move, so the policy re-links
 // its queue nodes to the new positions and drops dead ones on the same pass. Readers finish on the superseded table:
 // a probe racing the swap may return a value as of the copy moment - the documented Get-racing-Set window. Called
 // under the shard mutex.
@@ -472,12 +472,12 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V]) {
 	}
 }
 
-// dropExpired lazily removes a TTL-expired item found by the Get path. The record stays in the queue as a tombstone
+// dropExpired lazily removes a TTL-expired item found by the Get path. The item stays in the queue as a tombstone
 // until the next eviction pass or sweep.
 func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K, idx uint32) {
 	sh.mu.Lock()
 	foundIdx, item, ok := c.findSlot(sh, h, key)
-	// The idx match and the Expired re-check reject the races: a re-claimed record or a refreshed TTL means the item
+	// The idx match and the Expired re-check reject the races: a re-claimed slot or a refreshed TTL means the item
 	// survives.
 	if ok && foundIdx == idx && itemstore.Expired(item.Load(), c.nowOff.Load()) {
 		c.killAt(sh, h, foundIdx, item)
@@ -485,7 +485,7 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K, idx uint32) 
 	sh.mu.Unlock()
 }
 
-// killAt kills the record in its slot and subtracts the item's weight; the slot stays a non-reusable tombstone until
+// killAt kills the item in its slot and subtracts its weight; the slot stays a non-reusable tombstone until
 // its queue node is swept. Called under the shard mutex.
 func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *itemstore.Item[K, V]) {
 	entry := item.Entry()
@@ -498,7 +498,7 @@ func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *
 	c.noteDead(sh)
 }
 
-// findSlot probes the shard's current table for the key's live slot: (slot index, record, true) when found. Called
+// findSlot probes the shard's current table for the key's live slot: (slot index, item, true) when found. Called
 // under the shard mutex.
 func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, *itemstore.Item[K, V], bool) {
 	storage := sh.items.GetStorage()
@@ -540,7 +540,7 @@ func (c *Cache[K, V]) noteDead(sh *shard[K, V]) {
 	}
 }
 
-// deleteLocked tombs the key's table slot, kills its state record and subtracts its weight. Called under the shard
+// deleteLocked tombs the key's table slot, kills its item and subtracts its weight. Called under the shard
 // mutex; a missing key is a no-op.
 func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K) {
 	if idx, item, ok := c.findSlot(sh, keyHash, key); ok {
@@ -548,8 +548,8 @@ func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K) {
 	}
 }
 
-// Delete removes the key from memory and from L2 (synchronously, unless L2 writes are disabled). The state record
-// returns to the pool on the next eviction pass or tombstone sweep.
+// Delete removes the key from memory and from L2 (synchronously, unless L2 writes are disabled). The memory the item
+// held is reclaimed on the next eviction pass or tombstone sweep.
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	sh, keyHash := c.shardAndHash(key)
 	sh.mu.Lock()
@@ -700,7 +700,7 @@ func (c *Cache[K, V]) Weight() int64 {
 // xsyncBucketBytes is the fixed size of one xsync.MapOf bucket (the flights map).
 const xsyncBucketBytes = 64
 
-// TotalWeight estimates the total memory footprint of the cache's first-level structures: slot tables (records carry
+// TotalWeight estimates the total memory footprint of the cache's first-level structures: item tables (items carry
 // their Entry inline), eviction bookkeeping and the fixed parts (the Cache struct, shards, flights buckets,
 // write-back buffer).
 //

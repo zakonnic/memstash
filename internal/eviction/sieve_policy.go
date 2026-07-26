@@ -80,7 +80,7 @@ func (p *SievePolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	return 0, false
 }
 
-// removeAt advances the hand past cur, unlinks it and returns its record's pool index.
+// removeAt advances the hand past cur, unlinks it and returns its item's slot index.
 func (p *SievePolicy[K, V]) removeAt(cur int32, node *sieveNode) uint32 {
 	idx := node.item.Idx
 	p.hand = node.prev

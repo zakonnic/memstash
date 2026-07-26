@@ -70,7 +70,7 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 		g.sh[i], g.keyHash[i], g.table[i], g.pos[i] = sh, keyHash, storage, pos
 		g.meta[i] = storage.At(pos).Load()
 	}
-	// walk each probe chain to its first candidate (or a definite miss); a candidate's record is its slot, so the
+	// walk each probe chain to its first candidate (or a definite miss); a candidate is its own slot, so the
 	// walk already loaded the line the validation stage needs.
 	for i := range keys {
 		t := g.table[i]
@@ -93,7 +93,7 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 			metaWord = t.At(pos).Load()
 		}
 	}
-	// validate the candidates against the now-loaded records.
+	// validate the candidates against the now-loaded items.
 	var entry itemstore.Entry[K, V]
 	for i := range keys {
 		item := g.item[i]

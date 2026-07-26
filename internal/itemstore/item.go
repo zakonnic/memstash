@@ -1,5 +1,5 @@
-// Package itemstore holds the first-level bookkeeping: the slot table (linear hash map) where slots are the item
-// records (FlatHashMap), and a chunked FIFO queue of nodes that reference them by position.
+// Package itemstore holds the first-level bookkeeping: the slot table (linear hash map) where slots are the items
+// themselves (FlatHashMap), and a chunked FIFO queue of nodes that reference them by position.
 package itemstore
 
 import (
@@ -7,15 +7,16 @@ import (
 	"unsafe"
 )
 
-// Layout of a state record's 64-bit meta word:
+// Layout of an item's 64-bit meta word:
 //
 //	[dead:1][secondChance:1][thirdChance:1][free:1][expireOff:18][tag:14][gen:28]
 //
-// dead marks a tombstone the eviction queue skips; free marks a dead slot whose queue node is already gone, so
-// inserts may reuse it; the two chance bits form a unary reference counter; expireOff is the expiration time in
-// ExpireResolution units on a wrapping scale (0 = no TTL); tag prefilters probe candidates without touching the key;
-// gen counts the record's occupancies and lock-free readers validate their Entry snapshot against it (see Snapshot).
-// A meta word of 0 is a never-occupied slot and terminates probes: gen 0 is reserved, so no live record reads as one.
+// dead marks a tombstone the eviction queue skips; free marks a dead slot whose queue node is already gone, so inserts
+// may reuse it; the two chance bits form a unary reference counter; expireOff is the expiration time in expireUnit
+// steps on a wrapping scale (0 = no TTL); tag prefilters candidates without touching the key - only items sharing a
+// home slot are compared against it, so 14 bits stay ample; gen counts the item's occupancies and in-place value
+// writes, and lock-free readers validate their Entry snapshot against it (see Snapshot).
+// A meta word of 0 is a never-occupied slot and terminates probes: gen 0 is reserved, so no live item reads as one.
 //
 // The unary counter is deliberate: increment is an idempotent OR and decrement an AND, and a saturated counter
 // performs no writes at all, so hot keys never bounce the cache line between cores.
@@ -59,8 +60,8 @@ type Entry[K comparable, V any] struct {
 	Value V
 }
 
-// Item is a cached item's record: an atomic meta word plus its Entry inline. It is also the item's hash-table slot,
-// so a probe that finds the record has its Entry in the same cache line.
+// Item is one cached item: an atomic meta word plus its Entry inline. It is also the item's hash-table slot, so a
+// probe that finds it has the Entry right there, with no second lookup.
 //
 // Readers are lock-free through a seqlock on the meta word's generation: Snapshot copies the Entry and validates the
 // copy, writers (under the shard mutex) advance the generation. Aligned words are single-copy atomic everywhere Go
@@ -70,10 +71,10 @@ type Item[K comparable, V any] struct {
 	entry Entry[K, V]
 }
 
-// Entry returns the record's pair in place. Callers must hold the shard mutex; lock-free readers use Snapshot.
+// Entry returns the item's pair in place. Callers must hold the shard mutex; lock-free readers use Snapshot.
 func (s *Item[K, V]) Entry() *Entry[K, V] { return &s.entry }
 
-// SnapshotInto copies the record's Entry into dst and reports whether it's consistent with metaWord.
+// SnapshotInto copies the item's Entry into dst and reports whether it's consistent with metaWord.
 // false means a recycle or overwrite raced the copy: reload meta word and retry, or stop if it shows a tombstone.
 // On false, the copy must not be used - in particular, no pointer it carries may be dereferenced.
 // The out-parameter avoids returning the Entry, keeping the hot path to a single copy of the pair.
@@ -93,13 +94,13 @@ func (s *Item[K, V]) Snapshot(metaWord uint64) (Entry[K, V], bool) {
 }
 
 // Publish fills an empty or free slot with a fresh occupancy: the Entry lands strictly before the meta word goes
-// live, so a reader that sees the record alive always finds the pair in place. Called under the shard mutex.
+// live, so a reader that sees the item alive always finds the pair in place. Called under the shard mutex.
 func (s *Item[K, V]) Publish(entry Entry[K, V], tag uint64, expireOff uint32) {
 	s.entry = entry
 	s.meta.Store(uint64(expireOff)<<ExpireShift | tag | liveGen((s.meta.Load()+2)&^1))
 }
 
-// liveGen fits a generation into its field, skipping 0: that value marks a never-occupied slot, and a record with no
+// liveGen fits a generation into its field, skipping 0: that value marks a never-occupied slot, and an item with no
 // TTL and a zero tag would otherwise carry a meta word of 0 and cut probe chains short.
 func liveGen(gen uint64) uint64 {
 	gen &= GenMask
@@ -110,7 +111,7 @@ func liveGen(gen uint64) uint64 {
 }
 
 // MakeFree hands a dead slot back to inserts once its queue node is dropped, zeroing the Entry so the key and value
-// do not outlive the item. Called under the shard mutex; the record is already a tombstone, so a stale snapshot of
+// do not outlive the item. Called under the shard mutex; the item is already a tombstone, so a stale snapshot of
 // the mid-zero state fails validation.
 func (s *Item[K, V]) MakeFree() {
 	s.entry = Entry[K, V]{}
@@ -153,14 +154,14 @@ func (s *Item[K, V]) endWrite() {
 	s.meta.Store(metaWord&^GenMask | liveGen(metaWord+1))
 }
 
-// Gen returns the record's current occupancy generation.
+// Gen returns the item's current occupancy generation.
 func (s *Item[K, V]) Gen() uint32 { return uint32(s.meta.Load() & GenMask) }
 
 // Load returns the current meta word.
 func (s *Item[K, V]) Load() uint64 { return s.meta.Load() }
 
 // TouchWith sets the next bit of the reference counter, given an already-loaded meta word; a saturated counter
-// writes nothing. A false positive on a reused record (Get racing eviction) just grants a stranger one extra chance.
+// writes nothing. A false positive on a reused slot (Get racing eviction) just grants a stranger one extra chance.
 func (s *Item[K, V]) TouchWith(metaWord uint64) {
 	switch {
 	case metaWord&SecondChance == 0:

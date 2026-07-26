@@ -9,13 +9,15 @@ import (
 // group, so a zero count usually proves absence right at the group edge.
 const groupShift = 3
 
-// MaxRecords caps the item count: 3/4 (the rebuild load factor) of the 2^32 slot positions.
-const MaxRecords = int64(3) << 30
+// MaxItems caps the item count: 3/4 (the rebuild load factor) of the 2^32 slot positions.
+const MaxItems = int64(3) << 30
 
-// FlatHashMap is one shard's first level: an open-addressing (https://en.wikipedia.org/wiki/Linear_probing) linear hash
-// table whose slots are the item records themselves, so a probe that lands resolves key, value and meta in one cache
-// line. Queue nodes address records by slot position; a rebuild moves records and re-links the queues.
+// FlatHashMap is one shard's memory storage: an open-addressing (https://en.wikipedia.org/wiki/Linear_probing) linear
+// hash table whose slots are the items themselves, so a probe that lands has meta, key and value right there, with no
+// second lookup. Queue nodes address items by slot position; a rebuild moves items and re-links the queues.
 //
+// No buckets: the hash picks the starting slot, and a taken slot just means stepping forward with pos++ until the key
+// or an empty slot turns up. The 3/4 fill cap keeps the walk short - ~2 slots on a hit, ~6 on a miss.
 // Readers probe lock-free against atomically published meta words; all mutations happen under the shard mutex.
 // A rebuild swaps the whole table: readers mid-probe finish on the superseded one and may miss a write that landed
 // after the swap - indistinguishable from the Get racing the Set.
@@ -31,7 +33,7 @@ func NewFlatHashMap[K comparable, V any](itemCount int) *FlatHashMap[K, V] {
 	return &FlatHashMap[K, V]{base: &items[0], overflows: &over[0], mask: uint32(itemCount - 1)}
 }
 
-// At resolves a probe position (any uint32; wrapped by the mask) into its record.
+// At resolves a probe position (any uint32; wrapped by the mask) into its item.
 func (t *FlatHashMap[K, V]) At(idx uint32) *Item[K, V] {
 	return (*Item[K, V])(unsafe.Add(unsafe.Pointer(t.base), uintptr(idx&t.mask)*unsafe.Sizeof(Item[K, V]{})))
 }
@@ -65,7 +67,7 @@ func (t *FlatHashMap[K, V]) overflowAt(home uint32) *atomic.Uint32 {
 	return (*atomic.Uint32)(unsafe.Add(unsafe.Pointer(t.overflows), uintptr((home&t.mask)>>groupShift)*4))
 }
 
-// InsertFresh copies a live record into a table nobody reads yet (rebuilds) and returns its slot index.
+// InsertFresh copies a live item into a table nobody reads yet (rebuilds) and returns its slot index.
 func (t *FlatHashMap[K, V]) InsertFresh(keyHash uint64, src *Item[K, V]) uint32 {
 	home := t.Home(keyHash)
 	for pos := home; ; pos++ {
@@ -95,5 +97,5 @@ type StorageProxy[K comparable, V any] struct {
 func (r *StorageProxy[K, V]) GetStorage() *FlatHashMap[K, V] { return r.storage.Load() }
 func (r *StorageProxy[K, V]) Store(t *FlatHashMap[K, V])     { r.storage.Store(t) }
 
-// At resolves a queue-node index into its record via the current table.
+// At resolves a queue-node index into its item via the current table.
 func (r *StorageProxy[K, V]) At(idx uint32) *Item[K, V] { return r.storage.Load().At(idx) }

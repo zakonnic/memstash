@@ -6,10 +6,10 @@ import "unsafe"
 // chunk exactly 1 KiB.
 const queueChunkSize = 127
 
-// QNode is an eviction-queue element: the slot index of a state record plus the item's weight when enqueued (the
-// index instead of a pointer keeps the node at 8 bytes). The weight lets S3-FIFO balance its small queue without
-// touching the record; it may drift after an overwrite, but only queue selection depends on it - the global
-// accounting is recomputed from the live value.
+// QNode is an eviction-queue element: the slot index of an item plus its weight when enqueued (the index instead of
+// a pointer keeps the node at 8 bytes). The weight lets S3-FIFO balance its small queue without touching the item;
+// it may drift after an overwrite, but only queue selection depends on it - the global accounting is recomputed from
+// the live value.
 type QNode struct {
 	Idx  uint32
 	Cost uint32
@@ -61,7 +61,7 @@ func (q *EvictQueue) Push(item QNode) {
 
 // SweepQueue rotates the queue once, handing the nodes of dead items to onDrop and pushing live ones back, so their
 // FIFO order and reference counters are preserved. It reclaims in bulk the tombstones that eviction would otherwise
-// only reach under capacity pressure. The table resolves node indices.
+// only reach under capacity pressure. The storage resolves node indices.
 func SweepQueue[K comparable, V any](q *EvictQueue, storage *FlatHashMap[K, V], onDrop func(QNode)) {
 	for n := q.size; n > 0; n-- {
 		node, ok := q.Pop()

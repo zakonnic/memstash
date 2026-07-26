@@ -10,7 +10,7 @@ import (
 
 // WTinyLFUPolicy is W-TinyLFU adapted to lock-free reads: a small admission window (~1% of the shard capacity) in
 // front of a protected main queue run as GCLOCK, gated by a Count-Min frequency sketch. Reads cannot move queue
-// nodes here (they only set the record's reference counter), so the classic LRU segments are approximated the same
+// nodes here (they only set the item's reference counter), so the classic LRU segments are approximated the same
 // way ClockPolicy approximates LRU, and access frequency is fed into the sketch at the points the policy does see:
 // every insert, and the reference counters observed during eviction scans. The sketch outlives evictions, so a key's
 // frequency history survives its residency - the property TinyLFU's admission filter relies on.
@@ -97,7 +97,7 @@ func (p *WTinyLFUPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	}
 }
 
-// evictWindowOnce processes the head of window: (idx, true) means the record is reclaimed, (0, false) means the
+// evictWindowOnce processes the head of window: (idx, true) means the item is reclaimed, (0, false) means the
 // candidate was admitted to main.
 func (p *WTinyLFUPolicy[K, V]) evictWindowOnce(nowOff uint32) (uint32, bool) {
 	candidate, ok := p.window.Pop()

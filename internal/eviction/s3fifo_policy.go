@@ -11,7 +11,7 @@ import (
 // S3FIFOPolicy implements S3-FIFO: a small quarantine (~10% of the shard capacity) for newcomers, a protected main
 // queue for items proven to be reused, and ghost - a memory of keys recently evicted from small. A new key goes to
 // small (or straight to main on a ghost hit); eviction from small promotes touched items to main and remembers the
-// rest in ghost; main runs GCLOCK. Promotion just moves an 8-byte node - the record and its table slot stay put.
+// rest in ghost; main runs GCLOCK. Promotion just moves an 8-byte node - the item and its table slot stay put.
 type S3FIFOPolicy[K comparable, V any] struct {
 	items *itemstore.StorageProxy[K, V]
 	small itemstore.EvictQueue
@@ -90,7 +90,7 @@ func (p *S3FIFOPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	}
 }
 
-// evictSmallOnce processes the head of small: (idx, true) means the record is reclaimed, (0, false) means the node
+// evictSmallOnce processes the head of small: (idx, true) means the item is reclaimed, (0, false) means the node
 // was skipped or promoted to main.
 func (p *S3FIFOPolicy[K, V]) evictSmallOnce(nowOff uint32) (uint32, bool) {
 	candidate, ok := p.small.Pop()

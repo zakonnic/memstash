@@ -288,13 +288,13 @@ func TestNewValidation(t *testing.T) {
 		},
 		{
 			name:    "capacity beyond the 32-bit pool index space",
-			opts:    []memstash.Option{memstash.WithMemoryCapacity(itemstore.MaxRecords + 1)},
+			opts:    []memstash.Option{memstash.WithMemoryCapacity(itemstore.MaxItems + 1)},
 			wantErr: memstash.ErrCapacityTooLarge,
 		},
 		{
 			name: "capacity beyond the 32-bit pool index space is not checked when a cost function is set",
 			opts: []memstash.Option{
-				memstash.WithMemoryCapacity(itemstore.MaxRecords + 1),
+				memstash.WithMemoryCapacity(itemstore.MaxItems + 1),
 				memstash.WithCostFunc(func(string, string) uint32 { return 1 }),
 			},
 		},
