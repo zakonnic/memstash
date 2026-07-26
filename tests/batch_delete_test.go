@@ -44,6 +44,46 @@ func TestBatchDeleteWriteDisabledLeavesL2(t *testing.T) {
 	assert.True(t, ok, "WriteDisabled BatchDelete must not touch L2")
 }
 
+// TestDeleteWriteBackIsAsync pins single Delete to the same write policy BatchDelete follows: under WriteBack it is
+// queued for the worker, not written on the caller's goroutine.
+func TestDeleteWriteBackIsAsync(t *testing.T) {
+	ctx := context.Background()
+	l2 := newGatedL2()
+	c := newWriteBackCache(t, l2)
+
+	stall(t, c, l2)
+	require.NoError(t, c.Set(ctx, "a", "v"))
+	require.NoError(t, c.Delete(ctx, "a")) // must not block on L2
+
+	deletes, _, _ := l2.deleteCounters()
+	assert.Equal(t, 0, deletes, "a WriteBack delete must not reach L2 on the caller's goroutine")
+
+	l2.release <- struct{}{} // the stalled single completes
+	l2.pass()                // run 1: Set{a}
+	l2.pass()                // run 2: Delete{a}
+	c.Wait()
+
+	deletes, deleteBatches, _ := l2.deleteCounters()
+	assert.Equal(t, 1, deletes+deleteBatches, "the queued delete must reach L2 through the worker")
+	l2.mu.Lock()
+	_, ok := l2.m["a"]
+	l2.mu.Unlock()
+	assert.False(t, ok, "the delete queued after the set must win")
+}
+
+func TestDeleteWriteDisabledLeavesL2(t *testing.T) {
+	ctx := context.Background()
+	l2 := newL2Stub()
+	require.NoError(t, l2.Set(ctx, "a", "1", 0))
+	c := newCache(t, memstash.Config[string, string]{
+		MemoryCapacity: 100, L2Cache: l2, WritePolicy: memstash.WriteDisabled,
+	})
+
+	require.NoError(t, c.Delete(ctx, "a"))
+	_, ok := l2.snapshot("a")
+	assert.True(t, ok, "WriteDisabled Delete must not touch L2")
+}
+
 // TestBatchDeleteWriteBack drives the write-back worker through a queue of sets and deletes: the deletes drain as
 // one BatchDelete, and the set/delete order of the queue is preserved per key.
 func TestBatchDeleteWriteBack(t *testing.T) {

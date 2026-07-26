@@ -579,8 +579,8 @@ func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K, cause
 	}
 }
 
-// Delete removes the key from memory and from L2 (synchronously, unless L2 writes are disabled). The memory the item
-// held is reclaimed on the next eviction pass or tombstone sweep.
+// Delete removes the key from memory and forwards the deletion to L2 according to WritePolicy (async for WriteBack).
+// The memory the item held is reclaimed on the next eviction pass or tombstone sweep.
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	sh, keyHash := c.shardAndHash(key)
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
@@ -592,8 +592,11 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	}
 	c.stats.addDeletes(1)
 
-	if c.l2WritePolicy != WriteDisabled {
+	switch c.l2WritePolicy {
+	case WriteThrough:
 		return c.l2Cache.Delete(ctx, key)
+	case WriteBack:
+		c.enqueueDelete(key)
 	}
 	return nil
 }
