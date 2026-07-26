@@ -144,7 +144,7 @@ func TestLoadableCacheBatch(t *testing.T) {
 	assert.Len(t, got, 3, "BatchGet must not invoke the loader")
 
 	require.NoError(t, lc.BatchSet(ctx, memstash.List[int, string]{{Key: 5, Value: "v5"}}))
-	v, ok := lc.Cache().GetFromMemory(5)
+	v, ok := lc.GetFromMemory(5)
 	require.True(t, ok)
 	assert.Equal(t, "v5", v)
 }
