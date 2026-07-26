@@ -52,3 +52,19 @@ func TestSnapshotRejectsWriteInProgress(t *testing.T) {
 	record.endWrite()
 	assert.Zero(t, record.Load()&1, "endWrite must settle the generation even")
 }
+
+// TestGenWrapNeverLooksEmpty covers the generation wrapping on a record that carries nothing else: no TTL and a zero
+// tag leave gen as the only non-zero field, so landing on 0 would make a live record read as a never-occupied slot.
+func TestGenWrapNeverLooksEmpty(t *testing.T) {
+	lastEven := GenMask - 1
+
+	record := NewFlatHashMap[string, string](64).At(0)
+	record.meta.Store(lastEven)
+	record.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
+	assert.NotZero(t, record.Load(), "a wrapped occupancy must not publish an empty-slot meta word")
+
+	record.meta.Store(lastEven)
+	record.SetValue("wrapped")
+	assert.NotZero(t, record.Load(), "a wrapped in-place write must not leave an empty-slot meta word")
+	assert.Zero(t, record.Load()&1, "endWrite must settle the generation even")
+}

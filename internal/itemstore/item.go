@@ -15,7 +15,7 @@ import (
 // inserts may reuse it; the two chance bits form a unary reference counter; expireOff is the expiration time in
 // ExpireResolution units on a wrapping scale (0 = no TTL); tag prefilters probe candidates without touching the key;
 // gen counts the record's occupancies and lock-free readers validate their Entry snapshot against it (see Snapshot).
-// A meta word of 0 is a never-occupied slot and terminates probes.
+// A meta word of 0 is a never-occupied slot and terminates probes: gen 0 is reserved, so no live record reads as one.
 //
 // The unary counter is deliberate: increment is an idempotent OR and decrement an AND, and a saturated counter
 // performs no writes at all, so hot keys never bounce the cache line between cores.
@@ -96,8 +96,17 @@ func (s *Item[K, V]) Snapshot(metaWord uint64) (Entry[K, V], bool) {
 // live, so a reader that sees the record alive always finds the pair in place. Called under the shard mutex.
 func (s *Item[K, V]) Publish(entry Entry[K, V], tag uint64, expireOff uint32) {
 	s.entry = entry
-	gen := (s.meta.Load() + 2) & GenMask &^ 1
-	s.meta.Store(uint64(expireOff)<<ExpireShift | tag | gen)
+	s.meta.Store(uint64(expireOff)<<ExpireShift | tag | liveGen((s.meta.Load()+2)&^1))
+}
+
+// liveGen fits a generation into its field, skipping 0: that value marks a never-occupied slot, and a record with no
+// TTL and a zero tag would otherwise carry a meta word of 0 and cut probe chains short.
+func liveGen(gen uint64) uint64 {
+	gen &= GenMask
+	if gen == 0 {
+		return 2
+	}
+	return gen
 }
 
 // MakeFree hands a dead slot back to inserts once its queue node is dropped, zeroing the Entry so the key and value
@@ -141,7 +150,7 @@ func (s *Item[K, V]) beginWrite() {
 // concurrent touch may lose its chance bit here - harmless, as everywhere else.
 func (s *Item[K, V]) endWrite() {
 	metaWord := s.meta.Load()
-	s.meta.Store(metaWord&^GenMask | (metaWord+1)&GenMask)
+	s.meta.Store(metaWord&^GenMask | liveGen(metaWord+1))
 }
 
 // Gen returns the record's current occupancy generation.
