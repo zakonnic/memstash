@@ -29,18 +29,18 @@ func envAddr(env, fallback string) string {
 
 // The defaults say 127.0.0.1, not localhost: clients that dial per request resolve localhost to ::1 first, and the
 // Docker Desktop port relay stalls those dials by ~50ms each.
-func redisAddr() string     { return envAddr("MEMSTASH_TEST_REDIS_ADDR", "127.0.0.1:6379") }
-func memcachedAddr() string { return envAddr("MEMSTASH_TEST_MEMCACHED_ADDR", "127.0.0.1:11211") }
-func postgresAddr() string  { return envAddr("MEMSTASH_TEST_POSTGRES_ADDR", "127.0.0.1:5432") }
-func mysqlAddr() string     { return envAddr("MEMSTASH_TEST_MYSQL_ADDR", "127.0.0.1:3306") }
-func mongoAddr() string     { return envAddr("MEMSTASH_TEST_MONGO_ADDR", "127.0.0.1:27017") }
-func dynamoAddr() string    { return envAddr("MEMSTASH_TEST_DYNAMO_ADDR", "127.0.0.1:8100") }
-func aerospikeAddr() string { return envAddr("MEMSTASH_TEST_AEROSPIKE_ADDR", "127.0.0.1:3000") }
-func tarantoolAddr() string { return envAddr("MEMSTASH_TEST_TARANTOOL_ADDR", "127.0.0.1:3301") }
+func redisAddr() string     { return envAddr("MEMSTASH_TEST_REDIS_ADDR", "127.0.0.1:43210") }
+func memcachedAddr() string { return envAddr("MEMSTASH_TEST_MEMCACHED_ADDR", "127.0.0.1:43214") }
+func postgresAddr() string  { return envAddr("MEMSTASH_TEST_POSTGRES_ADDR", "127.0.0.1:43215") }
+func mysqlAddr() string     { return envAddr("MEMSTASH_TEST_MYSQL_ADDR", "127.0.0.1:43216") }
+func mongoAddr() string     { return envAddr("MEMSTASH_TEST_MONGO_ADDR", "127.0.0.1:43217") }
+func dynamoAddr() string    { return envAddr("MEMSTASH_TEST_DYNAMO_ADDR", "127.0.0.1:43218") }
+func aerospikeAddr() string { return envAddr("MEMSTASH_TEST_AEROSPIKE_ADDR", "127.0.0.1:43219") }
+func tarantoolAddr() string { return envAddr("MEMSTASH_TEST_TARANTOOL_ADDR", "127.0.0.1:43220") }
 
 // redisClusterAddrs returns the seed addresses of the 3-node cluster (comma-separated in the environment).
 func redisClusterAddrs() []string {
-	return strings.Split(envAddr("MEMSTASH_TEST_REDIS_CLUSTER_ADDRS", "127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003"), ",")
+	return strings.Split(envAddr("MEMSTASH_TEST_REDIS_CLUSTER_ADDRS", "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"), ",")
 }
 
 // requireServer skips the test when nothing listens on addr, so a partial environment (only Redis, only memcached)

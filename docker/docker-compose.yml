@@ -7,6 +7,8 @@
 # The tests read the addresses from MEMSTASH_TEST_* environment variables (see tests/integration) and skip
 # themselves when a server is not listening.
 #
+# Published ports live in the 43210-43220 block, not on the servers' default ports: those are usually already taken
+# on a dev machine. Inside the containers the services keep their standard ports.
 # To remap published ports, copy docker-compose.override.example.yml to docker-compose.override.yml (gitignored)
 services:
   redis:
@@ -21,7 +23,7 @@ services:
       - --tcp-keepalive 60
     mem_limit: 1g
     ports:
-      - "6379:6379"
+      - "43210:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -34,16 +36,16 @@ services:
     image: redis:7-alpine
     command: ["sh", "/redis-cluster/start.sh"]
     environment:
-      REDIS_CLUSTER_PORTS: "7001 7002 7003"
+      REDIS_CLUSTER_PORTS: "43211 43212 43213"
     volumes:
       - ./redis-cluster:/redis-cluster:ro
     tmpfs:
       - /tmp
     mem_limit: 2g
     ports:
-      - "7001:7001"
-      - "7002:7002"
-      - "7003:7003"
+      - "43211:43211"
+      - "43212:43212"
+      - "43213:43213"
     healthcheck:
       test: ["CMD-SHELL", "redis-cli -p $${REDIS_CLUSTER_PORTS%% *} cluster info | grep -q cluster_state:ok"]
       interval: 2s
@@ -55,7 +57,7 @@ services:
     command: ["memcached", "-m", "512", "-c", "2048", "-t", "4"]
     mem_limit: 1024m
     ports:
-      - "11211:11211"
+      - "43214:11211"
     # memcached has no built-in healthcheck command; the TCP port opening is the readiness signal.
 
   postgres:
@@ -91,7 +93,7 @@ services:
       POSTGRES_DB: memstash
     mem_limit: 1024m
     ports:
-      - "5432:5432"
+      - "43215:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U memstash"]
       interval: 2s
@@ -118,7 +120,7 @@ services:
       MARIADB_DATABASE: memstash
     mem_limit: 1024m
     ports:
-      - "3306:3306"
+      - "43216:3306"
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 3s
@@ -136,7 +138,7 @@ services:
       - /data/db
     mem_limit: 1024m
     ports:
-      - "27017:27017"
+      - "43217:27017"
     healthcheck:
       test: ["CMD-SHELL", "mongosh --quiet -u memstash -p memstash --eval 'db.runCommand({ping: 1}).ok' | grep -q 1"]
       interval: 3s
@@ -148,7 +150,7 @@ services:
     command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
     mem_limit: 1024m
     ports:
-      - "8100:8000"
+      - "43218:8000"
 
   aerospike:
     image: aerospike/aerospike-server:latest
@@ -159,7 +161,7 @@ services:
       - ./aerospike/aerospike.conf:/etc/aerospike/memstash.conf:ro
     mem_limit: 2g
     ports:
-      - "3000:3000"
+      - "43219:3000"
     healthcheck:
       test: ["CMD-SHELL", "asinfo -v status | grep -q ok"]
       interval: 3s
@@ -173,7 +175,7 @@ services:
       - ./tarantool/init.lua:/opt/tarantool/init.lua:ro
     mem_limit: 1024m
     ports:
-      - "3301:3301"
+      - "43220:3301"
     healthcheck:
       test: ["CMD-SHELL", "tarantool -e \"os.exit(require('net.box').connect('localhost:3301'):ping() and 0 or 1)\""]
       interval: 3s

@@ -25,7 +25,7 @@ import (
 )
 
 // defaultRedisClusterAddr is the docker-compose Redis cluster; scenarios 2 and 3 use it unless config overrides.
-const defaultRedisClusterAddr = "127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003"
+const defaultRedisClusterAddr = "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"
 
 func main() {
 	logDir := flag.String("log-dir", ".", "directory to write the per-scenario JSON-lines log files into")

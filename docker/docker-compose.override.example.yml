@@ -6,18 +6,18 @@
 services:
   postgres:
     ports: !override
-      - "15432:5432"
+      - "43315:5432"
 
   mongo:
     ports: !override
-      - "37017:27017"
+      - "43317:27017"
 
   # The cluster nodes must listen on and announce the exact ports they are published on, so remap them through the
   # environment and keep the two lists identical.
   redis-cluster:
     environment:
-      REDIS_CLUSTER_PORTS: "17001 17002 17003"
+      REDIS_CLUSTER_PORTS: "43311 43312 43313"
     ports: !override
-      - "17001:17001"
-      - "17002:17002"
-      - "17003:17003"
+      - "43311:43311"
+      - "43312:43312"
+      - "43313:43313"
