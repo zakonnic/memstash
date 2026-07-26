@@ -1,0 +1,154 @@
+# Weekly dependency PRs. The adapters each pin a client SDK, so they are watched as separate modules.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      core:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /benchmarks
+    schedule:
+      interval: monthly
+    groups:
+      benchmarks:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /tests/integration
+    schedule:
+      interval: monthly
+    groups:
+      integration:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/aerospike_adapter
+    schedule:
+      interval: weekly
+    groups:
+      aerospike:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/badger_adapter
+    schedule:
+      interval: weekly
+    groups:
+      badger:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/dynamo_adapter
+    schedule:
+      interval: weekly
+    groups:
+      dynamo:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/gomemcache_adapter
+    schedule:
+      interval: weekly
+    groups:
+      gomemcache:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/goredis_adapter
+    schedule:
+      interval: weekly
+    groups:
+      goredis:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/mc_adapter
+    schedule:
+      interval: weekly
+    groups:
+      mc:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/mongo_adapter
+    schedule:
+      interval: weekly
+    groups:
+      mongo:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/pgx_adapter
+    schedule:
+      interval: weekly
+    groups:
+      pgx:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/rainycape_adapter
+    schedule:
+      interval: weekly
+    groups:
+      rainycape:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/redigo_adapter
+    schedule:
+      interval: weekly
+    groups:
+      redigo:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/redispipe_adapter
+    schedule:
+      interval: weekly
+    groups:
+      redispipe:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/rueidis_adapter
+    schedule:
+      interval: weekly
+    groups:
+      rueidis:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/sql_adapter
+    schedule:
+      interval: weekly
+    groups:
+      sql:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/tarantool_adapter
+    schedule:
+      interval: weekly
+    groups:
+      tarantool:
+        patterns: ['*']
+
+  - package-ecosystem: gomod
+    directory: /l2/valyala_adapter
+    schedule:
+      interval: weekly
+    groups:
+      valyala:
+        patterns: ['*']

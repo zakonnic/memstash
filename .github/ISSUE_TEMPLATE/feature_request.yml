@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose an API, an option, or a new L2 adapter
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that memstash makes hard or impossible today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: sketch
+    attributes:
+      label: How it might look
+      description: A sketch of the call site you would like to write.
+      render: go
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Existing options, a wrapper of your own, another library.
+
+  - type: checkboxes
+    id: cost
+    attributes:
+      label: Hot path
+      options:
+        - label: This would touch Get/Set. I understand a change there needs a before/after benchmark.

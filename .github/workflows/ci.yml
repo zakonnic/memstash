@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest supported toolchain (go.mod) and the current one.
+        go: ['1.24', '1.26']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+      - run: go build ./...
+      - run: go vet ./...
+      - name: go test -race
+        run: go test -race -count=1 ./...
+        timeout-minutes: 20
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+  adapters:
+    name: adapter (${{ matrix.adapter }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        adapter:
+          - aerospike_adapter
+          - badger_adapter
+          - dynamo_adapter
+          - gomemcache_adapter
+          - goredis_adapter
+          - mc_adapter
+          - mongo_adapter
+          - pgx_adapter
+          - rainycape_adapter
+          - redigo_adapter
+          - redispipe_adapter
+          - rueidis_adapter
+          - sql_adapter
+          - tarantool_adapter
+          - valyala_adapter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+      # Each adapter is its own module, so a broken client SDK bump only shows up here.
+      - run: go -C l2/${{ matrix.adapter }} build ./...
+      - run: go -C l2/${{ matrix.adapter }} vet ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    # The suite skips any backend that is not listening, so a service that fails to come up degrades to a skip.
+    env:
+      CGO_ENABLED: 0
+      MEMSTASH_TEST_REDIS_ADDR: 127.0.0.1:43210
+      MEMSTASH_TEST_REDIS_CLUSTER_ADDRS: 127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213
+      MEMSTASH_TEST_MEMCACHED_ADDR: 127.0.0.1:43214
+      MEMSTASH_TEST_POSTGRES_ADDR: 127.0.0.1:43215
+      MEMSTASH_TEST_MYSQL_ADDR: 127.0.0.1:43216
+      MEMSTASH_TEST_MONGO_ADDR: 127.0.0.1:43217
+      MEMSTASH_TEST_DYNAMO_ADDR: 127.0.0.1:43218
+      MEMSTASH_TEST_AEROSPIKE_ADDR: 127.0.0.1:43219
+      MEMSTASH_TEST_TARANTOOL_ADDR: 127.0.0.1:43220
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - name: start backing services
+        run: make up
+        timeout-minutes: 10
+      - run: make integration-tests
+        timeout-minutes: 15
+      - name: stop backing services
+        if: always()
+        run: make down
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...

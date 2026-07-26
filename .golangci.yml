@@ -1,0 +1,49 @@
+# Settings for `make lint` and the CI lint job. Requires golangci-lint v2.
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - misspell
+    - nolintlint
+    - predeclared
+    - revive
+    - unconvert
+    - usestdlibvars
+
+  settings:
+    misspell:
+      locale: US
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: exported
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [errcheck, revive]
+      # revive's exported rule is for the public API. Inside internal/ and the test helpers the repo's own policy
+      # applies: a comment only where the name alone does not answer "why".
+      - path: (internal|tests)/
+        linters: [revive]
+      # Benchmarks drop returns on purpose to keep the measured loop bare.
+      - path: benchmarks/
+        linters: [errcheck, revive]
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

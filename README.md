@@ -1,28 +1,36 @@
 # Memstash
 
-**A blazing-fast, allocation-free, two-level cache for Go. Yet it's convenient and configurable.**
+[![CI](https://github.com/zakonnic/memstash/actions/workflows/ci.yml/badge.svg)](https://github.com/zakonnic/memstash/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/zakonnic/memstash.svg)](https://pkg.go.dev/github.com/zakonnic/memstash)
+[![Go Report Card](https://goreportcard.com/badge/github.com/zakonnic/memstash)](https://goreportcard.com/report/github.com/zakonnic/memstash)
+[![Release](https://img.shields.io/github/v/tag/zakonnic/memstash?filter=v*&sort=semver&label=release)](https://github.com/zakonnic/memstash/tags)
+[![Go](https://img.shields.io/github/go-mod/go-version/zakonnic/memstash)](go.mod)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-Memstash keeps your hot set in a lock-free in-memory tier (L1). When you need to share state across machines, or just survive a restart, plug in a second tier (L2) backed by Redis, memcached, or any store you wrap. The memory path stays allocation-free and lock-free: a hit is a single map lookup plus one atomic read. On a miss, memstash fetches from L2, promotes the value into memory, and takes care of writing it back.
+**An unreasonably fast, memory-first cache for Go: lock-free reads, an allocation-free hot path, and an optional second tier (Redis and friends) that costs nothing until you plug it in. Simple by default, deep when you need it.**
+
+Memstash keeps the keys you touch most in your process, where a read can cost less than a nanosecond (with memstash, anyway). But your whole dataset is usually far larger — that's when you add a second tier, and the same cache will serve millions of entries, shared by every node and still warm after a restart. Reads fall back to L2 only when memory misses; writes land in memory immediately and reach L2 in the background.
 
 ```go
 c, _ := memstash.New[string, string]()
 _ = c.Set(ctx, "hello", "world")
-v, ok, err := c.Get(ctx, "hello") // faster than getting from sync.Map
+v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 ```
 
 ## Why memstash?
 
-- **Very fast.** Outperforms [Ristretto](https://github.com/dgraph-io/ristretto) by ~6× and [Otter](https://github.com/maypok86/otter) by ~2× in our [benchmarks](#benchmarks).
-- **Top-tier hit ratio.** The S3-FIFO policy keeps pace with the best W-TinyLFU caches (Otter, [Theine](https://github.com/Yiling-J/theine-go)) and leaves Ristretto far behind, holding up especially well under scans and one-hit wonders.
+- **Very fast.** More than 7× the parallel read throughput of [Ristretto](https://github.com/dgraph-io/ristretto) and 3× [Otter](https://github.com/maypok86/otter)'s; once writes enter the mix the gap widens past 10× — see [benchmarks](#benchmarks).
+- **Top-tier hit ratio.** The S3-FIFO policy sits with the best of them — Otter, [Theine](https://github.com/Yiling-J/theine-go), Ristretto — and takes the lead at the small and mid capacities where a cache actually has to choose, especially under scans and one-hit wonders.
 - **Lowest memory overhead.** 1.8× smaller footprint than Otter or [Bigcache](https://github.com/allegro/bigcache), see [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
-- **Easy on the GC.** Inserts reuse memory blocks from a pool, so the steady state allocates nothing beyond the internal map entry.
+- **Easy on the GC.** Items live inline in a per-shard flat hash table, so an insert allocates nothing. Growth swaps one array for a larger one - a few objects for the collector, never one per entry - and stops once the cache is at capacity.
 - **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No `interface{}`, no casts.
 - **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
-- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB, DynamoDB, Badger, Tarantool and Aerospike - each in its own module so the core stays clean. With **write-back** and **auto-batching**.
+- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB, DynamoDB, Badger, Tarantool and Aerospike — each in its own module so the core stays clean. With **write-back** and **auto-batching**.
 - **Singleflight built in.** `GetOrLoad` collapses a stampede of concurrent misses on one key into a single load.
 
 ## Table of Contents
 
+- [Why memstash?](#why-memstash)
 - [Installation](#installation)
 - [Usage](#usage)
   - [In-memory cache](#in-memory-cache)
@@ -31,6 +39,12 @@ v, ok, err := c.Get(ctx, "hello") // faster than getting from sync.Map
 - [Advanced Configuration](#advanced-configuration)
 - [L2 Adapters](#l2-adapters)
 - [Benchmarks](#benchmarks)
+  - [Throughput](#throughput---nsop-lower-is-better)
+  - [Parallel throughput](#parallel-throughput---millions-of-opss-higher-is-better)
+  - [Hit ratio](#hit-ratio---higher-is-better)
+  - [Heap footprint](#heap-footprint-lower-is-better)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Installation
 
@@ -75,7 +89,7 @@ func main() {
 }
 ```
 
-> `GetFromMemory` is the hottest, context-free read path. Use `Get` (which takes a `context.Context`) when an L2 is configured - it may hit the network on a memory miss.
+> `GetFromMemory` is the hottest, context-free read path. Use `Get` (which takes a `context.Context`) when an L2 is configured — it may hit the network on a memory miss.
 
 ### Read-through with a loader (singleflight)
 
@@ -126,13 +140,13 @@ _ = c.Set(ctx, "user:42", user)     // L1 now, Redis shortly after (write-back)
 u, ok, err := c.Get(ctx, "user:42") // L1 hit → returns instantly; L1 miss → Redis, then promoted
 ```
 
-> Tip: A common way to shard local caches without overlap is to key them by the Kafka partition - each partition is consumed by exactly one node, so the cache for a given object lives only on that node.
+> Tip: A common way to shard local caches without overlap is to key them by the Kafka partition — each partition is consumed by exactly one node, so the cache for a given object lives only on that node.
 
 ## Advanced Configuration
 
 Memstash is configured with functional options passed to `New` (or to any adapter's `New*Cache`). Some common setups:
 
-**Byte-budgeted cache** - bound by the byte size of stored data instead of item count; the per-item size (key and value bytes) is estimated automatically:
+**Byte-budgeted cache** — bound by the byte size of stored data instead of item count; the per-item size (key and value bytes) is estimated automatically:
 
 ```go
 c, _ := memstash.New[string, []byte](
@@ -140,9 +154,9 @@ c, _ := memstash.New[string, []byte](
 )
 ```
 
-The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For anything more complex, construction fails with `ErrBudgetNeedsCostFunc` - provide the byte size yourself:
+The budget is a bound: memstash derives its capacity from it and grows into it rather than allocating a fixed block up front.
 
-It's used to calculate the cache capacity — the cache doesn't allocate a fixed block of memory.
+The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For anything more complex, construction fails with `ErrBudgetNeedsCostFunc` — provide the byte size yourself:
 
 ```go
 c, _ := memstash.New[string, User](
@@ -151,7 +165,7 @@ c, _ := memstash.New[string, User](
 )
 ```
 
-**Synchronous writes on Set** - write-through policy, L2 updated synchronously:
+**Synchronous writes on Set** — write-through policy, L2 updated synchronously:
 
 ```go
 c, _ := rueidis_adapter.NewJSONCache[string, Session](client,
@@ -159,7 +173,7 @@ c, _ := rueidis_adapter.NewJSONCache[string, Session](client,
 )
 ```
 
-**Batch operations** - amortize the network round trip; adapters use native pipelining / multi-get where the client supports it:
+**Batch operations** — amortize the network round trip; adapters use native pipelining / multi-get where the client supports it:
 
 ```go
 found, err := c.BatchGet(ctx, []string{"a", "b", "c"})            // one round trip to L2 for the misses
@@ -168,7 +182,7 @@ err = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b
 err = c.BatchDelete(ctx, []string{"a", "b"})                      // follows the write policy, like BatchSet
 ```
 
-**Observability and iteration** - `Stats()` returns operation counters (collected with striped counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via `WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it - otherwise counters stay at zero. `Iterator()` walks the live first-level entries lock-free, independent of stats:
+**Observability and iteration** — `Stats()` returns operation counters (collected with striped counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via `WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it — otherwise counters stay at zero. `Iterator()` walks the live first-level entries lock-free, independent of stats:
 
 ```go
 c, _ := memstash.New[string, User](
@@ -180,7 +194,7 @@ for key, value := range c.Iterator() {
 }
 ```
 
-**Removal events** - get told when an item leaves memory, and why. Handlers run after the shard lock is released, so they may take their time and may call back into the cache; costs 24 B and 13 ns when a handler is set; otherwise zero overhead:
+**Removal events** — get told when an item leaves memory, and why. Handlers run after the shard lock is released, so they may take their time and may call back into the cache; costs 24 B and 13 ns when a handler is set; otherwise zero overhead:
 
 ```go
 c, _ := memstash.New[string, *Conn](
@@ -190,7 +204,7 @@ c, _ := memstash.New[string, *Conn](
 )
 ```
 
-Interested only in the cache's own decisions - expiration, eviction and overflow? Gate the handler on `cause.Automatic()`.
+Interested only in the cache's own decisions — expiration, eviction and overflow? Gate the handler on `cause.Automatic()`.
 
 **Snapshots** — dump the hot set to a file on shutdown and start warm instead of cold. `SaveTo` streams every live item through the codecs you give it; `LoadFrom` reads it back through the normal write path, so the capacity, the cost function and the eviction policy all still apply:
 
@@ -222,7 +236,7 @@ c, _ := rueidis_adapter.NewJSONCache[int, User](client,
 )
 ```
 
-**Custom serializer** - `NewCache` takes any `memstash.Codec[V]`, so a binary format works just as well as JSON. You can encode each field directly instead of going through JSON:
+**Custom serializer** — `NewCache` takes any `memstash.Codec[V]`, so a binary format works just as well as JSON. You can encode each field directly instead of going through JSON:
 
 ```go
 type Point struct {
@@ -250,9 +264,9 @@ c, err := rueidis_adapter.NewCache[int, Point](client, pointCodec{},
 )
 ```
 
-**Eviction policies** - four built-ins, selected with `WithPolicy`: `PolicyS3FIFO` (the default: quarantine + protected queue + ghost, the best all-rounder under scans and one-hit wonders), `PolicyClock` (GCLOCK, approximates LRU at FIFO cost), `PolicyWTinyLFU` (an admission window gated by a Count-Min frequency sketch that remembers keys across evictions - strong on skewed workloads), and `PolicySIEVE` (a single scan hand over the insertion order - the simplest, with an S3-FIFO-class hit rate). All share the same lock-free read path: a read only sets a 2-bit reference counter on the item's meta word.
+**Eviction policies** — four built-ins, selected with `WithPolicy`: `PolicyS3FIFO` (the default: quarantine + protected queue + ghost, the best all-rounder under scans and one-hit wonders), `PolicyClock` (GCLOCK, approximates LRU at FIFO cost), `PolicyWTinyLFU` (an admission window gated by a Count-Min frequency sketch that remembers keys across evictions — strong on skewed workloads), and `PolicySIEVE` (a single scan hand over the insertion order — the simplest, with an S3-FIFO-class hit rate). All share the same lock-free read path: a read only sets a 2-bit reference counter on the item's meta word.
 
-**Custom eviction policy** - implement the `memstash.EvictionPolicy` interface (the same contract the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Range`/`Bytes`, all called under the shard mutex) and plug its per-shard factory in:
+**Custom eviction policy** — implement the `memstash.EvictionPolicy` interface (the same contract the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Rebuild`/`Bytes`, all called under the shard mutex) and plug its per-shard factory in:
 
 ```go
 c, err := memstash.New[string, User](
@@ -264,22 +278,23 @@ c, err := memstash.New[string, User](
 
 Full option list:
 
-| Option | Purpose |
-|---|---|
-| `WithMemoryCapacity(n)` | L1 capacity in weight units (defaults to 20 000). |
-| `WithMemoryBudget(bytes)` | L1 bound in bytes of stored keys and values; derives a size-based cost function automatically (mutually exclusive with `WithMemoryCapacity`). |
-| `WithCostFunc(fn)` | Per-item weight function (e.g. size in bytes). |
-| `WithTTL(d)` | Item lifetime (1-second resolution); applied to L2 writes too. |
-| `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`. |
-| `WithCustomEvictionPolicy(fn)` | Plug in your own eviction policy: a per-shard factory returning a `memstash.EvictionPolicy` implementation. |
-| `WithShards(n)` | Number of eviction shards (default: auto by GOMAXPROCS). |
-| `WithL2Cache(l2)` | Attach a second level directly. |
-| `WithWritePolicy(p)` | `WriteBack` (default), `WriteThrough`, or `WriteDisabled`. |
-| `WithWriteBackBuffer(n)` | Size of the async write-back buffer. |
-| `WithBatchingForWriteBack()` / `WithNoBatchingForWriteBack()` / `WithAdaptiveBatchingForWriteBack()` | How the write-back worker drains its buffer to L2: coalesced into `BatchSet` (default), one `Set` per write, or adaptive. |
-| `WithGhostSize(n)` | Capacity (in keys) of the S3-FIFO ghost queues and the W-TinyLFU frequency sketch. |
-| `WithOnL2Error(fn)` | Handler for background L2 errors. |
-| `WithStats()` | Enables the `Stats()` operation counters. Off by default. |
+| Option | Purpose                                                                                                                                           |
+|---|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `WithMemoryCapacity(n)` | L1 capacity in weight units (defaults to 20k).                                                                                                    |
+| `WithMemoryBudget(bytes)` | L1 bound in bytes of stored keys and values; derives a size-based cost function automatically (mutually exclusive with `WithMemoryCapacity`).     |
+| `WithCostFunc(fn)` | Per-item weight function (e.g. size in bytes).                                                                                                    |
+| `WithTTL(d)` | Item lifetime (1-second resolution up to ~36h, proportionally coarser above that); applied to L2 writes too.                                      |
+| `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`.                                                                      |
+| `WithCustomEvictionPolicy(fn)` | Plug in your own eviction policy: a per-shard factory returning a `memstash.EvictionPolicy` implementation.                                       |
+| `WithShards(n)` | Number of eviction shards (default: auto by GOMAXPROCS).                                                                                          |
+| `WithL2Cache(l2)` | Attach a second level directly.                                                                                                                   |
+| `WithWritePolicy(p)` | How writes reach L2, ignored when no L2 is attached: `WriteBack` (default) hands `Set` to the background worker, `WriteThrough` writes on `Set` and returns the L2 error, `WriteDisabled` makes L2 read-only. Deletes follow the same policy as writes. |
+| `WithWriteBackBuffer(n)` | Size of the async write-back buffer.                                                                                                              |
+| `WithBatchingForWriteBack()` / `WithNoBatchingForWriteBack()` / `WithAdaptiveBatchingForWriteBack()` | How the write-back worker drains its buffer to L2: coalesced into `BatchSet` (default), one `Set` per write, or adaptive.                         |
+| `WithGhostSize(n)` | Capacity (in keys) of the S3-FIFO ghost queues and the W-TinyLFU frequency sketch.                                                                |
+| `WithOnL2Error(fn)` | Handler for background L2 errors.                                                                                                                 |
+| `WithOnDeletion(fn)` | Handler for every item leaving L1, with the cause (`CauseInvalidation`, `CauseReplacement`, `CauseExpiration`, `CauseEviction`, `CauseOverflow`). |
+| `WithStats()` | Enables the `Stats()` operation counters. Off by default.                                                                                         |
 
 ## L2 Adapters
 
@@ -289,21 +304,21 @@ The write path favors throughput by default: instead of one round trip per key, 
 
 | Module | Backend / client | context |
 |---|---|---|
-| `l2/goredis_adapter` | Redis - [redis/go-redis](https://github.com/redis/go-redis) | ✅ |
-| `l2/rueidis_adapter` | Redis - [redis/rueidis](https://github.com/redis/rueidis) | ✅ |
-| `l2/redispipe_adapter` | Redis - [joomcode/redispipe](https://github.com/joomcode/redispipe) | ✅ |
-| `l2/redigo_adapter` | Redis - [gomodule/redigo](https://github.com/gomodule/redigo) | partial |
-| `l2/gomemcache_adapter` | memcached - [bradfitz/gomemcache](https://github.com/bradfitz/gomemcache) | ❌ |
-| `l2/rainycape_adapter` | memcached - [rainycape/memcache](https://github.com/rainycape/memcache) | ❌ |
-| `l2/mc_adapter` | memcached - [memcachier/mc](https://github.com/memcachier/mc) | ❌ |
-| `l2/valyala_adapter` | memcached - [valyala/ybc](https://github.com/valyala/ybc) (cgo) | ❌ |
+| `l2/goredis_adapter` | Redis — [redis/go-redis](https://github.com/redis/go-redis) | ✅ |
+| `l2/rueidis_adapter` | Redis — [redis/rueidis](https://github.com/redis/rueidis) | ✅ |
+| `l2/redispipe_adapter` | Redis — [joomcode/redispipe](https://github.com/joomcode/redispipe) | ✅ |
+| `l2/redigo_adapter` | Redis — [gomodule/redigo](https://github.com/gomodule/redigo) | partial |
+| `l2/gomemcache_adapter` | memcached — [bradfitz/gomemcache](https://github.com/bradfitz/gomemcache) | ❌ |
+| `l2/rainycape_adapter` | memcached — [rainycape/memcache](https://github.com/rainycape/memcache) | ❌ |
+| `l2/mc_adapter` | memcached — [memcachier/mc](https://github.com/memcachier/mc) | ❌ |
+| `l2/valyala_adapter` | memcached — [valyala/ybc](https://github.com/valyala/ybc) (cgo) | ❌ |
 | `l2/sql_adapter` | any [database/sql](https://pkg.go.dev/database/sql) engine (SQLite, MySQL, ...) | ✅ |
-| `l2/pgx_adapter` | PostgreSQL - [jackc/pgx](https://github.com/jackc/pgx) (native, pipelined) | ✅ |
-| `l2/badger_adapter` | embedded - [dgraph-io/badger](https://github.com/dgraph-io/badger) | ❌ |
-| `l2/mongo_adapter` | MongoDB - [mongo-driver](https://github.com/mongodb/mongo-go-driver) | ✅ |
-| `l2/dynamo_adapter` | DynamoDB - [aws-sdk-go-v2](https://github.com/aws/aws-sdk-go-v2) | ✅ |
-| `l2/tarantool_adapter` | Tarantool - [go-tarantool](https://github.com/tarantool/go-tarantool) | ✅ |
-| `l2/aerospike_adapter` | Aerospike - [aerospike-client-go](https://github.com/aerospike/aerospike-client-go) | ❌ |
+| `l2/pgx_adapter` | PostgreSQL — [jackc/pgx](https://github.com/jackc/pgx) (native, pipelined) | ✅ |
+| `l2/badger_adapter` | embedded — [dgraph-io/badger](https://github.com/dgraph-io/badger) | ❌ |
+| `l2/mongo_adapter` | MongoDB — [mongo-driver](https://github.com/mongodb/mongo-go-driver) | ✅ |
+| `l2/dynamo_adapter` | DynamoDB — [aws-sdk-go-v2](https://github.com/aws/aws-sdk-go-v2) | ✅ |
+| `l2/tarantool_adapter` | Tarantool — [go-tarantool](https://github.com/tarantool/go-tarantool) | ✅ |
+| `l2/aerospike_adapter` | Aerospike — [aerospike-client-go](https://github.com/aerospike/aerospike-client-go) | ❌ |
 
 Each adapter takes an interface rather than a concrete client, so it stays independent of the client library's version, and a few libraries are covered without a separate module: `sql_adapter` accepts any `{QueryContext, ExecContext}` (so pgx via database/sql works too), `badger_adapter` covers [badgerhold](https://github.com/timshannon/badgerhold) via `store.Badger()`, and `dynamo_adapter` covers [guregu/dynamo](https://github.com/guregu/dynamo) via its underlying `*dynamodb.Client`.
 
@@ -341,7 +356,7 @@ go -C benchmarks test -run TestHitRate -v
 | hashicorp-lru | 96.94 |             86.49 | 138.0 |           98.94 | 73 B / 0 |
 | sync.Map\* | 1.64 |              1.80 | 11.6 |            4.19 | 63 B / 2 |
 
-\* `sync.Map` performs no eviction - a lower-bound baseline, not a comparable cache.
+\* `sync.Map` performs no eviction — a lower-bound baseline, not a comparable cache.
 
 ### Parallel throughput - millions of ops/s, higher is better
 
@@ -359,7 +374,7 @@ go -C benchmarks test -run TestHitRate -v
 | hashicorp-lru | 10 | 10 | 9.6 | 9.8 |              9.6 |
 | sync.Map\* | 563 | 156 | 110 | 86 |               75 |
 
-Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash stays within about 2× of the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **13–16× their throughput.**
+Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash tracks the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **12–19× their throughput.**
 
 ### Hit ratio - higher is better
 
@@ -412,10 +427,10 @@ The "Est. Size" column is the cache's estimated memory footprint at the end of t
 
 ### Heap footprint, lower is better
 
-Each cache is filled with 100M `uint64 -> uint64` entries - 16 bytes of raw payload apiece - and the heap growth it
+Each cache is filled with 100M `uint64 -> uint64` entries — 16 bytes of raw payload apiece — and the heap growth it
 causes is read back from the Go runtime, so these are real resident bytes rather than the cache's own estimate. The
-[measurements](benchmarks/results/heap-size-100kk.txt) run one contender at a time: a single pass costs several GiB. For string keys adapters key/value
-was converted from `uint64` to `[8]byte`.
+[measurements](benchmarks/results/heap-size-100kk.txt) run one contender at a time: a single pass costs several GiB.
+The caches that only accept byte-slice or string keys were given the same values converted to `[8]byte`.
 
 | Cache | Heap | B/entry |
 |---|--:|--:|
@@ -428,4 +443,14 @@ was converted from `uint64` to `[8]byte`.
 | hashicorp-lru | 9.7 GiB | 104.2 |
 | theine-wtinylfu | 11 GiB | 115.0 |
 
-\* `xsync.MapOf` performs no eviction - a lower-bound baseline, not a comparable cache.
+\* `xsync.MapOf` performs no eviction — a lower-bound baseline, not a comparable cache.
+
+## Contributing
+
+Bug reports and focused pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the repository layout,
+the test and lint commands, and the benchmarking rules that apply to changes on the hot path. Notable changes are
+recorded in the [changelog](CHANGELOG.md); security reports go through the [security policy](SECURITY.md).
+
+## License
+
+[Apache 2.0](LICENSE)
