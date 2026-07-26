@@ -19,9 +19,9 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 
 ## Why memstash?
 
-- **Very fast.** More than 7× the parallel read throughput of [Ristretto](https://github.com/dgraph-io/ristretto) and 3× [Otter](https://github.com/maypok86/otter)'s; once writes enter the mix the gap widens past 10× — see [benchmarks](#benchmarks).
+- **Very fast.** More than 7× the parallel read throughput of [Ristretto](https://github.com/dgraph-io/ristretto) and 6× [Otter](https://github.com/maypok86/otter)'s; once writes enter the mix the gap widens past 10× — see [benchmarks](#benchmarks).
 - **Top-tier hit ratio.** The S3-FIFO policy sits with the best of them — Otter, [Theine](https://github.com/Yiling-J/theine-go), Ristretto — and takes the lead at the small and mid capacities where a cache actually has to choose, especially under scans and one-hit wonders.
-- **Lowest memory overhead.** 1.8× smaller footprint than Otter or [Bigcache](https://github.com/allegro/bigcache), see [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
+- **Lowest memory overhead.** 2× smaller footprint than Otter or [Bigcache](https://github.com/allegro/bigcache), see [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
 - **Easy on the GC.** Items live inline in a per-shard flat hash table, so an insert allocates nothing. Growth swaps one array for a larger one - a few objects for the collector, never one per entry - and stops once the cache is at capacity.
 - **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No `interface{}`, no casts.
 - **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
@@ -332,29 +332,29 @@ Rolling your own is straightforward: implement the `memstash.L2Cache[K, V]` inte
 
 ```sh
 # throughput and allocations (Get / Set / mixed 90-10) vs other libs and a plain sync.Map baseline
-go -C benchmarks test -run xxx -bench . -benchmem
+make bench-speed
 
 # hit ratio across Zipf, Zipf+scan, and one-hit-wonder workloads
-go -C benchmarks test -run TestHitRate -v
+make bench-hitrate
 ```
 
 ![Read throughput](benchmarks/results/read_throughput.svg)
 
 ### Throughput - ns/op, lower is better
 
-| Cache | GetHit | Get (50% hitrate) | Set | 90 Get / 10 Set | Set alloc |
+| Cache | GetHit | Get (50% hit rate) | Set | 90 Get / 10 Set | Set alloc |
 |---|--:|------------------:|--:|----------------:|--:|
-| **memstash-s3fifo** | **0.86** |          **1.16** | 26.7 |            3.97 | 0 B / 0 |
-| **memstash-clock** | **0.86** |          **1.16** | 27.2 |            3.91 | 1 B / 0 |
-| **memstash-wtinylfu** | **0.87** |          **1.14** | 27.5 |            3.84 | 0 B / 0 |
-| **memstash-sieve** | **0.87** |          **1.11** | 26.2 |            4.01 | 0 B / 0 |
-| theine-wtinylfu | 3.35 |              3.40 | 323.2 |           50.78 | 35 B / 0 |
-| ristretto | 5.91 |              5.55 | 80.5 |           12.91 | 88 B / 1 |
-| otter-wtinylfu | 6.07 |              1.72 | 387.2 |           51.18 | 48 B / 1 |
-| bigcache | 9.10 |              7.43 | 37.8 |           21.46 | 24 B / 2 |
-| freecache | 13.84 |             11.56 | 20.9 |           14.40 |  0 B / 0 |
-| hashicorp-lru | 96.94 |             86.49 | 138.0 |           98.94 | 73 B / 0 |
-| sync.Map\* | 1.64 |              1.80 | 11.6 |            4.19 | 63 B / 2 |
+| **memstash-s3fifo** | **0.73** |          **1.15** | 26.2 |            3.59 | 1 B / 0 |
+| **memstash-clock** | **0.73** |          **1.12** | 23.9 |            3.51 | 1 B / 0 |
+| **memstash-wtinylfu** | **0.74** |          **1.17** | 24.8 |            3.48 | 1 B / 0 |
+| **memstash-sieve** | **0.74** |          **1.19** | 23.3 |            3.52 | 0 B / 0 |
+| otter-wtinylfu | 2.05 |              3.32 | 288.9 |           49.30 | 48 B / 1 |
+| theine-wtinylfu | 3.30 |              3.31 | 315.0 |           50.51 | 38 B / 0 |
+| ristretto | 5.64 |              6.19 | 142.2 |           31.26 | 85 B / 1 |
+| bigcache | 8.86 |              7.17 | 37.9 |           20.85 | 24 B / 2 |
+| freecache | 13.73 |             11.70 | 20.8 |           14.13 |  0 B / 0 |
+| hashicorp-lru | 93.43 |             86.53 | 127.6 |           97.35 | 58 B / 0 |
+| sync.Map\* | 1.62 |              1.68 | 11.6 |            4.11 | 63 B / 2 |
 
 \* `sync.Map` performs no eviction — a lower-bound baseline, not a comparable cache.
 
@@ -362,19 +362,19 @@ go -C benchmarks test -run TestHitRate -v
 
 | Cache | 100% reads | 75% reads | 50% reads | 25% reads | 0% (writes only) |
 |---|--:|--:|--:|--:|-----------------:|
-| **memstash-s3fifo** | **1070** | **139** | **85** | **62** |           **48** |
-| **memstash-clock** | **1072** | **138** | **84** | **58** |           **47** |
-| **memstash-wtinylfu** | **1063** | **140** | **84** | **55** |           **48** |
-| **memstash-sieve** | **1072** | **142** | **78** | **64** |           **48** |
-| otter-wtinylfu | 446 | 9.5 | 5.3 | 3.6 |              2.8 |
-| theine-wtinylfu | 287 | 10 | 5.8 | 4.3 |              3.6 |
-| ristretto | 169 | 28 | 18 | 12 |              9.2 |
-| bigcache | 108 | 34 | 27 | 24 |               28 |
-| freecache | 72 | 69 | 69 | 67 |               67 |
-| hashicorp-lru | 10 | 10 | 9.6 | 9.8 |              9.6 |
-| sync.Map\* | 563 | 156 | 110 | 86 |               75 |
+| **memstash-s3fifo** | **1256** | **155** | **103** | **76** |           **63** |
+| **memstash-clock** | **1253** | **160** | **100** | **66** |           **63** |
+| **memstash-wtinylfu** | **1251** | **146** | **103** | **66** |           **63** |
+| **memstash-sieve** | **1251** | **156** | **90** | **59** |           **44** |
+| theine-wtinylfu | 294 | 10 | 5.8 | 4.4 |              3.6 |
+| otter-wtinylfu | 184 | 9.7 | 5.3 | 3.6 |              2.8 |
+| ristretto | 163 | 19 | 9.4 | 6.2 |              4.7 |
+| bigcache | 111 | 34 | 27 | 25 |               28 |
+| freecache | 72 | 69 | 68 | 68 |               68 |
+| hashicorp-lru | 10 | 10 | 9.8 | 9.5 |              9.5 |
+| sync.Map\* | 575 | 155 | 110 | 86 |               77 |
 
-Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash tracks the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **12–19× their throughput.**
+Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash tracks the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **15–19× their throughput.**
 
 ### Hit ratio - higher is better
 
@@ -384,46 +384,46 @@ The "Est. Size" column is the cache's estimated memory footprint at the end of t
 
 | Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
 |---|--:|--:|--:|----------:|
-| **memstash-s3fifo** | **58.12%** | **34.65%** | **36.39%** |     29 MB |
-| memstash-wtinylfu | 57.96% | 34.78% | 36.40% |     29 MB |
-| memstash-sieve | 57.73% | 34.07% | 35.86% |     30 MB |
-| theine-wtinylfu | 57.28% | 34.52% | 35.72% |     54 MB |
-| memstash-clock | 57.04% | 33.01% | 34.63% |     25 MB |
-| otter-wtinylfu | 55.95% | 33.07% | 34.50% |     41 MB |
-| hashicorp-lru | 55.64% | 31.61% | 32.99% |     45 MB |
-| bigcache | 51.29% | 27.95% | 29.23% |     25 MB |
-| freecache | 51.01% | 28.32% | 29.57% |     54 MB |
-| ristretto | 11.57% | 9.01% | 8.82% |     26 MB |
+| ristretto | 58.30% | 35.35% | 37.02% | 68 MB |
+| **memstash-s3fifo** | **58.13%** | **34.66%** | **36.39%** | 34 MB |
+| memstash-wtinylfu | 57.96% | 34.74% | 36.53% | 34 MB |
+| memstash-sieve | 57.73% | 34.07% | 35.86% | 35 MB |
+| theine-wtinylfu | 57.54% | 34.63% | 35.66% | 54 MB |
+| memstash-clock | 57.04% | 33.01% | 34.63% | 30 MB |
+| otter-wtinylfu | 56.06% | 33.17% | 34.41% | 41 MB |
+| hashicorp-lru | 55.64% | 31.61% | 32.99% | 45 MB |
+| bigcache | 51.29% | 27.95% | 29.23% | 25 MB |
+| freecache | 51.01% | 28.32% | 29.64% | 54 MB |
 
 **Capacity = 100k items (~7% of the working set):**
 
 | Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
 |---|--:|--:|--:|--:|
-| memstash-wtinylfu | 41.83% | 26.30% | 27.06% | 6.8 MB |
-| theine-wtinylfu | 41.15% | 26.07% | 26.42% | 12 MB |
-| **memstash-s3fifo** | **41.10%** | **26.33%** | **27.18%** | 6.8 MB |
-| memstash-sieve | 39.62% | 25.20% | 25.14% | 6.7 MB |
-| otter-wtinylfu | 37.10% | 22.90% | 23.03% | 7.3 MB |
-| memstash-clock | 33.11% | 18.22% | 18.94% | 5.7 MB |
+| memstash-wtinylfu | 41.81% | 26.30% | 27.07% | 8.4 MB |
+| **memstash-s3fifo** | **41.11%** | **26.33%** | **27.18%** | 8.4 MB |
+| theine-wtinylfu | 40.95% | 25.98% | 26.50% | 12 MB |
+| memstash-sieve | 39.63% | 25.20% | 25.14% | 8.3 MB |
+| ristretto | 39.10% | 23.55% | 24.85% | 14 MB |
+| otter-wtinylfu | 37.77% | 23.55% | 23.77% | 7.3 MB |
+| memstash-clock | 33.12% | 18.22% | 18.93% | 7.3 MB |
 | hashicorp-lru | 30.03% | 15.62% | 16.53% | 9.6 MB |
 | bigcache | 28.26% | 15.71% | 15.48% | 6.1 MB |
-| freecache | 25.65% | 14.51% | 13.95% | 19 MB |
-| ristretto | 3.84% | 2.72% | 2.82% | 4.7 MB |
+| freecache | 25.65% | 14.48% | 14.00% | 19 MB |
 
 **Capacity = 10k items (~1% of the working set):**
 
 | Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
 |---|--:|--:|--:|--:|
-| theine-wtinylfu | 15.38% | 9.25% | 10.26% | 1.5 MB |
-| **memstash-s3fifo** | **14.78%** | **9.88%** | **10.29%** | 947 kB |
-| memstash-wtinylfu | 14.47% | 8.33% | 8.63% | 946 kB |
-| memstash-sieve | 13.51% | 8.83% | 8.82% | 929 kB |
-| otter-wtinylfu | 13.10% | 7.60% | 8.04% | 804 kB |
+| theine-wtinylfu | 15.36% | 9.24% | 10.24% | 1.5 MB |
+| **memstash-s3fifo** | **14.78%** | **9.89%** | **10.28%** | 1.1 MB |
+| memstash-wtinylfu | 14.47% | 8.31% | 8.63% | 1.1 MB |
+| otter-wtinylfu | 13.83% | 8.47% | 7.48% | 805 kB |
+| memstash-sieve | 13.50% | 8.86% | 8.83% | 1.1 MB |
 | bigcache | 11.75% | 7.46% | 6.09% | 1.5 MB |
+| ristretto | 10.15% | 5.58% | 5.39% | 1.9 MB |
 | freecache | 6.00% | 3.93% | 3.03% | 7.1 MB |
-| memstash-clock | 5.34% | 3.50% | 2.62% | 781 kB |
+| memstash-clock | 5.33% | 3.50% | 2.62% | 926 kB |
 | hashicorp-lru | 5.01% | 3.30% | 2.49% | 1.0 MB |
-| ristretto | 0.48% | 0.28% | 0.31% | 807 kB |
 
 ### Heap footprint, lower is better
 
@@ -432,18 +432,24 @@ causes is read back from the Go runtime, so these are real resident bytes rather
 [measurements](benchmarks/results/heap-size-100kk.txt) run one contender at a time: a single pass costs several GiB.
 The caches that only accept byte-slice or string keys were given the same values converted to `[8]byte`.
 
-| Cache | Heap | B/entry |
-|---|--:|--:|
-| xsync.MapOf\* | 3.7 GiB | 39.24 |
-| **memstash-s3fifo** | **4.1 GiB** | **43.92** |
-| ristretto | 4.3 GiB | 46.40 |
-| freecache | 5.7 GiB | 61.53 |
-| otter-wtinylfu | 7.6 GiB | 81.98 |
-| bigcache | 7.7 GiB | 84.84 |
-| hashicorp-lru | 9.7 GiB | 104.2 |
-| theine-wtinylfu | 11 GiB | 115.0 |
+| Cache | Heap | B/entry |  Get hot | Get full | Set hot | Set full |
+|---|--:|--:|---------:|--:|--:|--:|
+| xsync.MapOf\* | 3.7 GiB | 39.24 |    1.53 ns | 9.16 ns | 5.79 ns | 13.25 ns |
+| **memstash-s3fifo** | **3.9 GiB** | **42.05** | **2.49 ns** | **7.48 ns** | **17.64 ns** | **23.04 ns** |
+| freecache | 5.7 GiB | 61.53 |    37.10 ns | 48.48 ns | 38.80 ns | 50.25 ns |
+| otter-wtinylfu | 7.6 GiB | 81.98 |     3.64 ns | 13.71 ns | 422.8 ns | 525.2 ns |
+| bigcache | 7.7 GiB | 84.84 |    10.38 ns | 19.86 ns | 40.74 ns | 46.83 ns |
+| hashicorp-lru | 9.7 GiB | 104.2 |    133.8 ns | 502.4 ns | 145.8 ns | 485.2 ns |
+| theine-wtinylfu | 11 GiB | 115.0 |     6.97 ns | 20.29 ns | 339.2 ns | 463.4 ns |
+| ristretto | 14 GiB | 153.1 |    18.48 ns | 22.74 ns | 263.3 ns | 281.9 ns |
 
 \* `xsync.MapOf` performs no eviction — a lower-bound baseline, not a comparable cache.
+
+The four latency columns are measured on that same filled cache, so they show what a read and a write cost at 100M
+entries rather than at a benchmark-sized capacity. **hot** replays a 64k-key window from the middle of the fill: it
+stays in CPU cache and measures the code path itself. **full** draws uniformly over all 100M keys, so nearly every op
+is an LLC and a TLB miss — the gap between the two columns is what memory stalls cost per op at this cardinality. Both
+are aggregate ns/op across all cores, like the parallel table above.
 
 ## Contributing
 
