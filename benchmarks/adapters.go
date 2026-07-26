@@ -60,8 +60,7 @@ func (a *memstashAdapter) GetSize() uint64 { return uint64(a.c.TotalWeight()) }
 // --- ristretto ---
 
 type ristrettoAdapter struct {
-	c        *ristretto.Cache[uint64, uint64]
-	setCount uint64
+	c *ristretto.Cache[uint64, uint64]
 }
 
 func newRistretto(capacity int64) benchCache {
@@ -69,6 +68,8 @@ func newRistretto(capacity int64) benchCache {
 		NumCounters: capacity * 10,
 		MaxCost:     capacity,
 		BufferItems: 64,
+		// Without this ristretto charges every item sizeof(storeItem) = 56 units on top of the cost we pass.
+		IgnoreInternalCost: true,
 	})
 	if err != nil {
 		panic(err)
@@ -80,11 +81,6 @@ func (a *ristrettoAdapter) Name() string                  { return "ristretto" }
 func (a *ristrettoAdapter) Get(key uint64) (uint64, bool) { return a.c.Get(key) }
 func (a *ristrettoAdapter) Set(key, value uint64) {
 	a.c.Set(key, value, 1)
-	a.setCount++
-	if a.setCount >= 4096 {
-		a.c.Wait() // flush async buffer
-		a.setCount = 0
-	}
 }
 func (a *ristrettoAdapter) Settle()     { a.c.Wait() }
 func (a *ristrettoAdapter) Close()      { a.c.Close() }

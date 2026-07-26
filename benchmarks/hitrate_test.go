@@ -69,13 +69,18 @@ func oneHitTrace() []uint64 {
 
 // runTrace replays the stream through the cache: a miss is counted and triggers a Set.
 func runTrace(c benchCache, trace []uint64) float64 {
-	hits := 0
+	hits, pending := 0, 0
 	for _, key := range trace {
 		if _, ok := c.Get(key); ok {
 			hits++
 			continue
 		}
 		c.Set(key, key)
+		// A cache that drops writes when its buffer is full would otherwise be measured on the buffer, not the policy.
+		if pending++; pending >= settleEvery {
+			c.Settle()
+			pending = 0
+		}
 	}
 	c.Settle()
 	return 100 * float64(hits) / float64(len(trace))

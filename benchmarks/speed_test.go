@@ -48,9 +48,16 @@ func speedContenders() []benchCache {
 	}
 }
 
+// settleEvery is how many writes a fill may issue before it has to let the cache catch up. Ristretto's write buffer
+// holds 32k items and drops silently once full, so a fill that never settles lands only a fraction of its keys.
+const settleEvery = 4096
+
 func warmUp(c benchCache, keyCount uint64) {
 	for key := uint64(0); key < keyCount; key++ {
 		c.Set(key, key)
+		if key%settleEvery == settleEvery-1 {
+			c.Settle()
+		}
 	}
 	c.Settle() // Must finish warm-up writes.
 }

@@ -292,6 +292,9 @@ func fillAndMeasure(b *testing.B, tc footprintCase) benchCache {
 	for i := 0; i < bigBenchCapacity; i++ {
 		k := fillKey(i)
 		c.Set(k, k)
+		if i%settleEvery == settleEvery-1 {
+			c.Settle() // a lossy write buffer would otherwise leave the cache a fraction full - see settleEvery
+		}
 	}
 	c.Settle()
 

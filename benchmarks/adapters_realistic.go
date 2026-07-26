@@ -73,6 +73,8 @@ func newRistrettoBytes(budget int64, avgEntry int) benchCacheBytes {
 		},
 		MaxCost:     budget,
 		BufferItems: 64,
+		// entryCost already prices the entry;
+		IgnoreInternalCost: true,
 	})
 	if err != nil {
 		panic(err)
