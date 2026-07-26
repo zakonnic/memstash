@@ -34,7 +34,7 @@ update-packages: ## Update go modules versions
 	go get -u ./...
 	go mod tidy
 
-lint: ## Run linter with settings from .golangci.yml
+lint: ## Run linter with settings from .golangci.yml (needs golangci-lint v2)
 	golangci-lint run -v
 lint-fix: ## Linter tries to fix issues automatically
 	golangci-lint run -v --fix
@@ -61,15 +61,15 @@ bench-speed-random: ## Run the speed_random_test.go benchmarks (realistic random
 	go -C benchmarks test -run=xxx -bench='^BenchmarkRandom' ./...
 bench-hitrate: ## Run hitrate benchmarks
 	go -C benchmarks test -run='^TestHitRate$$' -v
-bench-real: ## Run hitrate benchmarks
-	go -C benchmarks test -run='^Benchmark(MemstashGetHitSerial|Get|Set|Mixed90_10|Throughput)$$' -v
+bench-real: ## Run realistic and non-standard pattern benchmarks
+	go -C benchmarks test -run=xxx -bench='^Benchmark(MemstashGetHitSerial)$$' -v
 	go -C benchmarks test -run='^TestHitRateRealistic$$' -v
 
 .PHONY: bench
 bench: bench-speed bench-hitrate ## Run benchmarks
 bench-100kk:
 	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprintMemstash -tags=long
-bench-100kk-all:
+bench-100kk-others:
 	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprint -tags=others
 
 integration-tests: ## Run integration tests against live redis/memcached (make up first); CGO off so the cgo-only valyala adapter is skipped

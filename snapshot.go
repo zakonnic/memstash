@@ -35,7 +35,7 @@ const (
 
 const (
 	snapshotMagic   = "memstash"
-	snapshotVersion = 2
+	snapshotVersion = 1
 	// snapshotHeaderSize is the magic, the version byte and the save timestamp.
 	snapshotHeaderSize = len(snapshotMagic) + 1 + 8
 	// maxSnapshotChunk bounds one encoded key or value so a corrupt length cannot turn into an arbitrary allocation.
