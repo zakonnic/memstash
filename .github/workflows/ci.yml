@@ -118,4 +118,14 @@ jobs:
           go-version: '1.26'
           check-latest: true
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
-      - run: govulncheck ./...
+      # Adapters and the integration suite are separate modules with their own dependency trees, so a
+      # root-only scan sees none of them. Keep going after a hit so one bad module doesn't hide the rest.
+      - name: govulncheck (every module)
+        run: |
+          status=0
+          for mod in $(git ls-files '*go.mod' | xargs -n1 dirname | sort -u); do
+            echo "::group::$mod"
+            govulncheck -C "$mod" ./... || status=1
+            echo "::endgroup::"
+          done
+          exit $status

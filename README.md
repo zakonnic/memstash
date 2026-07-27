@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/zakonnic/memstash/actions/workflows/ci.yml/badge.svg)](https://github.com/zakonnic/memstash/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/zakonnic/memstash.svg)](https://pkg.go.dev/github.com/zakonnic/memstash)
-[![Go Report Card](https://goreportcard.com/badge/github.com/zakonnic/memstash)](https://goreportcard.com/report/github.com/zakonnic/memstash)
 [![Release](https://img.shields.io/github/v/tag/zakonnic/memstash?filter=v*&sort=semver&label=release)](https://github.com/zakonnic/memstash/tags)
 [![Go](https://img.shields.io/github/go-mod/go-version/zakonnic/memstash)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -19,9 +18,9 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 
 ## Why memstash?
 
-- **Very fast.** More than 7× the parallel read throughput of [Ristretto](https://github.com/dgraph-io/ristretto) and 6× [Otter](https://github.com/maypok86/otter)'s; once writes enter the mix the gap widens past 10× — see [benchmarks](#benchmarks).
+- **Very fast.** More than 7× the parallel read throughput of [Ristretto](https://github.com/dgraph-io/ristretto) and 6× [Otter](https://github.com/maypok86/otter)'s; once writes enter the mix the gap widens even more — see [benchmarks](#benchmarks).
 - **Top-tier hit ratio.** The S3-FIFO policy sits with the best of them — Otter, [Theine](https://github.com/Yiling-J/theine-go), Ristretto — and takes the lead at the small and mid capacities where a cache actually has to choose, especially under scans and one-hit wonders.
-- **Lowest memory overhead.** 2× smaller footprint than Otter or [Bigcache](https://github.com/allegro/bigcache), see [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
+- **Lowest memory overhead.** ~2× smaller footprint than Otter or [Bigcache](https://github.com/allegro/bigcache), see [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
 - **Easy on the GC.** Items live inline in a per-shard flat hash table, so an insert allocates nothing. Growth swaps one array for a larger one - a few objects for the collector, never one per entry - and stops once the cache is at capacity.
 - **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No `interface{}`, no casts.
 - **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
@@ -89,7 +88,7 @@ func main() {
 }
 ```
 
-> `GetFromMemory` is the hottest, context-free read path. Use `Get` (which takes a `context.Context`) when an L2 is configured — it may hit the network on a memory miss.
+> Every method is safe to call from any number of goroutines;
 
 ### Read-through with a loader (singleflight)
 
@@ -134,7 +133,7 @@ client, _ := rueidis.NewClient(rueidis.ClientOption{
 
 // JSON values, string keys, 10-minute TTL applied to both tiers (L1 uses the default capacity).
 c, _ := rueidis_adapter.NewJSONCache[string, User](client, memstash.WithTTL(10*time.Minute))
-defer c.Close()
+defer c.Close() // waits for the write-back buffer to drain
 
 _ = c.Set(ctx, "user:42", user)     // L1 now, Redis shortly after (write-back)
 u, ok, err := c.Get(ctx, "user:42") // L1 hit → returns instantly; L1 miss → Redis, then promoted
@@ -264,7 +263,7 @@ c, err := rueidis_adapter.NewCache[int, Point](client, pointCodec{},
 )
 ```
 
-**Eviction policies** — four built-ins, selected with `WithPolicy`: `PolicyS3FIFO` (the default: quarantine + protected queue + ghost, the best all-rounder under scans and one-hit wonders), `PolicyClock` (GCLOCK, approximates LRU at FIFO cost), `PolicyWTinyLFU` (an admission window gated by a Count-Min frequency sketch that remembers keys across evictions — strong on skewed workloads), and `PolicySIEVE` (a single scan hand over the insertion order — the simplest, with an S3-FIFO-class hit rate). All share the same lock-free read path: a read only sets a 2-bit reference counter on the item's meta word.
+**Eviction policies** — four built-ins, selected with `WithPolicy`: [`PolicyS3FIFO`](https://s3fifo.com/) (the default: quarantine + protected queue + ghost, the best all-rounder under scans and one-hit wonders), [`PolicyClock`](https://en.wikipedia.org/wiki/Page_replacement_algorithm#Clock) (GCLOCK, approximates LRU at FIFO cost), [`PolicyWTinyLFU`](https://arxiv.org/abs/1512.00727) (an admission window gated by a Count-Min frequency sketch that remembers keys across evictions — strong on skewed workloads), and [`PolicySIEVE`](https://sievecache.com/) (a single scan hand over the insertion order — the simplest, with an S3-FIFO-class hit rate). All share the same lock-free read path: a read only sets a 2-bit reference counter on the item's meta word.
 
 **Custom eviction policy** — implement the `memstash.EvictionPolicy` interface (the same contract the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Rebuild`/`Bytes`, all called under the shard mutex) and plug its per-shard factory in:
 
@@ -331,12 +330,11 @@ Rolling your own is straightforward: implement the `memstash.L2Cache[K, V]` inte
 [Measured](benchmarks/results/out.txt) on an AMD Ryzen 9 9900X (Go 1.26.4). Reproduce with:
 
 ```sh
-# throughput and allocations (Get / Set / mixed 90-10) vs other libs and a plain sync.Map baseline
-make bench-speed
+make bench
 
-# hit ratio across Zipf, Zipf+scan, and one-hit-wonder workloads
-make bench-hitrate
+# make help # List all commands and benchmarks
 ```
+Configuration for all of them lives in [benchmarks/adapters.go](benchmarks/adapters.go).
 
 ![Read throughput](benchmarks/results/read_throughput.svg)
 
@@ -374,11 +372,13 @@ make bench-hitrate
 | hashicorp-lru | 10 | 10 | 9.8 | 9.5 |              9.5 |
 | sync.Map\* | 575 | 155 | 110 | 86 |               77 |
 
-Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) drop by more than an order of magnitude, while memstash tracks the eviction-free `sync.Map` baseline. At a 50/50 read-write split it sustains **15–19× their throughput.**
+Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) slow down by more than an order of magnitude, while memstash stays within reach of the eviction-free `sync.Map` baseline.
 
 ### Hit ratio - higher is better
 
-The "Est. Size" column is the cache's estimated memory footprint at the end of the one-hit-30% run (key + value bytes plus each implementation's own bookkeeping).
+The "Est. Size" column is the cache's estimated memory footprint at the end of the one-hit-30% run (key + value bytes
+plus each implementation's own bookkeeping). This is a rough estimate — for measured resident bytes see
+[heap footprint](#heap-footprint-lower-is-better).
 
 **Capacity = 500k items (~36% of the working set):**
 

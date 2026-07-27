@@ -1,4 +1,6 @@
 # Weekly dependency PRs. The adapters each pin a client SDK, so they are watched as separate modules.
+# Every entry groups twice: `groups` alone only covers version updates, so security fixes would otherwise
+# open one PR per advisory.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -8,6 +10,9 @@ updates:
     groups:
       actions:
         patterns: ['*']
+      actions-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /
@@ -15,6 +20,9 @@ updates:
       interval: weekly
     groups:
       core:
+        patterns: ['*']
+      core-security:
+        applies-to: security-updates
         patterns: ['*']
 
   - package-ecosystem: gomod
@@ -24,6 +32,9 @@ updates:
     groups:
       benchmarks:
         patterns: ['*']
+      benchmarks-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /tests/integration
@@ -31,6 +42,9 @@ updates:
       interval: monthly
     groups:
       integration:
+        patterns: ['*']
+      integration-security:
+        applies-to: security-updates
         patterns: ['*']
 
   - package-ecosystem: gomod
@@ -40,6 +54,9 @@ updates:
     groups:
       aerospike:
         patterns: ['*']
+      aerospike-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /l2/badger_adapter
@@ -47,6 +64,9 @@ updates:
       interval: weekly
     groups:
       badger:
+        patterns: ['*']
+      badger-security:
+        applies-to: security-updates
         patterns: ['*']
 
   - package-ecosystem: gomod
@@ -56,6 +76,9 @@ updates:
     groups:
       dynamo:
         patterns: ['*']
+      dynamo-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /l2/gomemcache_adapter
@@ -63,6 +86,9 @@ updates:
       interval: weekly
     groups:
       gomemcache:
+        patterns: ['*']
+      gomemcache-security:
+        applies-to: security-updates
         patterns: ['*']
 
   - package-ecosystem: gomod
@@ -72,6 +98,9 @@ updates:
     groups:
       goredis:
         patterns: ['*']
+      goredis-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /l2/mc_adapter
@@ -79,6 +108,9 @@ updates:
       interval: weekly
     groups:
       mc:
+        patterns: ['*']
+      mc-security:
+        applies-to: security-updates
         patterns: ['*']
 
   - package-ecosystem: gomod
@@ -88,6 +120,9 @@ updates:
     groups:
       mongo:
         patterns: ['*']
+      mongo-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /l2/pgx_adapter
@@ -95,6 +130,9 @@ updates:
       interval: weekly
     groups:
       pgx:
+        patterns: ['*']
+      pgx-security:
+        applies-to: security-updates
         patterns: ['*']
 
   - package-ecosystem: gomod
@@ -104,6 +142,9 @@ updates:
     groups:
       rainycape:
         patterns: ['*']
+      rainycape-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /l2/redigo_adapter
@@ -111,6 +152,9 @@ updates:
       interval: weekly
     groups:
       redigo:
+        patterns: ['*']
+      redigo-security:
+        applies-to: security-updates
         patterns: ['*']
 
   - package-ecosystem: gomod
@@ -120,6 +164,9 @@ updates:
     groups:
       redispipe:
         patterns: ['*']
+      redispipe-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /l2/rueidis_adapter
@@ -127,6 +174,9 @@ updates:
       interval: weekly
     groups:
       rueidis:
+        patterns: ['*']
+      rueidis-security:
+        applies-to: security-updates
         patterns: ['*']
 
   - package-ecosystem: gomod
@@ -136,6 +186,9 @@ updates:
     groups:
       sql:
         patterns: ['*']
+      sql-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /l2/tarantool_adapter
@@ -144,6 +197,9 @@ updates:
     groups:
       tarantool:
         patterns: ['*']
+      tarantool-security:
+        applies-to: security-updates
+        patterns: ['*']
 
   - package-ecosystem: gomod
     directory: /l2/valyala_adapter
@@ -151,4 +207,7 @@ updates:
       interval: weekly
     groups:
       valyala:
+        patterns: ['*']
+      valyala-security:
+        applies-to: security-updates
         patterns: ['*']
