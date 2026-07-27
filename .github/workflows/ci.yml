@@ -24,8 +24,8 @@ jobs:
         # The oldest supported toolchain (go.mod) and the current one.
         go: ['1.24', '1.26']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
@@ -38,12 +38,12 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
           check-latest: true
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
           args: --timeout=5m
@@ -71,8 +71,8 @@ jobs:
           - tarantool_adapter
           - valyala_adapter
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
           check-latest: true
@@ -95,8 +95,8 @@ jobs:
       MEMSTASH_TEST_AEROSPIKE_ADDR: 127.0.0.1:43219
       MEMSTASH_TEST_TARANTOOL_ADDR: 127.0.0.1:43220
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
           check-latest: true
@@ -112,8 +112,8 @@ jobs:
   vuln:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
           check-latest: true
