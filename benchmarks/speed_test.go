@@ -211,15 +211,13 @@ func BenchmarkShortCheckup(b *testing.B) {
 		strKeys[i] = "long-key:" + strconv.Itoa(i)
 	}
 
-	cStr, _ := memstash.New[string, int]()
-	mStr := sync.Map{}
+	cStr, _ := memstash.New[string, int](memstash.WithMemoryCapacity(nKeys * 4 / 3))
 	for i, k := range strKeys {
 		_ = cStr.Set(ctx, k, i)
-		mStr.Store(k, i)
 	}
 	defer cStr.Close()
 
-	cUuid, _ := memstash.New[uuid.UUID, int]()
+	cUuid, _ := memstash.New[uuid.UUID, int](memstash.WithMemoryCapacity(nKeys * 4 / 3))
 	uids := make([]uuid.UUID, nKeys)
 	mUuid := sync.Map{}
 	for i := range nKeys {
@@ -228,6 +226,12 @@ func BenchmarkShortCheckup(b *testing.B) {
 		mUuid.Store(uids[i], i)
 	}
 	defer cUuid.Close()
+
+	cInt, _ := memstash.New[int, int](memstash.WithMemoryCapacity(nKeys * 4 / 3))
+	for i := range nKeys {
+		_ = cInt.Set(ctx, i, i)
+	}
+	defer cInt.Close()
 
 	b.Run("memstash-string", func(b *testing.B) {
 		b.ReportAllocs()
@@ -257,28 +261,15 @@ func BenchmarkShortCheckup(b *testing.B) {
 		})
 	})
 
-	b.Run("sync.Map-string", func(b *testing.B) {
+	// The cheapest key there is: no slice load, no string hashing, the whole working set in cache.
+	b.Run("memstash-int", func(b *testing.B) {
 		b.ReportAllocs()
 		b.RunParallel(func(pb *testing.PB) {
 			i := rand.Int()
 			var local int
 			for pb.Next() {
-				v, _ := mStr.Load(strKeys[i&keyMask])
-				local += v.(int)
-				i++
-			}
-			sink.Add(int64(local))
-		})
-	})
-
-	b.Run("sync.Map-uuid", func(b *testing.B) {
-		b.ReportAllocs()
-		b.RunParallel(func(pb *testing.PB) {
-			i := rand.Int()
-			var local int
-			for pb.Next() {
-				v, _ := mUuid.Load(uids[i&keyMask])
-				local += v.(int)
+				v, _, _ := cInt.Get(ctx, i&keyMask)
+				local += v
 				i++
 			}
 			sink.Add(int64(local))
