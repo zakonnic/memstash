@@ -368,27 +368,3 @@ func (c *Cache[K, V]) runLoader(ctx context.Context, keys []K, load BatchLoaderF
 	c.storeLoadedBatch(ctx, loaded)
 	return loaded, nil
 }
-
-func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {
-	if len(loaded) == 0 {
-		return
-	}
-	expireOff := c.expireOffset()
-	for _, item := range loaded {
-		c.setMemory(item.Key, item.Value, expireOff)
-	}
-	c.stats.addSets(int64(len(loaded)))
-	switch c.l2WritePolicy {
-	case WriteDisabled:
-	case WriteThrough:
-		if err := c.l2Cache.BatchSet(ctx, loaded, c.ttl); err != nil {
-			for _, item := range loaded {
-				c.reportL2Err(item.Key, err)
-			}
-		}
-	default:
-		for _, item := range loaded {
-			c.enqueueWriteBack(item.Key, item.Value)
-		}
-	}
-}

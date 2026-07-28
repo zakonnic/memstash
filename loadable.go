@@ -63,10 +63,20 @@ func (lc *LoadableCache[K, V]) GetOrLoad(ctx context.Context, key K) (V, error) 
 	return lc.Cache.GetOrLoad(ctx, key, lc.load)
 }
 
+// GetAndRefresh is Cache.GetAndRefresh with the constructor's loader.
+func (lc *LoadableCache[K, V]) GetAndRefresh(ctx context.Context, key K) (V, bool) {
+	return lc.Cache.GetAndRefresh(ctx, key, lc.load)
+}
+
 // BatchGetOrLoad returns the values for keys, resolving misses with the constructor's loader.
 //
 // NewLoadable synthesizes the batch loader from the single-key one (sequential calls); when the data source has a real
 // batch API, build the cache with NewBatchLoadable instead.
 func (lc *LoadableCache[K, V]) BatchGetOrLoad(ctx context.Context, keys []K) (List[K, V], error) {
 	return lc.Cache.BatchGetOrLoad(ctx, keys, lc.batchLoad)
+}
+
+// BatchGetAndRefresh is Cache.BatchGetAndRefresh with the constructor's loader.
+func (lc *LoadableCache[K, V]) BatchGetAndRefresh(ctx context.Context, keys []K) List[K, V] {
+	return lc.Cache.BatchGetAndRefresh(ctx, keys, lc.batchLoad)
 }
