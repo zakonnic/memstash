@@ -249,6 +249,9 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	for _, key := range keys {
 		sh, keyHash := c.shardAndHash(key)
+		if !c.livePresent(sh, keyHash, key) {
+			continue
+		}
 		sh.mu.Lock()
 		c.deleteLocked(sh, keyHash, key, CauseInvalidation, &deletions)
 		sh.mu.Unlock()

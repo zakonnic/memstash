@@ -525,6 +525,38 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K, idx uint32) 
 	}
 }
 
+// livePresent probes for key without taking the shard mutex, so deleting a key the cache does not hold never queues
+// behind the writers of its shard. A Set racing the probe is the Get-racing-Set window: the delete lands before it.
+func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
+	storage := sh.items.GetStorage()
+	tagged := itemstore.TagOf(keyHash)
+	home := storage.Home(keyHash)
+	groupEnd := (home | 7) + 1
+	var entry itemstore.Entry[K, V]
+	for pos := home; ; pos++ {
+		if pos == groupEnd && !storage.Overflowed(home) {
+			return false
+		}
+		item := storage.At(pos)
+		for {
+			metaWord := item.Load()
+			if metaWord == 0 {
+				return false
+			}
+			if metaWord&itemstore.DeadOrTag != tagged {
+				break
+			}
+			if !item.SnapshotInto(&entry, metaWord) {
+				continue
+			}
+			if entry.Key == key {
+				return true
+			}
+			break
+		}
+	}
+}
+
 // killAt kills the item in its slot and subtracts its weight; the slot stays a non-reusable tombstone until
 // its queue node is swept. Called under the shard mutex.
 func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *itemstore.Item[K, V],
@@ -597,12 +629,14 @@ func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K, cause
 // The memory the item held is reclaimed on the next eviction pass or tombstone sweep.
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	sh, keyHash := c.shardAndHash(key)
-	var deletions []deletion[K, V] // stays nil unless a handler is configured
-	sh.mu.Lock()
-	c.deleteLocked(sh, keyHash, key, CauseInvalidation, &deletions)
-	sh.mu.Unlock()
-	if len(deletions) > 0 {
-		c.callOnDeletion(deletions)
+	if c.livePresent(sh, keyHash, key) {
+		var deletions []deletion[K, V] // stays nil unless a handler is configured
+		sh.mu.Lock()
+		c.deleteLocked(sh, keyHash, key, CauseInvalidation, &deletions)
+		sh.mu.Unlock()
+		if len(deletions) > 0 {
+			c.callOnDeletion(deletions)
+		}
 	}
 	c.stats.addDeletes(1)
 
