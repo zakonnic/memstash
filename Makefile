@@ -64,6 +64,8 @@ bench-hitrate: ## Run hitrate benchmarks
 bench-real: ## Run realistic and non-standard pattern benchmarks
 	go -C benchmarks test -run=xxx -bench='^Benchmark(MemstashGetHitSerial)$$' -v
 	go -C benchmarks test -run='^TestHitRateRealistic$$' -v
+bench-flight: ## Run hitrate benchmarks for singleflight
+	go -C benchmarks test -run=xxx -bench='^BenchmarkFlight' ./...
 
 .PHONY: bench
 bench: bench-speed bench-hitrate ## Run benchmarks

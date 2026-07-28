@@ -25,7 +25,7 @@ type batchGroup[K comparable, V any] struct {
 // BatchGetFromMemory looks the keys up in memory only and appends every found pair to dst, which it returns;
 // Lookups are software-pipelined in groups. Pass a reused dst (dst[:0]) to keep the call allocation-free.
 func (c *Cache[K, V]) BatchGetFromMemory(keys []K, dst List[K, V]) List[K, V] {
-	dst, _, hits := c.batchGetMemory(keys, dst, nil)
+	dst, _, hits := c.batchGetMemory(keys, dst, false)
 	c.stats.addMemHits(hits)
 	c.stats.addMemMisses(int64(len(keys)) - hits)
 	return dst
@@ -34,23 +34,53 @@ func (c *Cache[K, V]) BatchGetFromMemory(keys []K, dst List[K, V]) List[K, V] {
 // BatchGetFromMemoryWithMissing is BatchGetFromMemory that also returns the keys not found, appended to a fresh
 // slice.
 func (c *Cache[K, V]) BatchGetFromMemoryWithMissing(keys []K, dst List[K, V]) (List[K, V], []K) {
-	dst, missing, hits := c.batchGetMemory(keys, dst, make([]K, 0, len(keys)))
+	dst, missing, hits := c.batchGetMemory(keys, dst, true)
 	c.stats.addMemHits(hits)
 	c.stats.addMemMisses(int64(len(keys)) - hits)
 	return dst, missing
 }
 
-func (c *Cache[K, V]) batchGetMemory(keys []K, dst List[K, V], missing []K) (List[K, V], []K, int64) {
+// smallBatch is where the pipeline stops paying for itself: batchGroup's scratch buffer is zeroed per call whatever
+// the key count, and below this it costs more than the overlapped misses save.
+const smallBatch = 4
+
+// batchGetMemory reads the keys from memory. dst and the missing list are grown on first use and sized for the whole
+// batch, so a call that hits nothing (or misses nothing) allocates nothing.
+func (c *Cache[K, V]) batchGetMemory(keys []K, dst List[K, V], wantMissing bool) (List[K, V], []K, int64) {
+	var missing []K
 	hits := int64(0)
+	if len(keys) <= smallBatch {
+		for _, key := range keys {
+			if value, ok := c.getMemory(key); ok {
+				if dst == nil {
+					dst = make(List[K, V], 0, len(keys))
+				}
+				dst = append(dst, KeyVal[K, V]{Key: key, Value: value})
+				hits++
+			} else if wantMissing {
+				if missing == nil {
+					missing = make([]K, 0, len(keys))
+				}
+				missing = append(missing, key)
+			}
+		}
+		return dst, missing, hits
+	}
 	var group batchGroup[K, V]
 	for start := 0; start < len(keys); start += batchGroupSize {
 		part := keys[start:min(start+batchGroupSize, len(keys))]
 		c.batchGetGroup(part, &group)
 		for i := range part {
 			if group.hit[i] {
+				if dst == nil {
+					dst = make(List[K, V], 0, len(keys))
+				}
 				dst = append(dst, KeyVal[K, V]{Key: part[i], Value: group.value[i]})
 				hits++
-			} else if missing != nil {
+			} else if wantMissing {
+				if missing == nil {
+					missing = make([]K, 0, len(keys))
+				}
 				missing = append(missing, part[i])
 			}
 		}
@@ -129,12 +159,12 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 // error the memory part gathered so far is returned alongside the error.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error) {
 	if c.l2Cache == nil {
-		found, _, hits := c.batchGetMemory(keys, make(List[K, V], 0, len(keys)), nil)
+		found, _, hits := c.batchGetMemory(keys, nil, false)
 		c.stats.addMemHits(hits)
 		c.stats.addMemMisses(int64(len(keys)) - hits)
 		return found, nil
 	}
-	found, missing, hits := c.batchGetMemory(keys, make(List[K, V], 0, len(keys)), make([]K, 0, len(keys)))
+	found, missing, hits := c.batchGetMemory(keys, nil, true)
 	c.stats.addMemHits(hits)
 	if len(missing) == 0 {
 		return found, nil
@@ -246,7 +276,7 @@ func (c *Cache[K, V]) BatchGetOrLoad(ctx context.Context, keys []K, load BatchLo
 	if load == nil {
 		return nil, ErrNilLoader
 	}
-	found, missing, hits := c.batchGetMemory(keys, make(List[K, V], 0, len(keys)), make([]K, 0, len(keys)))
+	found, missing, hits := c.batchGetMemory(keys, nil, true)
 	c.stats.addMemHits(hits)
 	if len(missing) == 0 {
 		return found, nil
@@ -258,15 +288,13 @@ func (c *Cache[K, V]) BatchGetOrLoad(ctx context.Context, keys []K, load BatchLo
 	c.stats.addMemMisses(int64(len(joined)))
 
 	for _, flight := range joined {
-		select {
-		case <-flight.call.done:
-			if flight.call.err == nil && flight.call.ok {
-				found = append(found, KeyVal[K, V]{Key: flight.key, Value: flight.call.val})
-			} else if loadErr == nil {
-				loadErr = flight.call.err
-			}
-		case <-ctx.Done():
-			return found, ctx.Err()
+		if err := flight.call.wait(ctx); err != nil {
+			return found, err
+		}
+		if flight.call.err == nil && flight.call.ok {
+			found = append(found, KeyVal[K, V]{Key: flight.key, Value: flight.call.val})
+		} else if loadErr == nil {
+			loadErr = flight.call.err
 		}
 	}
 	return found, loadErr
@@ -278,70 +306,29 @@ type joinedFlight[K comparable, V any] struct {
 }
 
 func (c *Cache[K, V]) singleflight(ctx context.Context, load BatchLoaderFunc[K, V], found *List[K, V], missing []K) ([]joinedFlight[K, V], error) {
-	// Split the misses into flights we own and flights we join.
-	var owned []K
-	var joined []joinedFlight[K, V]
-	ownedCalls := make(map[K]*flightCall[V], len(missing))
-	for _, key := range missing {
-		call := &flightCall[V]{done: make(chan struct{})}
-		if winner, loaded := c.flights.LoadOrStore(key, call); loaded {
-			joined = append(joined, joinedFlight[K, V]{key: key, call: winner})
-		} else {
-			owned = append(owned, key)
-			ownedCalls[key] = call
-		}
+	owned, calls, joined := c.claimBatch(missing)
+	if len(owned) == 0 {
+		return joined, nil
 	}
+	defer c.releaseAll(owned, calls)
 
-	var loadErr error
-	if len(owned) > 0 {
-		finished := false
-		defer func() {
-			if finished {
-				return
-			}
-			// Loader panic/Goexit: resolve the owned flights so waiters are not stuck (same as in GetOrLoad).
-			for _, key := range owned {
-				call := ownedCalls[key]
-				call.err = ErrLoaderPanic
-				c.flights.Delete(key)
-				close(call.done)
-			}
-		}()
-		resolved, err := c.batchLoad(ctx, owned, load)
-		loadErr = err
-
-		// Publish every resolved value to its flight.
-		for _, item := range resolved {
-			call, isOwned := ownedCalls[item.Key]
-			if !isOwned {
-				continue // the loader returned a key nobody asked for: cached by batchLoad, but not part of this call
-			}
-			call.val, call.ok = item.Value, true
-			*found = append(*found, item)
-		}
-		finished = true
-		// Close every owned flight; the ones left unresolved carry the (possibly nil) error.
-		for _, key := range owned {
-			call := ownedCalls[key]
-			if !call.ok {
-				call.err = err // nil when the key is simply not found anywhere
-			}
-			c.flights.Delete(key) // before close: new calls will start a fresh flight
-			close(call.done)
-		}
-	}
-
-	return joined, loadErr
+	resolved, err := c.batchLoad(ctx, owned, load)
+	assignLoaded(owned, calls, resolved, err, found)
+	return joined, err
 }
 
 // batchLoad resolves the owned keys: first from L2 in one BatchGet, the rest with one loader call; freshly loaded
 // values are stored back according to the write policy (mirroring doLoad). The returned List may be partial when
 // err != nil.
 func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderFunc[K, V]) (List[K, V], error) {
+	if c.l2Cache == nil {
+		c.stats.addMemMisses(int64(len(keys)))
+		return c.runLoader(ctx, keys, load)
+	}
 	resolved := make(List[K, V], 0, len(keys))
 	resolvedKeys := make(map[K]struct{}, len(keys))
 	toLoad := keys
-	if c.l2Cache != nil {
+	{
 		fromL2, err := c.l2Cache.BatchGet(ctx, keys)
 		if err != nil {
 			// Fall back to the loader for everything; report the L2 error via the callback.
@@ -367,33 +354,41 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 	if len(toLoad) == 0 {
 		return resolved, nil
 	}
-	if c.l2Cache != nil {
-		c.stats.addL2Misses(int64(len(toLoad)))
-	} else {
-		c.stats.addMemMisses(int64(len(toLoad)))
-	}
+	c.stats.addL2Misses(int64(len(toLoad)))
+	loaded, err := c.runLoader(ctx, toLoad, load)
+	return append(resolved, loaded...), err
+}
 
-	loaded, err := load(ctx, toLoad)
+// runLoader loads the keys and caches whatever came back, handing the loader's own list straight to the caller.
+func (c *Cache[K, V]) runLoader(ctx context.Context, keys []K, load BatchLoaderFunc[K, V]) (List[K, V], error) {
+	loaded, err := load(ctx, keys)
 	if err != nil {
-		return resolved, err
+		return nil, err
 	}
+	c.storeLoadedBatch(ctx, loaded)
+	return loaded, nil
+}
+
+func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {
+	if len(loaded) == 0 {
+		return
+	}
+	expireOff := c.expireOffset()
 	for _, item := range loaded {
-		c.setMemory(item.Key, item.Value, c.expireOffset())
-		resolved = append(resolved, item)
+		c.setMemory(item.Key, item.Value, expireOff)
 	}
 	c.stats.addSets(int64(len(loaded)))
 	switch c.l2WritePolicy {
+	case WriteDisabled:
 	case WriteThrough:
-		// The values are already in hand - an L2 write error must not fail the read.
-		if writeErr := c.l2Cache.BatchSet(ctx, loaded, c.ttl); writeErr != nil {
+		if err := c.l2Cache.BatchSet(ctx, loaded, c.ttl); err != nil {
 			for _, item := range loaded {
-				c.reportL2Err(item.Key, writeErr)
+				c.reportL2Err(item.Key, err)
 			}
 		}
-	case WriteBack:
+	default:
 		for _, item := range loaded {
 			c.enqueueWriteBack(item.Key, item.Value)
 		}
 	}
-	return resolved, nil
 }

@@ -15,7 +15,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/zakonnic/memstash/internal/eviction"
 	"github.com/zakonnic/memstash/internal/itemstore"
 )
@@ -79,7 +78,7 @@ type Cache[K comparable, V any] struct {
 	onL2Error         func(key K, err error)
 	writeCh           chan l2Write[K, V]
 
-	flights *xsync.MapOf[K, *flightCall[V]]
+	flights []flightShard[K, V]
 	stats   Stats
 
 	stop      chan struct{}
@@ -151,6 +150,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	c := &Cache[K, V]{
 		costFunc:          cfg.CostFunc,
 		shards:            make([]shard[K, V], numShards),
+		flights:           make([]flightShard[K, V], numShards),
 		shardMask:         uint32(numShards - 1),
 		seed:              maphash.MakeSeed(),
 		epoch:             time.Now(),
@@ -160,7 +160,6 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		writeBackBatching: cfg.WriteBackBatching,
 		onL2Error:         cfg.OnL2Error,
 		onDeletion:        cfg.OnDeletion,
-		flights:           xsync.NewMapOf[K, *flightCall[V]](),
 		stats:             newStats(cfg.StatsEnabled),
 		stop:              make(chan struct{}),
 	}
@@ -176,6 +175,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		if int64(i) < remainder {
 			sh.cap++ // spread the capacity remainder over the first shards
 		}
+		c.flights[i].m = make(map[K]*flightCall[V])
 		sh.items.Store(itemstore.NewFlatHashMap[K, V](minTableSlots))
 		if cfg.CustomPolicy != nil {
 			sh.policy = cfg.CustomPolicy(&sh.items, sh.cap)
@@ -614,37 +614,25 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		return value, nil
 	}
 
-	call := &flightCall[V]{done: make(chan struct{})}
-	if winner, loaded := c.flights.LoadOrStore(key, call); loaded {
+	call := &flightCall[V]{}
+	if winner, running := c.claim(key, call); running {
 		// A flight is already in progress - wait for its result or for the context to be canceled (the owner keeps
 		// loading on behalf of everyone else). The key was not in memory when this call looked, and this call itself
 		// never reaches L2 - the owner does: a memory miss.
 		c.stats.addMemMisses(1)
-		select {
-		case <-winner.done:
-			return winner.val, winner.err
-		case <-ctx.Done():
+		if err := winner.wait(ctx); err != nil {
 			var zero V
-			return zero, ctx.Err()
+			return zero, err
 		}
+		return winner.val, winner.err
 	}
 
-	finished := false
-	defer func() {
-		if finished {
-			return
-		}
-		// The loader panicked (or called runtime.Goexit): resolve the flight so waiters are not stuck forever and the
-		// key stays loadable; the panic itself keeps propagating to this caller.
-		call.err = ErrLoaderPanic
-		c.flights.Delete(key)
-		close(call.done)
-	}()
+	// ErrLoaderPanic stands until doLoad returns: a loader that panics or Goexits must not leave waiters stuck.
+	call.err = ErrLoaderPanic
+	defer c.release(key, call)
+
 	value, err := c.doLoad(ctx, key, load)
-	finished = true
 	call.val, call.err, call.ok = value, err, err == nil
-	c.flights.Delete(key) // before close: new calls will start a fresh flight
-	close(call.done)
 	return value, err
 }
 
@@ -674,19 +662,24 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 		var zero V
 		return zero, err
 	}
+	c.storeLoaded(ctx, key, value)
+	return value, nil
+}
+
+// storeLoaded caches a freshly loaded value and forwards it to L2 per WritePolicy. The value is already in hand, so
+// an L2 write error is reported rather than returned.
+func (c *Cache[K, V]) storeLoaded(ctx context.Context, key K, value V) {
 	c.setMemory(key, value, c.expireOffset())
 	c.stats.addSets(1)
-	if c.l2WritePolicy != WriteDisabled {
-		if c.l2WritePolicy == WriteThrough {
-			// The value is already in hand - an L2 write error must not fail the read.
-			if writeErr := c.l2Cache.Set(ctx, key, value, c.ttl); writeErr != nil {
-				c.reportL2Err(key, writeErr)
-			}
-		} else {
-			c.enqueueWriteBack(key, value)
+	switch c.l2WritePolicy {
+	case WriteDisabled:
+	case WriteThrough:
+		if err := c.l2Cache.Set(ctx, key, value, c.ttl); err != nil {
+			c.reportL2Err(key, err)
 		}
+	default:
+		c.enqueueWriteBack(key, value)
 	}
-	return value, nil
 }
 
 // Iterator returns an iterator over all live first-level entries (L2 is not scanned). The walk is lock-free and
@@ -765,8 +758,8 @@ func (c *Cache[K, V]) Weight() int64 {
 	return total
 }
 
-// xsyncBucketBytes is the fixed size of one xsync.MapOf bucket (the flights map).
-const xsyncBucketBytes = 64
+// flightShardBytes is one in-flight registry stripe with its empty map header.
+const flightShardBytes = 64 + 48
 
 // TotalWeight estimates the total memory footprint of the cache's first-level structures: item tables (items carry
 // their Entry inline), eviction bookkeeping and the fixed parts (the Cache struct, shards, flights buckets,
@@ -777,7 +770,7 @@ const xsyncBucketBytes = 64
 func (c *Cache[K, V]) TotalWeight() int64 {
 	total := int64(unsafe.Sizeof(*c))
 	total += int64(len(c.shards)) * int64(unsafe.Sizeof(shard[K, V]{}))
-	total += int64(c.flights.Stats().TotalBuckets) * xsyncBucketBytes
+	total += int64(len(c.flights)) * flightShardBytes
 
 	for i := range c.shards {
 		sh := &c.shards[i]
@@ -959,15 +952,6 @@ func (c *Cache[K, V]) writeBackLoop() {
 			}
 		}
 	}
-}
-
-// flightCall is one singleflight flight: val, err and ok are published strictly before close(done). ok separates
-// "loaded" from "not found" - a batch loader may legitimately omit a key.
-type flightCall[V any] struct {
-	done chan struct{}
-	val  V
-	err  error
-	ok   bool
 }
 
 // KeyVal is one key/value pair of a batch result.
