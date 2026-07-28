@@ -22,6 +22,7 @@ type benchCache interface {
 	Name() string
 	Get(key uint64) (uint64, bool)
 	Set(key uint64, value uint64)
+	Delete(key uint64)
 	// Settle blocks until the async maintenance triggered by earlier writes has completed.
 	Settle()
 	Close()
@@ -51,6 +52,9 @@ func (a *memstashAdapter) Name() string                  { return a.name }
 func (a *memstashAdapter) Get(key uint64) (uint64, bool) { return a.c.GetFromMemory(key) }
 func (a *memstashAdapter) Set(key, value uint64) {
 	_ = a.c.Set(context.Background(), key, value)
+}
+func (a *memstashAdapter) Delete(key uint64) {
+	_ = a.c.Delete(context.Background(), key)
 }
 func (a *memstashAdapter) Settle()         {} // memory writes are synchronous;
 func (a *memstashAdapter) Close()          { a.c.Close() }
@@ -82,9 +86,10 @@ func (a *ristrettoAdapter) Get(key uint64) (uint64, bool) { return a.c.Get(key) 
 func (a *ristrettoAdapter) Set(key, value uint64) {
 	a.c.Set(key, value, 1)
 }
-func (a *ristrettoAdapter) Settle()     { a.c.Wait() }
-func (a *ristrettoAdapter) Close()      { a.c.Close() }
-func (a *ristrettoAdapter) Expose() any { return a.c }
+func (a *ristrettoAdapter) Delete(key uint64) { a.c.Del(key) }
+func (a *ristrettoAdapter) Settle()           { a.c.Wait() }
+func (a *ristrettoAdapter) Close()            { a.c.Close() }
+func (a *ristrettoAdapter) Expose() any       { return a.c }
 
 // GetSize falls back to reflection: ristretto has no byte-accounting API (Metrics tracks cost units, always 1 here),
 // and its store is a plain mutex-guarded Go map, so SizeOf sees all of it.
@@ -110,9 +115,10 @@ func (a *otterAdapter) Set(key, value uint64)         { a.c.Set(key, value) }
 
 // Settle runs pending maintenance synchronously. Without it the lazy frequency-sketch init
 // races into the timed section and flips the read path mid-run.
-func (a *otterAdapter) Settle()     { a.c.CleanUp() }
-func (a *otterAdapter) Close()      { a.c.StopAllGoroutines() }
-func (a *otterAdapter) Expose() any { return a.c }
+func (a *otterAdapter) Delete(key uint64) { a.c.Invalidate(key) }
+func (a *otterAdapter) Settle()           { a.c.CleanUp() }
+func (a *otterAdapter) Close()            { a.c.StopAllGoroutines() }
+func (a *otterAdapter) Expose() any       { return a.c }
 
 type otterNode[K comparable, V any] struct {
 	key       K
@@ -147,6 +153,7 @@ func newTheine(capacity int64) benchCache {
 func (a *theineAdapter) Name() string                  { return "theine-wtinylfu" }
 func (a *theineAdapter) Get(key uint64) (uint64, bool) { return a.c.Get(key) }
 func (a *theineAdapter) Set(key, value uint64)         { a.c.Set(key, value, 1) }
+func (a *theineAdapter) Delete(key uint64)             { a.c.Delete(key) }
 func (a *theineAdapter) Settle()                       { a.c.Wait() }
 func (a *theineAdapter) Close()                        { a.c.Close() }
 func (a *theineAdapter) Expose() any                   { return a.c }
@@ -173,6 +180,7 @@ func newLRU(capacity int64) benchCache {
 func (a *lruAdapter) Name() string                  { return "hashicorp-lru" }
 func (a *lruAdapter) Get(key uint64) (uint64, bool) { return a.c.Get(key) }
 func (a *lruAdapter) Set(key, value uint64)         { a.c.Add(key, value) }
+func (a *lruAdapter) Delete(key uint64)             { a.c.Remove(key) }
 func (a *lruAdapter) Settle()                       {}
 func (a *lruAdapter) Close()                        {}
 func (a *lruAdapter) Expose() any                   { return a.c }
@@ -208,9 +216,10 @@ func (a *freecacheAdapter) Set(key, value uint64) {
 	binary.LittleEndian.PutUint64(buf[:], value)
 	_ = a.c.SetInt(int64(key), buf[:], 0) // expireSeconds=0: never expire, only size-based eviction
 }
-func (a *freecacheAdapter) Settle()     {}
-func (a *freecacheAdapter) Close()      {}
-func (a *freecacheAdapter) Expose() any { return a.c }
+func (a *freecacheAdapter) Delete(key uint64) { a.c.DelInt(int64(key)) }
+func (a *freecacheAdapter) Settle()           {}
+func (a *freecacheAdapter) Close()            {}
+func (a *freecacheAdapter) Expose() any       { return a.c }
 
 // GetSize uses reflection and is cheap even at 100M entries: entries live as raw bytes inside per-segment ring
 // buffers, so SizeOf sizes the slices and never walks an entry.
@@ -270,9 +279,10 @@ func bigcacheKey(key uint64) string {
 	binary.LittleEndian.PutUint64(buf[:], key)
 	return string(buf[:])
 }
-func (a *bigcacheAdapter) Settle()     {}
-func (a *bigcacheAdapter) Close()      { _ = a.c.Close() }
-func (a *bigcacheAdapter) Expose() any { return a.c }
+func (a *bigcacheAdapter) Delete(key uint64) { _ = a.c.Delete(bigcacheKey(key)) }
+func (a *bigcacheAdapter) Settle()           {}
+func (a *bigcacheAdapter) Close()            { _ = a.c.Close() }
+func (a *bigcacheAdapter) Expose() any       { return a.c }
 
 // GetSize uses reflection rather than bigcache's own Capacity(), which counts only the ring buffers and misses the
 // hash index.
@@ -293,6 +303,7 @@ func (a *syncMapAdapter) Get(key uint64) (uint64, bool) {
 	return value.(uint64), true
 }
 func (a *syncMapAdapter) Set(key, value uint64) { a.m.Store(key, value) }
+func (a *syncMapAdapter) Delete(key uint64)     { a.m.Delete(key) }
 func (a *syncMapAdapter) Settle()               {}
 func (a *syncMapAdapter) Close()                {}
 func (a *syncMapAdapter) Expose() any           { return &a.m }
@@ -310,6 +321,7 @@ func newXsyncMap() benchCache { return &xsyncMapAdapter{m: xsync.NewMapOf[uint64
 func (a *xsyncMapAdapter) Name() string                  { return "xsync.MapOf" }
 func (a *xsyncMapAdapter) Get(key uint64) (uint64, bool) { return a.m.Load(key) }
 func (a *xsyncMapAdapter) Set(key, value uint64)         { a.m.Store(key, value) }
+func (a *xsyncMapAdapter) Delete(key uint64)             { a.m.Delete(key) }
 func (a *xsyncMapAdapter) Settle()                       {}
 func (a *xsyncMapAdapter) Close()                        {}
 func (a *xsyncMapAdapter) Expose() any                   { return a.m }

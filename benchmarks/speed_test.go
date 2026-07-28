@@ -157,6 +157,49 @@ func BenchmarkSet(b *testing.B) {
 	}
 }
 
+// BenchmarkDelete measures removals of keys that are present. A delete is destructive, so the key is put back right
+// after: the pair is what keeps the population steady, and every delete a hit. The reported cost is the pair - read
+// it against BenchmarkSet, which measures the other half on its own.
+func BenchmarkDelete(b *testing.B) {
+	keys := zipfSeq(seqLen, seqHitMax-1)
+	for _, c := range speedContenders() {
+		warmUp(c, seqHitMax)
+		b.Run(c.Name(), func(b *testing.B) {
+			b.ReportAllocs()
+			b.RunParallel(func(pb *testing.PB) {
+				i := rand.Int()
+				for pb.Next() {
+					key := keys[i&seqMask]
+					c.Delete(key)
+					c.Set(key, key)
+					i++
+				}
+			})
+		})
+		c.Close()
+	}
+}
+
+// BenchmarkDeleteMiss removes keys the cache never held: the probe walks a full table and finds nothing, so this is
+// the delete path without any of the bookkeeping a hit triggers. Nothing is removed, so it needs no refill.
+func BenchmarkDeleteMiss(b *testing.B) {
+	keys := zipfSeq(seqLen, seqHitMax-1)
+	for _, c := range speedContenders() {
+		warmUp(c, seqHitMax)
+		b.Run(c.Name(), func(b *testing.B) {
+			b.ReportAllocs()
+			b.RunParallel(func(pb *testing.PB) {
+				i := rand.Int()
+				for pb.Next() {
+					c.Delete(keys[i&seqMask] + seqHitMax) // past the warmed range: always absent
+					i++
+				}
+			})
+		})
+		c.Close()
+	}
+}
+
 func BenchmarkShortCheckup(b *testing.B) {
 	ctx := context.Background()
 
