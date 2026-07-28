@@ -6,9 +6,15 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/zakonnic/memstash)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-**An unreasonably fast, memory-first cache for Go: lock-free reads, an allocation-free hot path, and an optional second tier (Redis and friends) that costs nothing until you plug it in. Simple by default, deep when you need it.**
+**An unreasonably fast two-level cache for Go — tuned hard at both ends.
+Simple by default, deep when you need it.**
 
-Memstash keeps the keys you touch most in your process, where a read can cost less than a nanosecond (with memstash, anyway). But your whole dataset is usually far larger — that's when you add a second tier, and the same cache will serve millions of entries, shared by every node and still warm after a restart. Reads fall back to L2 only when memory misses; writes land in memory immediately and reach L2 in the background.
+Memstash can serve as a pure in-memory cache. It keeps the keys you touch most in your process,
+where a read can cost less than a nanosecond (with memstash, anyway). But your whole dataset is
+usually far larger — that's when you add a second tier (backed by Redis or any storage you want),
+and the same cache will serve millions of entries, shared by every node and still warm after a
+restart. Reads fall back to L2 only on memory misses; writes land in memory immediately and reach
+L2 in the background.
 
 ```go
 c, _ := memstash.New[string, string]()
@@ -18,14 +24,28 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 
 ## Why memstash?
 
-- **Very fast.** More than 7× the parallel read throughput of [Ristretto](https://github.com/dgraph-io/ristretto) and 6× [Otter](https://github.com/maypok86/otter)'s; once writes enter the mix the gap widens even more — see [benchmarks](#benchmarks).
-- **Top-tier hit ratio.** The S3-FIFO policy sits with the best of them — Otter, [Theine](https://github.com/Yiling-J/theine-go), Ristretto — and takes the lead at the small and mid capacities where a cache actually has to choose, especially under scans and one-hit wonders.
-- **Lowest memory overhead.** ~2× smaller footprint than Otter or [Bigcache](https://github.com/allegro/bigcache), see [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
-- **Easy on the GC.** Items live inline in a per-shard flat hash table, so an insert allocates nothing. Growth swaps one array for a larger one - a few objects for the collector, never one per entry - and stops once the cache is at capacity.
-- **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No `interface{}`, no casts.
-- **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a restart or on a cold node, it reads from the shared tier instead of your database.
-- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB, DynamoDB, Badger, Tarantool and Aerospike — each in its own module so the core stays clean. With **write-back** and **auto-batching**.
-- **Singleflight built in.** `GetOrLoad` collapses a stampede of concurrent misses on one key into a single load.
+- **Very fast.** More than 7× the parallel read throughput of
+  [Ristretto](https://github.com/dgraph-io/ristretto) and 6×
+  [Otter](https://github.com/maypok86/otter)'s; once writes enter the mix the gap widens even more —
+  see [benchmarks](#benchmarks).
+- **Top-tier hit ratio.** The S3-FIFO policy sits with the best of them — Otter,
+  [Theine](https://github.com/Yiling-J/theine-go), Ristretto — and takes the lead at the small and
+  mid capacities where a cache actually has to choose, especially under scans and one-hit wonders.
+- **Lowest memory overhead.** ~2× smaller footprint than Otter or
+  [Bigcache](https://github.com/allegro/bigcache), see
+  [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
+- **Easy on the GC.** Items live inline in a per-shard flat hash table, so an insert allocates
+  nothing. Growth swaps one array for a larger one - a few objects for the collector, never one per
+  entry - and stops once the cache is at capacity.
+- **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No
+  `interface{}`, no casts.
+- **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a
+  restart or on a cold node, it reads from the shared tier instead of your database.
+- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB,
+  DynamoDB, Badger, Tarantool and Aerospike — each in its own module so the core stays clean. With
+  **write-back** and **auto-batching**.
+- **Singleflight built in.** `GetOrLoad` collapses a stampede of concurrent misses on one key into a
+  single load.
 
 ## Table of Contents
 
@@ -51,7 +71,9 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 go get github.com/zakonnic/memstash
 ```
 
-Memstash requires Go 1.24+ and has a single core dependency ([xsync](https://github.com/puzpuzpuz/xsync)). Client SDKs are pulled in only by the specific L2 adapter module you import.
+Memstash requires Go 1.24+ and has a single core dependency
+([xsync](https://github.com/puzpuzpuz/xsync)). Client SDKs are pulled in only by the specific L2
+adapter module you import.
 
 ## Usage
 
@@ -92,7 +114,8 @@ func main() {
 
 ### Read-through with a loader (singleflight)
 
-The most common caching pattern: on a miss, load from the source of truth. Concurrent misses on the same key are automatically **coalesced into a single load**.
+The most common caching pattern: on a miss, load from the source of truth. Concurrent misses on the
+same key are automatically **coalesced into a single load**.
 
 ```go
 c, _ := memstash.New[string, User](
@@ -117,7 +140,11 @@ user, err := lc.GetOrLoad(ctx, "user:42")
 
 ### Two-level cache with Redis
 
-Add a shared L2 in one call. Memory serves the hot set; anything evicted from L1 (or missing after a restart) is fetched from Redis and promoted back into memory. Writes are **write-back by default**: `Set` returns immediately and a background worker flushes to Redis. Single **Sets are grouped into batches** asynchronously. The example uses rueidis, but every client in the [adapters table](#l2-adapters) works the same way.
+Add a shared L2 in one call. Memory serves the hot set; anything evicted from L1 (or missing after a
+restart) is fetched from Redis and promoted back into memory. Writes are **write-back by default**:
+`Set` returns immediately and a background worker flushes to Redis. Single **Sets are grouped into
+batches** asynchronously. The example uses rueidis, but every client in the [adapters
+table](#l2-adapters) works the same way.
 
 ```go
 import (
@@ -139,13 +166,17 @@ _ = c.Set(ctx, "user:42", user)     // L1 now, Redis shortly after (write-back)
 u, ok, err := c.Get(ctx, "user:42") // L1 hit → returns instantly; L1 miss → Redis, then promoted
 ```
 
-> Tip: A common way to shard local caches without overlap is to key them by the Kafka partition — each partition is consumed by exactly one node, so the cache for a given object lives only on that node.
+> Tip: A common way to shard local caches without overlap is to key them by the Kafka partition —
+> each partition is consumed by exactly one node, so the cache for a given object lives only on that
+> node.
 
 ## Advanced Configuration
 
-Memstash is configured with functional options passed to `New` (or to any adapter's `New*Cache`). Some common setups:
+Memstash is configured with functional options passed to `New` (or to any adapter's `New*Cache`).
+Some common setups:
 
-**Byte-budgeted cache** — bound by the byte size of stored data instead of item count; the per-item size (key and value bytes) is estimated automatically:
+**Byte-budgeted cache** — bound by the byte size of stored data instead of item count; the per-item
+size (key and value bytes) is estimated automatically:
 
 ```go
 c, _ := memstash.New[string, []byte](
@@ -153,9 +184,13 @@ c, _ := memstash.New[string, []byte](
 )
 ```
 
-The budget is a bound: memstash derives its capacity from it and grows into it rather than allocating a fixed block up front.
+The budget is a bound: memstash derives its capacity from it and grows into it rather than
+allocating a fixed block up front.
 
-The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For anything more complex, construction fails with `ErrBudgetNeedsCostFunc` — provide the byte size yourself:
+The built-in estimator covers types whose size is trivial to compute: numerics, pointer-free
+structs/arrays, strings, slices of fixed-size elements, and pointers to fixed-size types. For
+anything more complex, construction fails with `ErrBudgetNeedsCostFunc` — provide the byte size
+yourself:
 
 ```go
 c, _ := memstash.New[string, User](
@@ -172,7 +207,8 @@ c, _ := rueidis_adapter.NewJSONCache[string, Session](client,
 )
 ```
 
-**Batch operations** — amortize the network round trip; adapters use native pipelining / multi-get where the client supports it:
+**Batch operations** — amortize the network round trip; adapters use native pipelining / multi-get
+where the client supports it:
 
 ```go
 found, err := c.BatchGet(ctx, []string{"a", "b", "c"})            // one round trip to L2 for the misses
@@ -181,7 +217,11 @@ err = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b
 err = c.BatchDelete(ctx, []string{"a", "b"})                      // follows the write policy, like BatchSet
 ```
 
-**Observability and iteration** — `Stats()` returns operation counters (collected with striped counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via `WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it — otherwise counters stay at zero. `Iterator()` walks the live first-level entries lock-free, independent of stats:
+**Observability and iteration** — `Stats()` returns operation counters (collected with striped
+counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via
+`WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it — otherwise
+counters stay at zero. `Iterator()` walks the live first-level entries lock-free, independent of
+stats:
 
 ```go
 c, _ := memstash.New[string, User](
@@ -193,7 +233,9 @@ for key, value := range c.Iterator() {
 }
 ```
 
-**Removal events** — get told when an item leaves memory, and why. Handlers run after the shard lock is released, so they may take their time and may call back into the cache; costs 24 B and 13 ns when a handler is set; otherwise zero overhead:
+**Removal events** — get told when an item leaves memory, and why. Handlers run after the shard lock
+is released, so they may take their time and may call back into the cache; costs 24 B and 13 ns when
+a handler is set; otherwise zero overhead:
 
 ```go
 c, _ := memstash.New[string, *Conn](
@@ -203,9 +245,12 @@ c, _ := memstash.New[string, *Conn](
 )
 ```
 
-Interested only in the cache's own decisions — expiration, eviction and overflow? Gate the handler on `cause.Automatic()`.
+Interested only in the cache's own decisions — expiration, eviction and overflow? Gate the handler
+on `cause.Automatic()`.
 
-**Snapshots** — dump the hot set to a file on shutdown and start warm instead of cold. `SaveTo` streams every live item through the codecs you give it; `LoadFrom` reads it back through the normal write path, so the capacity, the cost function and the eviction policy all still apply:
+**Snapshots** — dump the hot set to a file on shutdown and start warm instead of cold. `SaveTo`
+streams every live item through the codecs you give it; `LoadFrom` reads it back through the normal
+write path, so the capacity, the cost function and the eviction policy all still apply:
 
 ```go
 f, _ := os.Create("cache.snapshot")
@@ -225,7 +270,8 @@ Loading takes options:
 | `LoadWithTTL` | Expirations are restored on their original schedule: the snapshot records what each item had left plus the moment it was taken, so time spent in the file counts and items already past their deadline are skipped. Capped at the loading cache's own TTL. |
 | `LoadToL2` | Also write every loaded item to the second level, following `WritePolicy`. |
 
-Without `LoadToL2` only the first level is touched, and `ctx` goes unused. A truncated or foreign file is rejected with `ErrBadSnapshot`.
+Without `LoadToL2` only the first level is touched, and `ctx` goes unused. A truncated or foreign
+file is rejected with `ErrBadSnapshot`.
 
 **Non-string keys with a custom key mapping** — provide a key function for the L2 storage key:
 
@@ -235,7 +281,8 @@ c, _ := rueidis_adapter.NewJSONCache[int, User](client,
 )
 ```
 
-**Custom serializer** — `NewCache` takes any `memstash.Codec[V]`, so a binary format works just as well as JSON. You can encode each field directly instead of going through JSON:
+**Custom serializer** — `NewCache` takes any `memstash.Codec[V]`, so a binary format works just as
+well as JSON. You can encode each field directly instead of going through JSON:
 
 ```go
 type Point struct {
@@ -263,9 +310,19 @@ c, err := rueidis_adapter.NewCache[int, Point](client, pointCodec{},
 )
 ```
 
-**Eviction policies** — four built-ins, selected with `WithPolicy`: [`PolicyS3FIFO`](https://s3fifo.com/) (the default: quarantine + protected queue + ghost, the best all-rounder under scans and one-hit wonders), [`PolicyClock`](https://en.wikipedia.org/wiki/Page_replacement_algorithm#Clock) (GCLOCK, approximates LRU at FIFO cost), [`PolicyWTinyLFU`](https://arxiv.org/abs/1512.00727) (an admission window gated by a Count-Min frequency sketch that remembers keys across evictions — strong on skewed workloads), and [`PolicySIEVE`](https://sievecache.com/) (a single scan hand over the insertion order — the simplest, with an S3-FIFO-class hit rate). All share the same lock-free read path: a read only sets a 2-bit reference counter on the item's meta word.
+**Eviction policies** — four built-ins, selected with `WithPolicy`:
+[`PolicyS3FIFO`](https://s3fifo.com/) (the default: quarantine + protected queue + ghost, the best
+all-rounder under scans and one-hit wonders),
+[`PolicyClock`](https://en.wikipedia.org/wiki/Page_replacement_algorithm#Clock) (GCLOCK,
+approximates LRU at FIFO cost), [`PolicyWTinyLFU`](https://arxiv.org/abs/1512.00727) (an admission
+window gated by a Count-Min frequency sketch that remembers keys across evictions — strong on skewed
+workloads), and [`PolicySIEVE`](https://sievecache.com/) (a single scan hand over the insertion
+order — the simplest, with an S3-FIFO-class hit rate). All share the same lock-free read path: a
+read only sets a 2-bit reference counter on the item's meta word.
 
-**Custom eviction policy** — implement the `memstash.EvictionPolicy` interface (the same contract the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Rebuild`/`Bytes`, all called under the shard mutex) and plug its per-shard factory in:
+**Custom eviction policy** — implement the `memstash.EvictionPolicy` interface (the same contract
+the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Rebuild`/`Bytes`, all called under the shard mutex)
+and plug its per-shard factory in:
 
 ```go
 c, err := memstash.New[string, User](
@@ -297,9 +354,13 @@ Full option list:
 
 ## L2 Adapters
 
-Each adapter is a separate module (`memstash/l2/<name>_adapter`) so the core never pulls in a client SDK you don't use. Every adapter offers both an "adapter only" constructor (`New`, `NewJSON`, `NewBytes`) and an all-in-one two-level constructor (`NewCache`, `NewJSONCache`, `NewBytesCache`), plus native batch pipelining where the client supports it.
+Each adapter is a separate module (`memstash/l2/<name>_adapter`) so the core never pulls in a client
+SDK you don't use. Every adapter offers both an "adapter only" constructor (`New`, `NewJSON`,
+`NewBytes`) and an all-in-one two-level constructor (`NewCache`, `NewJSONCache`, `NewBytesCache`),
+plus native batch pipelining where the client supports it.
 
-The write path favors throughput by default: instead of one round trip per key, the background write-back worker coalesces the Sets into the adapter's native `BatchSet` (an `MSET` or a pipeline).
+The write path favors throughput by default: instead of one round trip per key, the background
+write-back worker coalesces the Sets into the adapter's native `BatchSet` (an `MSET` or a pipeline).
 
 | Module | Backend / client | context |
 |---|---|---|
@@ -319,11 +380,18 @@ The write path favors throughput by default: instead of one round trip per key, 
 | `l2/tarantool_adapter` | Tarantool — [go-tarantool](https://github.com/tarantool/go-tarantool) | ✅ |
 | `l2/aerospike_adapter` | Aerospike — [aerospike-client-go](https://github.com/aerospike/aerospike-client-go) | ❌ |
 
-Each adapter takes an interface rather than a concrete client, so it stays independent of the client library's version, and a few libraries are covered without a separate module: `sql_adapter` accepts any `{QueryContext, ExecContext}` (so pgx via database/sql works too), `badger_adapter` covers [badgerhold](https://github.com/timshannon/badgerhold) via `store.Badger()`, and `dynamo_adapter` covers [guregu/dynamo](https://github.com/guregu/dynamo) via its underlying `*dynamodb.Client`.
+Each adapter takes an interface rather than a concrete client, so it stays independent of the client
+library's version, and a few libraries are covered without a separate module: `sql_adapter` accepts
+any `{QueryContext, ExecContext}` (so pgx via database/sql works too), `badger_adapter` covers
+[badgerhold](https://github.com/timshannon/badgerhold) via `store.Badger()`, and `dynamo_adapter`
+covers [guregu/dynamo](https://github.com/guregu/dynamo) via its underlying `*dynamodb.Client`.
 
-SQL, Tarantool and other stores without server-side expiration filter expired entries on read and expose a reaper (`DeleteExpired`) to purge them; the note in each package doc explains the specifics.
+SQL, Tarantool and other stores without server-side expiration filter expired entries on read and
+expose a reaper (`DeleteExpired`) to purge them; the note in each package doc explains the
+specifics.
 
-Rolling your own is straightforward: implement the `memstash.L2Cache[K, V]` interface (`Get`/`BatchGet`/`Set`/`BatchSet`/`Delete`/`BatchDelete`) and pass it to `WithL2Cache`.
+Rolling your own is straightforward: implement the `memstash.L2Cache[K, V]` interface
+(`Get`/`BatchGet`/`Set`/`BatchSet`/`Delete`/`BatchDelete`) and pass it to `WithL2Cache`.
 
 ## Benchmarks
 
@@ -372,13 +440,15 @@ Configuration for all of them lives in [benchmarks/adapters.go](benchmarks/adapt
 | hashicorp-lru | 10 | 10 | 9.8 | 9.5 |              9.5 |
 | sync.Map\* | 575 | 155 | 110 | 86 |               77 |
 
-Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) slow down by more than an order of magnitude, while memstash stays within reach of the eviction-free `sync.Map` baseline.
+Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) slow
+down by more than an order of magnitude, while memstash stays within reach of the eviction-free
+`sync.Map` baseline.
 
 ### Hit ratio - higher is better
 
-The "Est. Size" column is the cache's estimated memory footprint at the end of the one-hit-30% run (key + value bytes
-plus each implementation's own bookkeeping). This is a rough estimate — for measured resident bytes see
-[heap footprint](#heap-footprint-lower-is-better).
+The "Est. Size" column is the cache's estimated memory footprint at the end of the one-hit-30% run
+(key + value bytes plus each implementation's own bookkeeping). This is a rough estimate — for
+measured resident bytes see [heap footprint](#heap-footprint-lower-is-better).
 
 **Capacity = 500k items (~36% of the working set):**
 
@@ -427,10 +497,11 @@ plus each implementation's own bookkeeping). This is a rough estimate — for me
 
 ### Heap footprint, lower is better
 
-Each cache is filled with 100M `uint64 -> uint64` entries — 16 bytes of raw payload apiece — and the heap growth it
-causes is read back from the Go runtime, so these are real resident bytes rather than the cache's own estimate. The
-[measurements](benchmarks/results/heap-size-100kk.txt) run one contender at a time: a single pass costs several GiB.
-The caches that only accept byte-slice or string keys were given the same values converted to `[8]byte`.
+Each cache is filled with 100M `uint64 -> uint64` entries — 16 bytes of raw payload apiece — and the
+heap growth it causes is read back from the Go runtime, so these are real resident bytes rather than
+the cache's own estimate. The [measurements](benchmarks/results/heap-size-100kk.txt) run one
+contender at a time: a single pass costs several GiB. The caches that only accept byte-slice or
+string keys were given the same values converted to `[8]byte`.
 
 | Cache | Heap | B/entry |  Get hot | Get full | Set hot | Set full |
 |---|--:|--:|---------:|--:|--:|--:|
@@ -445,17 +516,19 @@ The caches that only accept byte-slice or string keys were given the same values
 
 \* `xsync.MapOf` performs no eviction — a lower-bound baseline, not a comparable cache.
 
-The four latency columns are measured on that same filled cache, so they show what a read and a write cost at 100M
-entries rather than at a benchmark-sized capacity. **hot** replays a 64k-key window from the middle of the fill: it
-stays in CPU cache and measures the code path itself. **full** draws uniformly over all 100M keys, so nearly every op
-is an LLC and a TLB miss — the gap between the two columns is what memory stalls cost per op at this cardinality. Both
-are aggregate ns/op across all cores, like the parallel table above.
+The four latency columns are measured on that same filled cache, so they show what a read and a
+write cost at 100M entries rather than at a benchmark-sized capacity. **hot** replays a 64k-key
+window from the middle of the fill: it stays in CPU cache and measures the code path itself.
+**full** draws uniformly over all 100M keys, so nearly every op is an LLC and a TLB miss — the gap
+between the two columns is what memory stalls cost per op at this cardinality. Both are aggregate
+ns/op across all cores, like the parallel table above.
 
 ## Contributing
 
-Bug reports and focused pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the repository layout,
-the test and lint commands, and the benchmarking rules that apply to changes on the hot path. Notable changes are
-recorded in the [changelog](CHANGELOG.md); security reports go through the [security policy](SECURITY.md).
+Bug reports and focused pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+repository layout, the test and lint commands, and the benchmarking rules that apply to changes on
+the hot path. Notable changes are recorded in the [changelog](CHANGELOG.md); security reports go
+through the [security policy](SECURITY.md).
 
 ## License
 
