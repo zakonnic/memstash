@@ -404,7 +404,20 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 			break
 		}
 		if metaWord&itemstore.Dead != 0 {
-			// A tombstone still referenced by its queue node cannot be reused - the node would point at a stranger.
+			if !itemstore.Reusable(metaWord) && metaWord&itemstore.TagMask == tagged&itemstore.TagMask &&
+				item.Entry().Key == key {
+				// The queue node still references this slot, so re-insert resurrects the entry instead of extending
+				// the probe chain with a dead record, which hurts hash probing.
+				item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff)
+				storage.NoteDisplaced(home, pos)
+				sh.live++
+				sh.dirty--
+				if sh.deadCount > 0 {
+					sh.deadCount--
+				}
+				break
+			}
+			// Any other tombstone still referenced by its queue node cannot be reused - the node would point at a stranger.
 			if !hasReuse && itemstore.Reusable(metaWord) {
 				reuse, hasReuse = pos, true
 			}
