@@ -18,13 +18,13 @@ func (c *Cache[K, V]) GetAndRefresh(ctx context.Context, key K, load LoaderFunc[
 		return value, ok
 	}
 
-	call := &flightCall[V]{}
-	if _, running := c.claim(key, call); running {
+	call := &flightCall[K, V]{}
+	if _, running := c.claim(c.keyHash(key), key, call); running {
 		return value, ok
 	}
 	select {
 	case <-c.stop:
-		c.release(key, call)
+		c.release(call)
 		return value, ok
 	default:
 	}
@@ -54,9 +54,9 @@ func (c *Cache[K, V]) BatchGetAndRefresh(ctx context.Context, keys []K, load Bat
 	return found
 }
 
-func (c *Cache[K, V]) loadInto(ctx context.Context, key K, load LoaderFunc[K, V], call *flightCall[V]) {
+func (c *Cache[K, V]) loadInto(ctx context.Context, key K, load LoaderFunc[K, V], call *flightCall[K, V]) {
 	call.err = ErrLoaderPanic // replaced below unless the loader panics or Goexits
-	defer c.release(key, call)
+	defer c.release(call)
 
 	value, err := load(ctx, key)
 	if err != nil {
@@ -68,15 +68,18 @@ func (c *Cache[K, V]) loadInto(ctx context.Context, key K, load LoaderFunc[K, V]
 }
 
 func (c *Cache[K, V]) loadBatchInto(ctx context.Context, keys []K, load BatchLoaderFunc[K, V]) {
-	owned, calls, _ := c.claimBatch(keys)
-	if len(owned) == 0 {
+	var fl batchFlights[K, V]
+	for i, key := range keys {
+		fl.claim(c, keys, i, c.keyHash(key))
+	}
+	if len(fl.owned) == 0 {
 		return // every key is already being loaded; that load publishes for them
 	}
-	defer c.releaseAll(owned, calls)
+	defer c.releaseAll(fl.calls)
 
-	loaded, err := load(ctx, owned)
+	loaded, err := load(ctx, fl.owned)
 	c.storeLoadedBatch(ctx, loaded) // a partial result is still worth caching
-	assignLoaded(owned, calls, loaded, err, nil)
+	assignLoaded(fl.owned, fl.calls, loaded, err, nil)
 }
 
 func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {

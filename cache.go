@@ -78,7 +78,7 @@ type Cache[K comparable, V any] struct {
 	onL2Error         func(key K, err error)
 	writeCh           chan l2Write[K, V]
 
-	flights []flightShard[K, V]
+	flights []flightBucket[K, V]
 	stats   Stats
 
 	stop      chan struct{}
@@ -150,7 +150,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	c := &Cache[K, V]{
 		costFunc:          cfg.CostFunc,
 		shards:            make([]shard[K, V], numShards),
-		flights:           make([]flightShard[K, V], numShards),
+		flights:           make([]flightBucket[K, V], numShards),
 		shardMask:         uint32(numShards - 1),
 		seed:              maphash.MakeSeed(),
 		epoch:             time.Now(),
@@ -175,7 +175,6 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		if int64(i) < remainder {
 			sh.cap++ // spread the capacity remainder over the first shards
 		}
-		c.flights[i].m = make(map[K]*flightCall[V])
 		sh.items.Store(itemstore.NewFlatHashMap[K, V](minTableSlots))
 		if cfg.CustomPolicy != nil {
 			sh.policy = cfg.CustomPolicy(&sh.items, sh.cap)
@@ -260,6 +259,10 @@ func (c *Cache[K, V]) Wait() {
 func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
 	keyHash := maphash.Comparable(c.seed, key)
 	return &c.shards[uint32(keyHash)&c.shardMask], keyHash
+}
+
+func (c *Cache[K, V]) keyHash(key K) uint64 {
+	return maphash.Comparable(c.seed, key)
 }
 
 // Get returns the value from memory, or - on a miss - from L2 (if configured), promoting the found value into memory. A
@@ -661,8 +664,8 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		return value, nil
 	}
 
-	call := &flightCall[V]{}
-	if winner, running := c.claim(key, call); running {
+	call := &flightCall[K, V]{}
+	if winner, running := c.claim(c.keyHash(key), key, call); running {
 		// A flight is already in progress - wait for its result or for the context to be canceled (the owner keeps
 		// loading on behalf of everyone else). The key was not in memory when this call looked, and this call itself
 		// never reaches L2 - the owner does: a memory miss.
@@ -676,7 +679,7 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 
 	// ErrLoaderPanic stands until doLoad returns: a loader that panics or Goexits must not leave waiters stuck.
 	call.err = ErrLoaderPanic
-	defer c.release(key, call)
+	defer c.release(call)
 
 	value, err := c.doLoad(ctx, key, load)
 	call.val, call.err, call.ok = value, err, err == nil
@@ -805,9 +808,6 @@ func (c *Cache[K, V]) Weight() int64 {
 	return total
 }
 
-// flightShardBytes is one in-flight registry stripe with its empty map header.
-const flightShardBytes = 64 + 48
-
 // TotalWeight estimates the total memory footprint of the cache's first-level structures: item tables (items carry
 // their Entry inline), eviction bookkeeping and the fixed parts (the Cache struct, shards, flights buckets,
 // write-back buffer).
@@ -817,7 +817,7 @@ const flightShardBytes = 64 + 48
 func (c *Cache[K, V]) TotalWeight() int64 {
 	total := int64(unsafe.Sizeof(*c))
 	total += int64(len(c.shards)) * int64(unsafe.Sizeof(shard[K, V]{}))
-	total += int64(len(c.flights)) * flightShardBytes
+	total += int64(len(c.flights)) * int64(unsafe.Sizeof(flightBucket[K, V]{}))
 
 	for i := range c.shards {
 		sh := &c.shards[i]

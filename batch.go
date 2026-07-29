@@ -88,6 +88,44 @@ func (c *Cache[K, V]) batchGetMemory(keys []K, dst List[K, V], wantMissing bool)
 	return dst, missing, hits
 }
 
+// batchGetMemoryFlights is the memory pass of the load path: hits go to the returned list, and every miss claims its
+// flight right there, while the hash the lookup just computed is still in hand.
+func (c *Cache[K, V]) batchGetMemoryFlights(keys []K, fl *batchFlights[K, V]) (List[K, V], int64) {
+	var dst List[K, V]
+	hits := int64(0)
+	if len(keys) <= smallBatch {
+		for i, key := range keys {
+			if value, ok := c.getMemory(key); ok {
+				if dst == nil {
+					dst = make(List[K, V], 0, len(keys))
+				}
+				dst = append(dst, KeyVal[K, V]{Key: key, Value: value})
+				hits++
+				continue
+			}
+			fl.claim(c, keys, i, c.keyHash(key))
+		}
+		return dst, hits
+	}
+	var group batchGroup[K, V]
+	for start := 0; start < len(keys); start += batchGroupSize {
+		part := keys[start:min(start+batchGroupSize, len(keys))]
+		c.batchGetGroup(part, &group)
+		for i := range part {
+			if group.hit[i] {
+				if dst == nil {
+					dst = make(List[K, V], 0, len(keys))
+				}
+				dst = append(dst, KeyVal[K, V]{Key: part[i], Value: group.value[i]})
+				hits++
+				continue
+			}
+			fl.claim(c, keys, start+i, group.keyHash[i])
+		}
+	}
+	return dst, hits
+}
+
 // batchGetGroup resolves up to batchGroupSize keys against the first level.
 // Anything off the straight path (a dead or mismatched candidate, a racing write) falls back to the single-key
 // getMemory: rare, and its slot lines are already warm.
@@ -275,22 +313,25 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 // Per-key singleflight is preserved: keys already being loaded elsewhere are waited on; the rest are loaded in a
 // single load(ctx, missing) call. A key omitted by the loader is absent from the result (any concurrent GetOrLoad
 // waiting on it gets the zero value). On error, the resolved part is returned with the error; errors are not cached.
+//
+// The slice handed to load may alias keys, so load must not hold on to it or write through it.
 func (c *Cache[K, V]) BatchGetOrLoad(ctx context.Context, keys []K, load BatchLoaderFunc[K, V]) (List[K, V], error) {
 	if load == nil {
 		return nil, ErrNilLoader
 	}
-	found, missing, hits := c.batchGetMemory(keys, nil, true)
+	var fl batchFlights[K, V]
+	found, hits := c.batchGetMemoryFlights(keys, &fl)
 	c.stats.addMemHits(hits)
-	if len(missing) == 0 {
+	if fl.calls == nil {
 		return found, nil
 	}
 
-	joined, loadErr := c.singleflight(ctx, load, &found, missing)
+	loadErr := c.loadOwned(ctx, load, &fl, &found)
 	// Joined keys missed memory and go no further here - their owner does the L2 lookup (the owned keys are counted
 	// by batchLoad).
-	c.stats.addMemMisses(int64(len(joined)))
+	c.stats.addMemMisses(int64(len(fl.joined)))
 
-	for _, flight := range joined {
+	for _, flight := range fl.joined {
 		if err := flight.call.wait(ctx); err != nil {
 			return found, err
 		}
@@ -303,21 +344,17 @@ func (c *Cache[K, V]) BatchGetOrLoad(ctx context.Context, keys []K, load BatchLo
 	return found, loadErr
 }
 
-type joinedFlight[K comparable, V any] struct {
-	key  K
-	call *flightCall[V]
-}
-
-func (c *Cache[K, V]) singleflight(ctx context.Context, load BatchLoaderFunc[K, V], found *List[K, V], missing []K) ([]joinedFlight[K, V], error) {
-	owned, calls, joined := c.claimBatch(missing)
-	if len(owned) == 0 {
-		return joined, nil
+// loadOwned resolves the keys this call owns and hands the results to their flights, which it releases before the
+// caller starts waiting on anyone else's.
+func (c *Cache[K, V]) loadOwned(ctx context.Context, load BatchLoaderFunc[K, V], fl *batchFlights[K, V], found *List[K, V]) error {
+	if len(fl.owned) == 0 {
+		return nil
 	}
-	defer c.releaseAll(owned, calls)
+	defer c.releaseAll(fl.calls)
 
-	resolved, err := c.batchLoad(ctx, owned, load)
-	assignLoaded(owned, calls, resolved, err, found)
-	return joined, err
+	resolved, err := c.batchLoad(ctx, fl.owned, load)
+	assignLoaded(fl.owned, fl.calls, resolved, err, found)
+	return err
 }
 
 // batchLoad resolves the owned keys: first from L2 in one BatchGet, the rest with one loader call; freshly loaded
