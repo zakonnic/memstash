@@ -14,19 +14,14 @@ import (
 // GetOrLoad waiting on the same key receives it. Concurrent loads of one key are coalesced into one.
 func (c *Cache[K, V]) GetAndRefresh(ctx context.Context, key K, load LoaderFunc[K, V]) (V, bool) {
 	value, ok := c.peekMemory(key)
-	if load == nil {
+	if load == nil || c.closing() {
 		return value, ok
 	}
-
-	call := &flightCall[K, V]{}
+	// ErrLoaderPanic stands from the moment the flight is visible:
+	// a loader that panics or Goexits must not leave waiters stuck.
+	call := &flightCall[K, V]{err: ErrLoaderPanic}
 	if _, running := c.claim(c.keyHash(key), key, call); running {
 		return value, ok
-	}
-	select {
-	case <-c.stop:
-		c.release(call)
-		return value, ok
-	default:
 	}
 	go c.loadInto(context.WithoutCancel(ctx), key, load, call)
 	return value, ok
@@ -41,21 +36,25 @@ func (c *Cache[K, V]) BatchGetAndRefresh(ctx context.Context, keys []K, load Bat
 			found = append(found, KeyVal[K, V]{Key: key, Value: value})
 		}
 	}
-	if load == nil || len(keys) == 0 {
+	if load == nil || len(keys) == 0 || c.closing() {
 		return found
-	}
-	select {
-	case <-c.stop:
-		return found
-	default:
 	}
 	// The caller may reuse its slice the moment this returns.
 	go c.loadBatchInto(context.WithoutCancel(ctx), append([]K(nil), keys...), load)
 	return found
 }
 
+// closing reports whether Close has been called; a refresh started after that has no worker left to outlive it.
+func (c *Cache[K, V]) closing() bool {
+	select {
+	case <-c.stop:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Cache[K, V]) loadInto(ctx context.Context, key K, load LoaderFunc[K, V], call *flightCall[K, V]) {
-	call.err = ErrLoaderPanic // replaced below unless the loader panics or Goexits
 	defer c.release(call)
 
 	value, err := load(ctx, key)
