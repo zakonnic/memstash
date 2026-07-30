@@ -32,12 +32,15 @@ func zipfSeq(len, max uint64) []uint64 {
 	return seq
 }
 
+// speedContenders preallocates the memstash tables: the competitors size their storage from the capacity too, so
+// nobody here pays for growth rebuilds mid-benchmark.
 func speedContenders() []benchCache {
+	prealloc := memstash.WithPreallocatedSize()
 	return []benchCache{
-		newMemstash(speedCapacity, memstash.PolicyS3FIFO, "memstash-s3fifo"),
-		newMemstash(speedCapacity, memstash.PolicyClock, "memstash-clock"),
-		newMemstash(speedCapacity, memstash.PolicyWTinyLFU, "memstash-wtinylfu"),
-		newMemstash(speedCapacity, memstash.PolicySIEVE, "memstash-sieve"),
+		newMemstash(speedCapacity, memstash.PolicyS3FIFO, "memstash-s3fifo", prealloc),
+		newMemstash(speedCapacity, memstash.PolicyClock, "memstash-clock", prealloc),
+		newMemstash(speedCapacity, memstash.PolicyWTinyLFU, "memstash-wtinylfu", prealloc),
+		newMemstash(speedCapacity, memstash.PolicySIEVE, "memstash-sieve", prealloc),
 		newRistretto(speedCapacity),
 		newOtter(speedCapacity),
 		newTheine(speedCapacity),
@@ -211,13 +214,13 @@ func BenchmarkShortCheckup(b *testing.B) {
 		strKeys[i] = "long-key:" + strconv.Itoa(i)
 	}
 
-	cStr, _ := memstash.New[string, int](memstash.WithMemoryCapacity(nKeys * 4 / 3))
+	cStr, _ := memstash.New[string, int](memstash.WithMemoryCapacity(nKeys*4/3), memstash.WithPreallocatedSize())
 	for i, k := range strKeys {
 		_ = cStr.Set(ctx, k, i)
 	}
 	defer cStr.Close()
 
-	cUuid, _ := memstash.New[uuid.UUID, int](memstash.WithMemoryCapacity(nKeys * 4 / 3))
+	cUuid, _ := memstash.New[uuid.UUID, int](memstash.WithMemoryCapacity(nKeys*4/3), memstash.WithPreallocatedSize())
 	uids := make([]uuid.UUID, nKeys)
 	mUuid := sync.Map{}
 	for i := range nKeys {
@@ -227,7 +230,7 @@ func BenchmarkShortCheckup(b *testing.B) {
 	}
 	defer cUuid.Close()
 
-	cInt, _ := memstash.New[int, int](memstash.WithMemoryCapacity(nKeys * 4 / 3))
+	cInt, _ := memstash.New[int, int](memstash.WithMemoryCapacity(nKeys*4/3), memstash.WithPreallocatedSize())
 	for i := range nKeys {
 		_ = cInt.Set(ctx, i, i)
 	}

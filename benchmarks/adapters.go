@@ -37,11 +37,11 @@ type memstashAdapter struct {
 	name string
 }
 
-func newMemstash(capacity int64, policy memstash.Policy, name string) benchCache {
-	c, err := memstash.New[uint64, uint64](
+func newMemstash(capacity int64, policy memstash.Policy, name string, opts ...memstash.Option) benchCache {
+	c, err := memstash.New[uint64, uint64](append([]memstash.Option{
 		memstash.WithMemoryCapacity(capacity),
 		memstash.WithPolicy(policy),
-	)
+	}, opts...)...)
 	if err != nil {
 		panic(err)
 	}

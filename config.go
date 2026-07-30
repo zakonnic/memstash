@@ -13,9 +13,11 @@ var (
 	// Error is the base sentinel error for the package.
 	Error = errors.New("memstash err")
 
-	ErrBadCapacity         = fmt.Errorf("%w: MemoryCapacity must be positive", Error)
-	ErrCapacityTooLarge    = fmt.Errorf("%w: MemoryCapacity exceeds the addressable table index space (2^32 items)", Error)
-	ErrBadBudget           = fmt.Errorf("%w: MemoryBudget must be positive", Error)
+	ErrBadCapacity      = fmt.Errorf("%w: MemoryCapacity must be positive", Error)
+	ErrCapacityTooLarge = fmt.Errorf("%w: MemoryCapacity exceeds the addressable table index space (2^32 items)", Error)
+	ErrBadBudget        = fmt.Errorf("%w: MemoryBudget must be positive", Error)
+	ErrPreallocWeighted = fmt.Errorf("%w: PreallocateMap needs an item capacity - a weighted MemoryCapacity "+
+		"(CostFunc, MemoryBudget) does not say how many items fit", Error)
 	ErrBudgetAndCapacity   = fmt.Errorf("%w: MemoryBudget and MemoryCapacity are mutually exclusive", Error)
 	ErrBudgetNeedsCostFunc = fmt.Errorf("%w: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly", Error)
 	ErrUnknownPolicy       = fmt.Errorf("%w: unknown eviction policy", Error)
@@ -58,6 +60,12 @@ type Config[K comparable, V any] struct {
 	// CustomPolicy is an optional factory for a user-supplied eviction policy, called once per shard. When set it
 	// takes precedence over Policy. The factory must not return nil.
 	CustomPolicy EvictionPolicyFactory[K, V]
+
+	// PreallocateMap sizes every shard's FlatHashMap for its whole share of MemoryCapacity at construction: the
+	// smallest table a fill to capacity never rebuilds, which is the size growth-on-demand settles at anyway.
+	// Tombstones (deletes, evictions) can still trip a purge rebuild later, and that one doubles the table as usual.
+	// Requires CostFunc == nil: weight is not an item count.
+	PreallocateMap bool
 
 	// Shards is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to
 	// a power of two and capped at 128; shards are also halved until each holds at least 64 weight units. 0 means
@@ -120,11 +128,18 @@ func (c *Config[K, V]) shardCount() int {
 	return count
 }
 
-func pow2Ceil(n int) int {
+func pow2Ceil[T int | int64](n T) T {
 	if n <= 1 {
 		return 1
 	}
-	return 1 << bits.Len(uint(n-1))
+	return 1 << bits.Len64(uint64(n-1))
+}
+
+// preallocSlots is the smallest table a shard can fill to its capacity without a rebuild: maybeRebuild fires at 3/4
+// occupancy, and live peaks at cap+1 - the insert that trips eviction is counted before its victim leaves. This is
+// also where growth-on-demand settles, so preallocating costs no extra memory over a cache that filled itself up.
+func preallocSlots(shardCap int64) int {
+	return int(min(max(pow2Ceil(4*(shardCap+1)/3+1), minTableSlots), maxTableSlots))
 }
 
 func (c *Config[K, V]) ghostSize() int {

@@ -34,6 +34,9 @@ const (
 
 	// minTableSlots is the initial table size of every shard.
 	minTableSlots = 64
+
+	// maxTableSlots is the largest table a shard can address: the whole uint32 slot index space.
+	maxTableSlots = int64(1) << 32
 )
 
 // shard is an independent segment of the first level: a key is always served by the same shard (by hash), and all
@@ -137,6 +140,9 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.CostFunc == nil && cfg.MemoryCapacity > itemstore.MaxItems {
 		return nil, ErrCapacityTooLarge
 	}
+	if cfg.PreallocateMap && cfg.CostFunc != nil {
+		return nil, ErrPreallocWeighted
+	}
 	if cfg.CustomPolicy == nil {
 		switch cfg.Policy {
 		case PolicyS3FIFO, PolicyClock, PolicyWTinyLFU, PolicySIEVE:
@@ -178,7 +184,11 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		if int64(i) < remainder {
 			sh.cap++ // spread the capacity remainder over the first shards
 		}
-		sh.items.Store(itemstore.NewFlatHashMap[K, V](minTableSlots))
+		slots := minTableSlots
+		if cfg.PreallocateMap {
+			slots = preallocSlots(sh.cap)
+		}
+		sh.items.Store(itemstore.NewFlatHashMap[K, V](slots))
 		if cfg.CustomPolicy != nil {
 			sh.policy = cfg.CustomPolicy(&sh.items, sh.cap)
 			if sh.policy == nil {

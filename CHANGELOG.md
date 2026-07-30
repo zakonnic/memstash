@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows
 
 Every module - the root and each `l2/*_adapter` - is tagged with the same version.
 
+## [Unreleased]
+
+### Added
+
+- **`WithPreallocatedSize` / `Config.PreallocateMap`** - pre-allocate an FlatHashMap for every shard at construction,
+to avoid it grows and memory allocations on Set at all.
+
 ## [0.9.5] - 2026-07-30
 
 Add GetAndRefresh, panic recovery, faster loads and deletes.

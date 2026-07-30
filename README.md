@@ -344,6 +344,7 @@ Full option list:
 | `WithTTL(d)` | Item lifetime (1-second resolution up to ~36h, proportionally coarser above that); applied to L2 writes too.                                      |
 | `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`.                                                                      |
 | `WithCustomEvictionPolicy(fn)` | Plug in your own eviction policy: a per-shard factory returning a `memstash.EvictionPolicy` implementation.                                       |
+| `WithPreallocatedSize()` | Allocate every shard's item table up front, at the size filling to capacity would grow it to anyway: the fill rebuilds nothing, and the full table is paid for from the start instead of at the end. Not available with `WithCostFunc` / `WithMemoryBudget`. |
 | `WithShards(n)` | Number of eviction shards (default: auto by GOMAXPROCS).                                                                                          |
 | `WithL2Cache(l2)` | Attach a second level directly.                                                                                                                   |
 | `WithWritePolicy(p)` | How writes reach L2, ignored when no L2 is attached: `WriteBack` (default) hands `Set` to the background worker, `WriteThrough` writes on `Set` and returns the L2 error, `WriteDisabled` makes L2 read-only. Deletes follow the same policy as writes. |

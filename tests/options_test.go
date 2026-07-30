@@ -35,6 +35,25 @@ func TestFunctionalOptions(t *testing.T) {
 		assert.False(t, ok, "WithTTL had no effect: the value did not expire")
 	})
 
+	t.Run("WithPreallocatedSize", func(t *testing.T) {
+		c, err := memstash.New[string, string](memstash.WithMemoryCapacity(1000), memstash.WithPreallocatedSize())
+		require.NoError(t, err)
+		defer c.Close()
+
+		require.NoError(t, c.Set(ctx, "k", "v"))
+		v, ok, err := c.Get(ctx, "k")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "v", v)
+
+		_, err = memstash.New[string, string](
+			memstash.WithMemoryCapacity(1000),
+			memstash.WithCostFunc(func(key, value string) uint32 { return uint32(len(key) + len(value)) }),
+			memstash.WithPreallocatedSize(),
+		)
+		assert.ErrorIs(t, err, memstash.ErrPreallocWeighted, "a weighted capacity cannot size the table")
+	})
+
 	t.Run("WithGhostSize and WithWriteBackBuffer do not break construction or normal use", func(t *testing.T) {
 		l2 := newL2Stub()
 		c, err := memstash.New[string, string](

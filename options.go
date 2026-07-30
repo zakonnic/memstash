@@ -32,6 +32,7 @@ type FieldOverrides struct {
 	ttl                 *time.Duration
 	refreshTTLOnGet     *bool
 	policy              *Policy
+	preallocateTable    *bool
 	shards              *int
 	writePolicy         *WritePolicy
 	ghostSize           *int
@@ -73,6 +74,9 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 	}
 	if fields.policy != nil {
 		cfg.Policy = *fields.policy
+	}
+	if fields.preallocateTable != nil {
+		cfg.PreallocateMap = *fields.preallocateTable
 	}
 	if fields.shards != nil {
 		cfg.Shards = *fields.shards
@@ -152,6 +156,16 @@ func WithPolicy(policy Policy) Option {
 func WithCustomEvictionPolicy[K comparable, V any](factory EvictionPolicyFactory[K, V]) Option {
 	return Option{ApplyTyped: func(target any) error {
 		return applyToConfig(target, func(cfg *Config[K, V]) { cfg.CustomPolicy = factory })
+	}}
+}
+
+// WithPreallocatedSize sets Config.PreallocateMap: every shard allocates the item table its share of the capacity
+// ends up needing, so filling the cache rebuilds nothing. Rejected together with WithCostFunc or WithMemoryBudget -
+// the table is sized in items, and a weighted capacity does not count items.
+func WithPreallocatedSize() Option {
+	return Option{ApplyField: func(f *FieldOverrides) {
+		on := true
+		f.preallocateTable = &on
 	}}
 }
 
