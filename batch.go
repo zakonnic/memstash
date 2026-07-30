@@ -213,7 +213,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error
 		return found, err
 	}
 	c.stats.addL2Hits(int64(len(fromL2)))
-	c.stats.addL2Misses(int64(len(missing) - len(fromL2)))
+	c.stats.addL2Misses(int64(max(len(missing)-len(fromL2), 0)))
 	for _, item := range fromL2 {
 		c.setMemory(item.Key, item.Value, c.expireOffset())
 		found = append(found, item)
@@ -225,6 +225,9 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error
 // batch write, WriteBack enqueues the items for the background worker. An error can come only from the synchronous
 // batch write.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items List[K, V]) error {
+	if len(items) == 0 {
+		return nil
+	}
 	for _, item := range items {
 		c.setMemory(item.Key, item.Value, c.expireOffset())
 	}
@@ -284,6 +287,9 @@ func (c *Cache[K, V]) enqueueL2(write l2Write[K, V]) {
 // which always coalesces them into BatchDelete batches regardless of WriteBackBatching. An error can come only
 // from the synchronous batch delete.
 func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
+	if len(keys) == 0 {
+		return nil
+	}
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	for _, key := range keys {
 		sh, keyHash := c.shardAndHash(key)
@@ -383,7 +389,8 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 		}
 		c.stats.addL2Hits(int64(len(resolved)))
 		if len(resolved) > 0 {
-			toLoad = make([]K, 0, len(keys)-len(resolved))
+			// max - guards against extra keys, returned for whatever reason
+			toLoad = make([]K, 0, max(len(keys)-len(resolvedKeys), 0))
 			for _, key := range keys {
 				if _, ok := resolvedKeys[key]; !ok {
 					toLoad = append(toLoad, key)
@@ -399,12 +406,12 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 	return append(resolved, loaded...), err
 }
 
-// runLoader loads the keys and caches whatever came back, handing the loader's own list straight to the caller.
+// runLoader loads the keys and caches whatever came back, handing the loader's own list straight to the caller. A
+// partial answer is kept even when the loader also errored - those keys did resolve.
 func (c *Cache[K, V]) runLoader(ctx context.Context, keys []K, load BatchLoaderFunc[K, V]) (List[K, V], error) {
 	loaded, err := load(ctx, keys)
-	if err != nil {
-		return nil, err
+	if len(loaded) > 0 { // keeps a loader that answered with nothing off the store path entirely
+		c.storeLoadedBatch(ctx, loaded)
 	}
-	c.storeLoadedBatch(ctx, loaded)
-	return loaded, nil
+	return loaded, err
 }
