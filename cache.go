@@ -291,11 +291,7 @@ func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 // GetFromMemory reads the first level only: the fastest possible path, without a context, L2, or errors.
 func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 	value, ok := c.getMemory(key)
-	if ok {
-		c.stats.addMemHits(1)
-	} else {
-		c.stats.addMemMisses(1)
-	}
+	c.stats.addMemHit(ok)
 	return value, ok
 }
 

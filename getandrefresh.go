@@ -14,6 +14,7 @@ import (
 // GetOrLoad waiting on the same key receives it. Concurrent loads of one key are coalesced into one.
 func (c *Cache[K, V]) GetAndRefresh(ctx context.Context, key K, load LoaderFunc[K, V]) (V, bool) {
 	value, ok := c.peekMemory(key)
+	c.stats.addMemHit(ok)
 	if load == nil || c.closing() {
 		return value, ok
 	}
@@ -36,6 +37,8 @@ func (c *Cache[K, V]) BatchGetAndRefresh(ctx context.Context, keys []K, load Bat
 			found = append(found, KeyVal[K, V]{Key: key, Value: value})
 		}
 	}
+	c.stats.addMemHits(int64(len(found)))
+	c.stats.addMemMisses(int64(len(keys) - len(found)))
 	if load == nil || len(keys) == 0 || c.closing() {
 		return found
 	}
