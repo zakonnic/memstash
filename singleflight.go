@@ -194,13 +194,20 @@ func (fl *batchFlights[K, V]) claim(c *Cache[K, V], keys []K, i int, keyHash uin
 	fl.owned = append(fl.owned, key)
 }
 
+// ownedScanMax is the batch size above which an out-of-order answer gets an index instead of a rescan per item.
+const ownedScanMax = 32
+
 // assignLoaded hands the result to the owned flights; a key the loader skipped carries err, nil when it was simply
 // not found. Items this call does not own are skipped, and the owned ones are appended to found when it is non-nil.
 func assignLoaded[K comparable, V any](owned []K, calls []flightCall[K, V], loaded List[K, V], err error, found *List[K, V]) {
+	var index map[K]int
 	for i, item := range loaded {
 		j := i
 		if j >= len(owned) || owned[j] != item.Key { // loaders answer in order unless they drop or add keys
-			if j = indexOf(owned, item.Key); j < 0 {
+			if index == nil && len(owned) > ownedScanMax {
+				index = ownedIndex(owned)
+			}
+			if j = indexOf(owned, item.Key, index); j < 0 {
 				continue
 			}
 		}
@@ -216,8 +223,24 @@ func assignLoaded[K comparable, V any](owned []K, calls []flightCall[K, V], load
 	}
 }
 
-func indexOf[K comparable](keys []K, key K) int {
-	for i, k := range keys {
+// ownedIndex maps every owned key to its slot, the first occurrence winning - same answer indexOf gives.
+func ownedIndex[K comparable](owned []K) map[K]int {
+	index := make(map[K]int, len(owned))
+	for i := len(owned) - 1; i >= 0; i-- {
+		index[owned[i]] = i
+	}
+	return index
+}
+
+func indexOf[K comparable](owned []K, key K, index map[K]int) int {
+	// search in map or array
+	if index != nil {
+		if i, ok := index[key]; ok {
+			return i
+		}
+		return -1
+	}
+	for i, k := range owned {
 		if k == key {
 			return i
 		}
