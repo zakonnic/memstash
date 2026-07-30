@@ -363,6 +363,8 @@ func (c *Cache[K, V]) loadOwned(ctx context.Context, load BatchLoaderFunc[K, V],
 	return err
 }
 
+const batchResolvedSlots = 256
+
 // batchLoad resolves the owned keys: first from L2 in one BatchGet, the rest with one loader call; freshly loaded
 // values are stored back according to the write policy (mirroring doLoad). The returned List may be partial when
 // err != nil.
@@ -371,39 +373,39 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 		c.stats.addMemMisses(int64(len(keys)))
 		return c.runLoader(ctx, keys, load)
 	}
-	resolved := make(List[K, V], 0, len(keys))
-	resolvedKeys := make(map[K]struct{}, len(keys))
+	fromL2, err := c.l2Cache.BatchGet(ctx, keys)
+	if err != nil {
+		// Fall back to the loader for everything; report the L2 error via the callback.
+		for _, key := range keys {
+			c.reportL2Err(key, err)
+		}
+	}
+	result := make(List[K, V], 0, len(keys))
+	var buf [batchResolvedSlots]itemstore.SetSlot[K] // trick to stay on stack
+	keysFromL2 := itemstore.NewSetFrom(buf[:])
+	for _, item := range fromL2 {
+		c.setMemory(item.Key, item.Value, c.expireOffset())
+		result = append(result, item)
+		keysFromL2.Add(item.Key)
+	}
+	c.stats.addL2Hits(int64(len(result)))
+
 	toLoad := keys
-	{
-		fromL2, err := c.l2Cache.BatchGet(ctx, keys)
-		if err != nil {
-			// Fall back to the loader for everything; report the L2 error via the callback.
-			for _, key := range keys {
-				c.reportL2Err(key, err)
-			}
-		}
-		for _, item := range fromL2 {
-			c.setMemory(item.Key, item.Value, c.expireOffset())
-			resolved = append(resolved, item)
-			resolvedKeys[item.Key] = struct{}{}
-		}
-		c.stats.addL2Hits(int64(len(resolved)))
-		if len(resolved) > 0 {
-			// max - guards against extra keys, returned for whatever reason
-			toLoad = make([]K, 0, max(len(keys)-len(resolvedKeys), 0))
-			for _, key := range keys {
-				if _, ok := resolvedKeys[key]; !ok {
-					toLoad = append(toLoad, key)
-				}
+	if len(fromL2) > 0 {
+		// max - guards against extra keys, returned for whatever reason
+		toLoad = make([]K, 0, max(len(keys)-keysFromL2.Len(), 0))
+		for _, key := range keys {
+			if !keysFromL2.Exists(key) {
+				toLoad = append(toLoad, key)
 			}
 		}
 	}
 	if len(toLoad) == 0 {
-		return resolved, nil
+		return result, nil
 	}
 	c.stats.addL2Misses(int64(len(toLoad)))
-	loaded, err := c.runLoader(ctx, toLoad, load)
-	return append(resolved, loaded...), err
+	loaded, loadErr := c.runLoader(ctx, toLoad, load)
+	return append(result, loaded...), loadErr
 }
 
 // runLoader loads the keys and caches whatever came back, handing the loader's own list straight to the caller. A
