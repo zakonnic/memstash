@@ -118,6 +118,89 @@ func BenchmarkGetOrLoadMiss(b *testing.B) {
 	}
 }
 
+// batchLoader answers every key it is asked for, so the loaded values stay cached - the steady state the all-miss
+// benchmarks above never reach.
+func batchLoader(_ context.Context, keys []string) (memstash.List[string, string], error) {
+	out := make(memstash.List[string, string], 0, len(keys))
+	for _, key := range keys {
+		out = append(out, memstash.KeyVal[string, string]{Key: key, Value: key})
+	}
+	return out, nil
+}
+
+// BenchmarkBatchGetOrLoadHit is the common case: a warm cache where no key reaches the loader.
+func BenchmarkBatchGetOrLoadHit(b *testing.B) {
+	ctx := context.Background()
+	for _, n := range []int{2, 8, 32} {
+		b.Run(fmt.Sprintf("keys=%d", n), func(b *testing.B) {
+			c := benchFlightCache(b)
+			keys := benchKeys(n)
+			if _, err := c.BatchGetOrLoad(ctx, keys, batchLoader); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				_, _ = c.BatchGetOrLoad(ctx, keys, batchLoader)
+			}
+		})
+	}
+}
+
+// BenchmarkBatchGetOrLoadHalfHit mixes the two: half the batch is cached, half claims a flight.
+func BenchmarkBatchGetOrLoadHalfHit(b *testing.B) {
+	ctx := context.Background()
+	for _, n := range []int{8, 32} {
+		b.Run(fmt.Sprintf("keys=%d", n), func(b *testing.B) {
+			c := benchFlightCache(b)
+			keys := benchKeys(n)
+			for i := 0; i < n; i += 2 {
+				if err := c.Set(ctx, keys[i], keys[i]); err != nil {
+					b.Fatal(err)
+				}
+			}
+			// A loader that finds nothing keeps the odd half missing, so the mix stays 50/50 without any extra work
+			// inside the timed loop.
+			empty := func(context.Context, []string) (memstash.List[string, string], error) { return nil, nil }
+			b.ReportAllocs()
+			for b.Loop() {
+				_, _ = c.BatchGetOrLoad(ctx, keys, empty)
+			}
+		})
+	}
+}
+
+func BenchmarkGetAndRefresh(b *testing.B) {
+	ctx := context.Background()
+	c := benchFlightCache(b)
+	if err := c.Set(ctx, "key-0", "v"); err != nil {
+		b.Fatal(err)
+	}
+	// A nil loader isolates the read half; with one, every call would spawn a goroutine and measure the scheduler.
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = c.GetAndRefresh(ctx, "key-0", nil)
+	}
+}
+
+func BenchmarkBatchGetAndRefresh(b *testing.B) {
+	ctx := context.Background()
+	for _, n := range []int{8, 32} {
+		b.Run(fmt.Sprintf("keys=%d", n), func(b *testing.B) {
+			c := benchFlightCache(b)
+			keys := benchKeys(n)
+			for _, key := range keys {
+				if err := c.Set(ctx, key, key); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = c.BatchGetAndRefresh(ctx, keys, nil)
+			}
+		})
+	}
+}
+
 // BenchmarkGetOrLoadMissSerial is the baseline BatchGetOrLoad must beat: the same keys resolved one at a time.
 func BenchmarkGetOrLoadMissSerial(b *testing.B) {
 	ctx := context.Background()
