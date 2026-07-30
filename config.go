@@ -2,6 +2,7 @@ package memstash
 
 import (
 	"errors"
+	"fmt"
 	"math/bits"
 	"runtime"
 	"time"
@@ -9,18 +10,21 @@ import (
 
 // Errors reported by New and NewWithConfig for a configuration that cannot produce a working cache.
 var (
-	ErrBadCapacity         = errors.New("memstash: MemoryCapacity must be positive")
-	ErrCapacityTooLarge    = errors.New("memstash: MemoryCapacity exceeds the addressable table index space (2^32 items)")
-	ErrBadBudget           = errors.New("memstash: MemoryBudget must be positive")
-	ErrBudgetAndCapacity   = errors.New("memstash: MemoryBudget and MemoryCapacity are mutually exclusive")
-	ErrBudgetNeedsCostFunc = errors.New("memstash: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly")
-	ErrUnknownPolicy       = errors.New("memstash: unknown eviction policy")
-	ErrNilCustomPolicy     = errors.New("memstash: the custom eviction policy factory returned nil")
-	ErrNilLoader           = errors.New("memstash: loader must not be nil")
-	ErrBadTTL              = errors.New("memstash: TTL must not be negative")
+	// Error is the base sentinel error for the package.
+	Error = errors.New("memstash err")
+
+	ErrBadCapacity         = fmt.Errorf("%w: MemoryCapacity must be positive", Error)
+	ErrCapacityTooLarge    = fmt.Errorf("%w: MemoryCapacity exceeds the addressable table index space (2^32 items)", Error)
+	ErrBadBudget           = fmt.Errorf("%w: MemoryBudget must be positive", Error)
+	ErrBudgetAndCapacity   = fmt.Errorf("%w: MemoryBudget and MemoryCapacity are mutually exclusive", Error)
+	ErrBudgetNeedsCostFunc = fmt.Errorf("%w: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly", Error)
+	ErrUnknownPolicy       = fmt.Errorf("%w: unknown eviction policy", Error)
+	ErrNilCustomPolicy     = fmt.Errorf("%w: the custom eviction policy factory returned nil", Error)
+	ErrNilLoader           = fmt.Errorf("%w: loader must not be nil", Error)
+	ErrBadTTL              = fmt.Errorf("%w: TTL must not be negative", Error)
 	// ErrLoaderPanic resolves the singleflight of a loader that panicked: the panic itself propagates to the caller
 	// that ran the loader, while every waiter joined on that flight receives this error instead of hanging forever.
-	ErrLoaderPanic = errors.New("memstash: loader panicked")
+	ErrLoaderPanic = fmt.Errorf("%w: loader panicked", Error)
 )
 
 // Config holds the cache configuration. Pass it to NewWithConfig directly, or configure the cache field by field

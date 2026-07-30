@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -13,11 +12,11 @@ import (
 var (
 	// ErrBadSnapshot means the stream is not a memstash snapshot, carries a version this build cannot read, or ends
 	// early. Items decoded before the failure stay in the cache.
-	ErrBadSnapshot = errors.New("memstash: corrupt or unrecognized snapshot")
+	ErrBadSnapshot = fmt.Errorf("%w: corrupt or unrecognized snapshot", Error)
 	// ErrNilCodec is returned by SaveTo and LoadFrom when a codec argument is nil.
-	ErrNilCodec = errors.New("memstash: codec must not be nil")
+	ErrNilCodec = fmt.Errorf("%w: codec must not be nil", Error)
 	// ErrConflictingLoadOptions is returned when LoadFrom is given both LoadWithTTL and LoadWithCurrentTTL.
-	ErrConflictingLoadOptions = errors.New("memstash: LoadWithTTL and LoadWithCurrentTTL are mutually exclusive")
+	ErrConflictingLoadOptions = fmt.Errorf("%w: LoadWithTTL and LoadWithCurrentTTL are mutually exclusive", Error)
 )
 
 // LoadOption tunes LoadFrom.
