@@ -74,13 +74,12 @@ func (f *flightCall[K, V]) wait(ctx context.Context) error {
 // that fills up. Everything in it moves under mu, so a claim and a release each cost one uncontended lock and nothing
 // else - the atomics a lock-free slot table would need are no cheaper than the lock itself.
 type flightBucket[K comparable, V any] struct {
-	mu     sync.Mutex
-	live   uint8 // which slots are taken; usually one bit, so the scan below is a couple of iterations
-	call   [flightSlots]*flightCall[K, V]
-	hash   [flightSlots]uint64
-	spill  map[K]*flightCall[K, V]
-	nSpill int
-	_      [32]byte // keep buckets off each other's cache lines
+	mu    sync.Mutex
+	live  uint8 // which slots are taken; usually one bit, so the scan below is a couple of iterations
+	call  [flightSlots]*flightCall[K, V]
+	hash  [flightSlots]uint64
+	spill map[K]*flightCall[K, V]
+	_     [40]byte // keep buckets off each other's cache lines
 }
 
 // claim registers call for key, or hands back the flight already running for it.
@@ -98,7 +97,7 @@ func (c *Cache[K, V]) claim(keyHash uint64, key K, call *flightCall[K, V]) (winn
 			return winner, true
 		}
 	}
-	if b.nSpill > 0 {
+	if len(b.spill) > 0 {
 		if p, ok := b.spill[key]; ok {
 			p.joined = true
 			b.mu.Unlock()
@@ -112,7 +111,6 @@ func (c *Cache[K, V]) claim(keyHash uint64, key K, call *flightCall[K, V]) (winn
 			b.spill = make(map[K]*flightCall[K, V])
 		}
 		b.spill[key] = call
-		b.nSpill++
 		call.at = uint16(bucket)<<8 | flightSpilled
 		b.mu.Unlock()
 		return call, false
@@ -136,7 +134,9 @@ func (c *Cache[K, V]) release(call *flightCall[K, V]) {
 		b.call[slot] = nil
 	} else {
 		delete(b.spill, call.key)
-		b.nSpill--
+		if len(b.spill) == 0 {
+			b.spill = nil // a burst that overflowed a bucket should not keep its map forever
+		}
 	}
 	joined := call.joined
 	b.mu.Unlock()
