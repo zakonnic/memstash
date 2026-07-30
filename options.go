@@ -211,9 +211,9 @@ func WithOnDeletion[K comparable, V any](handler func(key K, value V, cause Dele
 	}}
 }
 
-// WithPanicRecover sets Config.OnPanic: the handler for the panics the cache recovers on its own goroutines and
+// WithPanicHandler sets Config.OnPanic: the handler for the panics the cache recovers on its own goroutines and
 // around a background loader.
-func WithPanicRecover(handler PanicHandler) Option {
+func WithPanicHandler(handler PanicHandler) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.onPanic = &handler }}
 }
 

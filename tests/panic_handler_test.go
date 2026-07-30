@@ -82,7 +82,7 @@ func TestPanicHandlerWriteBackHandled(t *testing.T) {
 		memstash.WithMemoryCapacity(10),
 		memstash.WithL2Cache[string, string](panicL2{}),
 		memstash.WithWritePolicy(memstash.WriteBack),
-		memstash.WithPanicRecover(sink.handler()),
+		memstash.WithPanicHandler(sink.handler()),
 		memstash.WithOnL2Error[string, string](func(string, error) {
 			mu.Lock()
 			l2Errs++
@@ -109,7 +109,7 @@ func TestPanicHandlerWriteBackUnhandled(t *testing.T) {
 		memstash.WithMemoryCapacity(10),
 		memstash.WithL2Cache[string, string](panicL2{}),
 		memstash.WithWritePolicy(memstash.WriteBack),
-		memstash.WithPanicRecover(sink.handler()),
+		memstash.WithPanicHandler(sink.handler()),
 	)
 	require.NoError(t, err)
 	defer c.Close()
@@ -131,7 +131,7 @@ func TestPanicHandlerBackgroundLoader(t *testing.T) {
 	c, err := memstash.New[string, string](
 		memstash.WithMemoryCapacity(10),
 		memstash.WithTTL(time.Millisecond),
-		memstash.WithPanicRecover(sink.handler()),
+		memstash.WithPanicHandler(sink.handler()),
 	)
 	require.NoError(t, err)
 	defer c.Close()
@@ -160,7 +160,7 @@ func TestPanicHandlerSurvivesPanickingHandler(t *testing.T) {
 		memstash.WithMemoryCapacity(10),
 		memstash.WithL2Cache[string, string](panicL2{}),
 		memstash.WithWritePolicy(memstash.WriteBack),
-		memstash.WithPanicRecover(func(any, bool) {
+		memstash.WithPanicHandler(func(any, bool) {
 			mu.Lock()
 			calls++
 			mu.Unlock()
@@ -194,7 +194,7 @@ func TestPanicHandlerNotCalledForSyncLoader(t *testing.T) {
 
 	c, err := memstash.New[string, string](
 		memstash.WithMemoryCapacity(10),
-		memstash.WithPanicRecover(sink.handler()),
+		memstash.WithPanicHandler(sink.handler()),
 	)
 	require.NoError(t, err)
 	defer c.Close()

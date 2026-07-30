@@ -332,6 +332,8 @@ c, err := memstash.New[string, User](
 )
 ```
 
+Affects the hit rate — you control which items stay and which get evicted, for instance based on the items themselves.
+
 Full option list:
 
 | Option | Purpose                                                                                                                                           |
@@ -350,6 +352,7 @@ Full option list:
 | `WithGhostSize(n)` | Capacity (in keys) of the S3-FIFO ghost queues and the W-TinyLFU frequency sketch.                                                                |
 | `WithOnL2Error(fn)` | Handler for background L2 errors.                                                                                                                 |
 | `WithOnDeletion(fn)` | Handler for every item leaving L1, with the cause (`CauseInvalidation`, `CauseReplacement`, `CauseExpiration`, `CauseEviction`, `CauseOverflow`). |
+| `WithPanicHandler(fn)` | Handler for the panics the cache recovers on its own goroutines and around a background loader. Receives what `recover()` returned and whether the panic was passed on (to `OnL2Error`, or to waiters as `ErrLoaderPanic`); `false` means the handler is its only trace. |
 | `WithStats()` | Enables the `Stats()` operation counters. Off by default.                                                                                         |
 
 ## L2 Adapters

@@ -5,6 +5,37 @@ All notable changes to this project are documented here. The format follows
 
 Every module - the root and each `l2/*_adapter` - is tagged with the same version.
 
+## [0.9.5] - 2026-07-30
+
+Add GetAndRefresh, panic recovery, faster loads and deletes.
+
+### Added
+
+- **`GetAndRefresh` / `BatchGetAndRefresh`** - serve the cached value, even past its TTL, and reload the key in the
+  background. The reload follows WritePolicy into L2.
+- **`WithPanicHandler` / `Config.OnPanic`** - a panic on one of the cache's goroutines or inside a loader no longer
+  ends the process, it reaches this handler. `handled` says the panic also went out as an error; under a synchronous
+  `GetOrLoad` it still reaches the caller.
+- **`Error`** - the base sentinel every package error wraps, so one `errors.Is` tells memstash errors from the rest.
+  `ErrPanic` and `ErrLoaderPanic` among them.
+- Benchmarks: `BenchmarkDelete` / `BenchmarkDeleteMiss`, etc.
+
+### Changed
+
+- **Singleflight optimizations**: `GetOrLoad`, `BatchGetOrLoad`, `BatchGetAndRefresh` are now cheaper.
+- **Cheaper `Delete`**: deleting an absent key is nearly free, and re-inserting a deleted key no longer degrades
+  lookups until the next rebuild. `BatchDelete` too.
+- `GetAndRefresh` and `BatchGetAndRefresh` count their memory reads.
+- Dependency updates across the adapter modules.
+
+### Fixed
+
+- `BatchGetOrLoad` panicked when an L2 adapter answered with duplicate keys, or with keys nobody asked for.
+- `BatchGetOrLoad` dropped the loader's partial answer when the loader also returned an error.
+- `GetAndRefresh` on a closed cache could hand a `GetOrLoad` waiting on the same key a zero value.
+- A loader answering out of order matched its keys in quadratic time.
+- `Wait` never returned if a write-back delivery panicked mid-run.
+
 ## [0.9.4] - 2026-07-27
 
 Faster core, snapshots, removal events.
@@ -93,6 +124,7 @@ Rearchitected core, pluggable eviction, faster L2 adapters.
 
 First tagged release.
 
+[0.9.5]: https://github.com/zakonnic/memstash/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/zakonnic/memstash/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/zakonnic/memstash/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/zakonnic/memstash/compare/v0.9.1...v0.9.2
