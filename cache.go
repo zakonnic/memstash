@@ -8,6 +8,7 @@ package memstash
 
 import (
 	"context"
+	"fmt"
 	"hash/maphash"
 	"iter"
 	"sync"
@@ -76,6 +77,7 @@ type Cache[K comparable, V any] struct {
 	l2WritePolicy     WritePolicy // always WriteDisabled when l2Cache not set
 	writeBackBatching WriteBackBatching
 	onL2Error         func(key K, err error)
+	onPanic           PanicHandler
 	writeCh           chan l2Write[K, V]
 
 	flights []flightBucket[K, V]
@@ -159,6 +161,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		l2WritePolicy:     cfg.WritePolicy,
 		writeBackBatching: cfg.WriteBackBatching,
 		onL2Error:         cfg.OnL2Error,
+		onPanic:           cfg.OnPanic,
 		onDeletion:        cfg.OnDeletion,
 		stats:             newStats(cfg.StatsEnabled),
 		stop:              make(chan struct{}),
@@ -866,9 +869,42 @@ func (c *Cache[K, V]) reportL2Err(key K, err error) {
 	}
 }
 
+func (c *Cache[K, V]) notifyPanic(recovered any, handled bool) {
+	if c.onPanic == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	c.onPanic(recovered, handled)
+}
+
+// recoverWorker keeps a panic from ending the process on a goroutine the cache owns: nobody up that stack can
+// recover on it. Nothing else sees the panic, so OnPanic hears it unhandled. Must be deferred directly.
+func (c *Cache[K, V]) recoverWorker() {
+	if r := recover(); r != nil {
+		c.notifyPanic(r, false)
+	}
+}
+
+// recoverWriteBack is recoverWorker for the write-back worker, where a panic comes from the L2 adapter or from
+// OnL2Error itself: it is reported like any other L2 failure, unless the handler is the one that panicked.
+func (c *Cache[K, V]) recoverWriteBack(key K) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	if c.onL2Error == nil {
+		c.notifyPanic(r, false)
+		return
+	}
+	defer c.recoverWorker() // OnL2Error is next, and it may be what panicked in the first place
+	c.onL2Error(key, fmt.Errorf("%w: %v", ErrPanic, r))
+	c.notifyPanic(r, true)
+}
+
 // clockLoop refreshes the coarse TTL clock.
 func (c *Cache[K, V]) clockLoop() {
 	defer c.wg.Done()
+	defer c.recoverWorker()
 	ticker := time.NewTicker(TickInterval)
 	defer ticker.Stop()
 	for {
@@ -885,7 +921,9 @@ func (c *Cache[K, V]) clockLoop() {
 const WriteBackBatchMax = 128
 
 // flushWrite hands one write-back task to L2, coalescing the tasks already queued behind it into one BatchSet;
+// a panicking adapter costs this batch, not the worker.
 func (c *Cache[K, V]) flushWrite(first l2Write[K, V]) {
+	defer c.recoverWriteBack(first.key)
 	for more := true; more; {
 		if first.flush != nil {
 			close(first.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
@@ -916,8 +954,8 @@ func (c *Cache[K, V]) flushRun(first l2Write[K, V]) (next l2Write[K, V], more bo
 		case write := <-c.writeCh:
 			switch {
 			case write.flush != nil:
+				defer close(write.flush) // a Wait checkpoint must be released even if the delivery panics
 				c.deliverRun(sets, deletes)
-				close(write.flush)
 				return next, false
 			case write.del != first.del:
 				c.deliverRun(sets, deletes)
@@ -980,6 +1018,7 @@ func (c *Cache[K, V]) deleteBatch(keys []K) {
 // buffer.
 func (c *Cache[K, V]) writeBackLoop() {
 	defer c.wg.Done()
+	defer c.recoverWorker() // flushWrite recovers per batch, so reaching this means the loop itself broke
 	for {
 		select {
 		case write := <-c.writeCh:

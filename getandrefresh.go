@@ -59,6 +59,7 @@ func (c *Cache[K, V]) closing() bool {
 
 func (c *Cache[K, V]) loadInto(ctx context.Context, key K, load LoaderFunc[K, V], call *flightCall[K, V]) {
 	defer c.release(call)
+	defer c.recoverLoader(&call.err)
 
 	value, err := load(ctx, key)
 	if err != nil {
@@ -78,6 +79,7 @@ func (c *Cache[K, V]) loadBatchInto(ctx context.Context, keys []K, load BatchLoa
 		return // every key is already being loaded; that load publishes for them
 	}
 	defer c.releaseAll(fl.calls)
+	defer c.recoverLoaderBatch(fl.calls)
 
 	loaded, err := load(ctx, fl.owned)
 	c.storeLoadedBatch(ctx, loaded) // a partial result is still worth caching

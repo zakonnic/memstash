@@ -22,10 +22,13 @@ var (
 	ErrNilCustomPolicy     = fmt.Errorf("%w: the custom eviction policy factory returned nil", Error)
 	ErrNilLoader           = fmt.Errorf("%w: loader must not be nil", Error)
 	ErrBadTTL              = fmt.Errorf("%w: TTL must not be negative", Error)
-	// ErrLoaderPanic resolves the singleflight of a loader that panicked: the panic itself propagates to the caller
-	// that ran the loader, while every waiter joined on that flight receives this error instead of hanging forever.
-	ErrLoaderPanic = fmt.Errorf("%w: loader panicked", Error)
+	ErrPanic               = fmt.Errorf("%w: panic recovered", Error)
+	ErrLoaderPanic         = fmt.Errorf("%w: loader panicked", ErrPanic)
 )
+
+// PanicHandler is called with whatever recover() returned when the cache swallows a panic. Runs on the goroutine that
+// recovered. handled says the panic was also passed on: to OnL2Error, or to the caller as an ErrLoaderPanic error.
+type PanicHandler func(recovered any, handled bool)
 
 // Config holds the cache configuration. Pass it to NewWithConfig directly, or configure the cache field by field
 // with the With* options of New.
@@ -89,6 +92,11 @@ type Config[K comparable, V any] struct {
 	// goroutine whose operation removed them - so a slow handler slows that caller down, not the whole shard.
 	// Filter with DeletionCause.Automatic to see only the removals the cache decided on its own.
 	OnDeletion func(key K, value V, cause DeletionCause)
+
+	// OnPanic is an optional handler for the panics the cache recovers instead of letting them end the process:
+	// on its own goroutines (the TTL clock, the write-back worker) and around a loader running in the background.
+	// A loader that panics under a synchronous GetOrLoad is not recovered at all - that panic reaches the caller.
+	OnPanic PanicHandler
 
 	// StatsEnabled turns on the operation counters returned by Stats(). Off by default - adds 0.6 ns overhead.
 	StatsEnabled bool

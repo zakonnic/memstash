@@ -7,7 +7,7 @@ package l2
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -19,11 +19,11 @@ import (
 var (
 	// ErrKeyFuncRequired is returned by adapter constructors when the key type is not string and no key function was
 	// provided: networked stores address values by string keys, so non-string keys need an explicit mapping.
-	ErrKeyFuncRequired = errors.New("memstash/l2: key type is not string - provide a key function")
+	ErrKeyFuncRequired = fmt.Errorf("%w: key type is not string - provide a key function", memstash.Error)
 	// ErrNilClient is returned by adapter constructors when the client is nil.
-	ErrNilClient = errors.New("memstash/l2: client must not be nil")
+	ErrNilClient = fmt.Errorf("%w: client must not be nil", memstash.Error)
 	// ErrNilCodec is returned by adapter constructors when the codec is nil.
-	ErrNilCodec = errors.New("memstash/l2: codec must not be nil")
+	ErrNilCodec = fmt.Errorf("%w: codec must not be nil", memstash.Error)
 )
 
 // ResolveKeyFunc returns the cache-key to storage-key mapping for an adapter: the custom function when given, the
@@ -179,7 +179,7 @@ func BatchDeleteConcurrent[K comparable, V any](ctx context.Context, store memst
 }
 
 // runConcurrent executes op for the indexes 0..n-1 on up to workers goroutines and returns the first error, after
-// which no new indexes are started.
+// which no new indexes are started. A panicking op stops the run the same way an error does.
 func runConcurrent(n, workers int, op func(i int) error) error {
 	if workers > n {
 		workers = n
@@ -191,18 +191,26 @@ func runConcurrent(n, workers int, op func(i int) error) error {
 		firstErr error
 		wg       sync.WaitGroup
 	)
+	fail := func(err error) {
+		errOnce.Do(func() { firstErr = err })
+		stopped.Store(true)
+	}
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					fail(fmt.Errorf("%w: %v", memstash.ErrPanic, r))
+				}
+			}()
 			for {
 				i := int(next.Add(1)) - 1
 				if i >= n || stopped.Load() {
 					return
 				}
 				if err := op(i); err != nil {
-					errOnce.Do(func() { firstErr = err })
-					stopped.Store(true)
+					fail(err)
 					return
 				}
 			}

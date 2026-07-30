@@ -13,6 +13,7 @@ package dynamo_adapter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -175,6 +176,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	for i := 0; i < numChunks; i++ {
 		go func(i int) {
 			defer wg.Done()
+			defer recoverChunk(&errs[i])
 			chunk := storageKeys[i*batchGetLimit : min((i+1)*batchGetLimit, len(storageKeys))]
 			results[i], errs[i] = c.batchGetChunk(ctx, chunk, byStorageKey, nil)
 		}(i)
@@ -256,6 +258,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	for i := 0; i < numChunks; i++ {
 		go func(i int) {
 			defer wg.Done()
+			defer recoverChunk(&errs[i])
 			chunk := items[i*batchWriteLimit : min((i+1)*batchWriteLimit, len(items))]
 			errs[i] = c.batchSetChunk(ctx, chunk, ttl)
 		}(i)
@@ -316,6 +319,7 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	for i := 0; i < numChunks; i++ {
 		go func(i int) {
 			defer wg.Done()
+			defer recoverChunk(&errs[i])
 			chunk := storageKeys[i*batchWriteLimit : min((i+1)*batchWriteLimit, len(storageKeys))]
 			errs[i] = c.batchDeleteChunk(ctx, chunk)
 		}(i)
@@ -386,4 +390,12 @@ func expired(item map[string]types.AttributeValue) bool {
 	}
 	deadline, err := strconv.ParseInt(av.Value, 10, 64)
 	return err == nil && deadline != 0 && deadline <= time.Now().Unix()
+}
+
+// recoverChunk turns a panic on a chunk goroutine into that chunk's error: nobody up that stack can recover on it,
+// so it would end the process instead of failing the call.
+func recoverChunk(err *error) {
+	if r := recover(); r != nil {
+		*err = fmt.Errorf("%w: %v", memstash.ErrPanic, r)
+	}
 }

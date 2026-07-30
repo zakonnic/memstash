@@ -37,6 +37,7 @@ type FieldOverrides struct {
 	ghostSize           *int
 	writeBackBufferSize *int
 	writeBackBatching   *WriteBackBatching
+	onPanic             *PanicHandler
 	statsEnabled        *bool
 }
 
@@ -87,6 +88,9 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 	}
 	if fields.writeBackBatching != nil {
 		cfg.WriteBackBatching = *fields.writeBackBatching
+	}
+	if fields.onPanic != nil {
+		cfg.OnPanic = *fields.onPanic
 	}
 	if fields.statsEnabled != nil {
 		cfg.StatsEnabled = *fields.statsEnabled
@@ -205,6 +209,12 @@ func WithOnDeletion[K comparable, V any](handler func(key K, value V, cause Dele
 	return Option{ApplyTyped: func(target any) error {
 		return applyToConfig(target, func(cfg *Config[K, V]) { cfg.OnDeletion = handler })
 	}}
+}
+
+// WithPanicRecover sets Config.OnPanic: the handler for the panics the cache recovers on its own goroutines and
+// around a background loader.
+func WithPanicRecover(handler PanicHandler) Option {
+	return Option{ApplyField: func(f *FieldOverrides) { f.onPanic = &handler }}
 }
 
 // WithStats sets Config.StatsEnabled: turns on the operation counters returned by Cache.Stats(). Off by default.

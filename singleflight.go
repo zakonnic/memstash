@@ -2,6 +2,7 @@ package memstash
 
 import (
 	"context"
+	"fmt"
 	"math/bits"
 	"sync"
 	"sync/atomic"
@@ -142,6 +143,30 @@ func (c *Cache[K, V]) release(call *flightCall[K, V]) {
 	b.mu.Unlock()
 	if joined {
 		call.finish()
+	}
+}
+
+// recoverLoader catches a loader that panicked on a goroutine nobody can recover on - the panic would end the
+// process - and leaves what it threw on the flight, where waiters read it.
+func (c *Cache[K, V]) recoverLoader(err *error) {
+	if r := recover(); r != nil {
+		*err = fmt.Errorf("%w: %v", ErrLoaderPanic, r)
+		c.notifyPanic(r, true)
+	}
+}
+
+// recoverLoaderBatch is recoverLoader for a batch: every flight the loader did not resolve carries the panic.
+func (c *Cache[K, V]) recoverLoaderBatch(calls []flightCall[K, V]) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	defer c.notifyPanic(r, true)
+	err := fmt.Errorf("%w: %v", ErrLoaderPanic, r)
+	for i := range calls {
+		if !calls[i].ok {
+			calls[i].err = err
+		}
 	}
 }
 
