@@ -14,7 +14,11 @@ import (
 // GetOrLoad waiting on the same key receives it. Concurrent loads of one key are coalesced into one.
 func (c *Cache[K, V]) GetAndRefresh(ctx context.Context, key K, load LoaderFunc[K, V]) (V, bool) {
 	value, ok := c.peekMemory(key)
-	c.stats.addMemHit(ok)
+	if ok {
+		c.stats.addMemHits(1)
+	} else {
+		c.stats.addMemMisses(1)
+	}
 	if load == nil || c.closing() {
 		return value, ok
 	}

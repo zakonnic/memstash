@@ -34,17 +34,6 @@ func (s *Stats) addMemHits(n int64) {
 	}
 }
 
-func (s *Stats) addMemHit(hit bool) {
-	if !s.enabled {
-		return
-	}
-	if hit {
-		s.memHits.Add(1)
-	} else {
-		s.memMisses.Add(1)
-	}
-}
-
 func (s *Stats) addMemMisses(n int64) {
 	if s.enabled {
 		s.memMisses.Add(n)
