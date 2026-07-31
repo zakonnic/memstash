@@ -5,12 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 Every module - the root and each `l2/*_adapter` - is tagged with the same version.
 
-## [Unreleased]
+## [0.9.6] - 2026-07-31
 
 ### Added
 
 - **`WithPreallocatedSize` / `Config.PreallocateMap`** - pre-allocate an FlatHashMap for every shard at construction,
 to avoid it grows and memory allocations on Set at all.
+
+### Changed
+
+- Revert a Stats micro-refactoring that prevented inlining and added (embarrassingly, unforgivable) 0.06 ns to Get.
 
 ## [0.9.5] - 2026-07-30
 
@@ -32,14 +36,12 @@ Add GetAndRefresh, panic recovery, faster loads and deletes.
 - **Singleflight optimizations**: `GetOrLoad`, `BatchGetOrLoad`, `BatchGetAndRefresh` are now cheaper.
 - **Cheaper `Delete`**: deleting an absent key is nearly free, and re-inserting a deleted key no longer degrades
   lookups until the next rebuild. `BatchDelete` too.
-- `GetAndRefresh` and `BatchGetAndRefresh` count their memory reads.
 - Dependency updates across the adapter modules.
 
 ### Fixed
 
 - `BatchGetOrLoad` panicked when an L2 adapter answered with duplicate keys, or with keys nobody asked for.
 - `BatchGetOrLoad` dropped the loader's partial answer when the loader also returned an error.
-- `GetAndRefresh` on a closed cache could hand a `GetOrLoad` waiting on the same key a zero value.
 - A loader answering out of order matched its keys in quadratic time.
 - `Wait` never returned if a write-back delivery panicked mid-run.
 

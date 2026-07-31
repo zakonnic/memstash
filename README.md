@@ -56,6 +56,7 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
   - [Read-through with a loader (singleflight)](#read-through-with-a-loader-singleflight)
   - [Two-level cache with Redis](#two-level-cache-with-redis)
 - [Advanced Configuration](#advanced-configuration)
+- [Full option list](#full-option-list)
 - [L2 Adapters](#l2-adapters)
 - [Benchmarks](#benchmarks)
   - [Throughput](#throughput---nsop-lower-is-better)
@@ -334,7 +335,7 @@ c, err := memstash.New[string, User](
 
 Affects the hit rate — you control which items stay and which get evicted, for instance based on the items themselves.
 
-Full option list:
+## Full option list
 
 | Option | Purpose                                                                                                                                           |
 |---|---------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -526,6 +527,36 @@ window from the middle of the fill: it stays in CPU cache and measures the code 
 **full** draws uniformly over all 100M keys, so nearly every op is an LLC and a TLB miss — the gap
 between the two columns is what memory stalls cost per op at this cardinality. Both are aggregate
 ns/op across all cores, like the parallel table above.
+
+### Load generator
+
+Long-running soak test, located [in benchmarks](benchmarks/load_generator) (run `make load-generator`), this tool hammers three independently configured 
+caches with continuous, realistic load to verify correctness and measure real-world hit rates under
+sustained pressure.
+
+Three parallel scenarios, each with its own cache, goroutines, and key space:
+
+| | Values | L1 | L2 | Mix | Load                                         |
+|---|---|---|---|---|----------------------------------------------|
+| `scenario-1` | web sessions, ~350–650 B | 20k items | none | 90% Get | 10 goroutines, 10k rps total                 |
+| `scenario-2` | CDN assets, 0.6–64 KiB | 20k items | Redis cluster | 50/50 | 5 goroutines, 100k rps total                 |
+| `scenario-3` | DB rows, ~300–380 B | ~10 MB (cost-weighted) | Redis cluster | 90% Get | 40 goroutines, 1 hot (10k rps) + 30k rps shared |
+
+Keys follow Zipf distribution over a key space several times larger than L1 capacity.
+
+**Every Get is verified** against a pre-computed truth map. Three things land in `errors.log`: cache/Redis errors, value mismatches, and cross-scenario contamination.
+Logged once per minute + on shutdown** (`scenario-N.log`, JSON lines)
+
+Tuning via [config.yaml](benchmarks/load_generator/config.yaml). All fields optional.
+
+**What you can check:**
+- **Correctness** — empty `errors.log` after hours of 150k+ rps
+- **Real hit rates** — configure `size`, `key_space`, `zipf_s` to match your service
+- **L1 vs L2 split** — traffic reaching Redis, L2 hit rate under working set rotation
+- **Memory/goroutine stability** — flat metrics over hours = no leaks
+- **Load cost** — `process_cpu_cores` at target rps
+- **Throughput ceilings** — `ops_per_sec` below configured rps reveals bottlenecks
+- **Pre-production testing** — point `redis_address` at staging
 
 ## Contributing
 
