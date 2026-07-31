@@ -63,6 +63,7 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
   - [Parallel throughput](#parallel-throughput---millions-of-opss-higher-is-better)
   - [Hit ratio](#hit-ratio---higher-is-better)
   - [Heap footprint](#heap-footprint-lower-is-better)
+  - [Load generator](#load-generator)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -545,8 +546,7 @@ Three parallel scenarios, each with its own cache, goroutines, and key space:
 Keys follow Zipf distribution over a key space several times larger than L1 capacity.
 
 **Every Get is verified** against a pre-computed truth map. Three things land in `errors.log`: cache/Redis errors, value mismatches, and cross-scenario contamination.
-Logged once per minute + on shutdown** (`scenario-N.log`, JSON lines)
-
+Logged once per minute + on shutdown (`scenario-N.log`, JSON lines).
 Tuning via [config.yaml](benchmarks/load_generator/config.yaml). All fields optional.
 
 **What you can check:**
