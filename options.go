@@ -79,7 +79,7 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 		cfg.PreallocateMap = *fields.preallocateTable
 	}
 	if fields.shards != nil {
-		cfg.Shards = *fields.shards
+		cfg.ShardsCount = *fields.shards
 	}
 	if fields.writePolicy != nil {
 		cfg.WritePolicy = *fields.writePolicy
@@ -169,8 +169,8 @@ func WithPreallocatedSize() Option {
 	}}
 }
 
-// WithShards sets Config.Shards: the number of shards the eviction state is split into.
-func WithShards(shards int) Option {
+// WithShardsCount sets Config.ShardsCount: the number of shards the eviction state is split into.
+func WithShardsCount(shards int) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.shards = &shards }}
 }
 

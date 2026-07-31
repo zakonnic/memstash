@@ -82,7 +82,7 @@ func TestDeletionCauseEviction(t *testing.T) {
 	for _, tc := range policies {
 		t.Run(tc.name, func(t *testing.T) {
 			c, rec := newWatchedCache(t, memstash.Config[string, string]{
-				MemoryCapacity: 20, Shards: 1, Policy: tc.policy,
+				MemoryCapacity: 20, ShardsCount: 1, Policy: tc.policy,
 			})
 			for i := range 200 {
 				require.NoError(t, c.Set(ctx, fmt.Sprintf("k%d", i), fmt.Sprintf("v%d", i)))
@@ -103,7 +103,7 @@ func TestDeletionCauseOverflow(t *testing.T) {
 	ctx := context.Background()
 	c, rec := newWatchedCache(t, memstash.Config[string, string]{
 		MemoryCapacity: 100,
-		Shards:         1,
+		ShardsCount:    1,
 		CostFunc:       func(k string, v string) uint32 { return uint32(len(v)) },
 	})
 	require.NoError(t, c.Set(ctx, "k", "small"))
@@ -148,7 +148,7 @@ func TestDeletionAutomaticFilter(t *testing.T) {
 	var evicted []removal
 	c, err := memstash.New[string, string](
 		memstash.WithMemoryCapacity(20),
-		memstash.WithShards(1),
+		memstash.WithShardsCount(1),
 		memstash.WithOnDeletion(func(key, value string, cause memstash.DeletionCause) {
 			if cause.Automatic() {
 				evicted = append(evicted, removal{key, value, cause})
@@ -179,7 +179,7 @@ func TestDeletionHandlerReentrant(t *testing.T) {
 	var c *memstash.Cache[string, string]
 	c, err := memstash.New[string, string](
 		memstash.WithMemoryCapacity(100),
-		memstash.WithShards(1),
+		memstash.WithShardsCount(1),
 		memstash.WithOnDeletion(func(key, value string, cause memstash.DeletionCause) {
 			if key == "trigger" {
 				_ = c.Set(ctx, "from-handler", value)
@@ -225,7 +225,7 @@ func TestDeletionCauseString(t *testing.T) {
 // one that was actually written, and nothing may be reported twice.
 func TestDeletionUnderConcurrency(t *testing.T) {
 	ctx := context.Background()
-	c, rec := newWatchedCache(t, memstash.Config[string, string]{MemoryCapacity: 200, Shards: 4})
+	c, rec := newWatchedCache(t, memstash.Config[string, string]{MemoryCapacity: 200, ShardsCount: 4})
 
 	var wg sync.WaitGroup
 	for w := range 8 {

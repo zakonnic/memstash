@@ -67,11 +67,11 @@ type Config[K comparable, V any] struct {
 	// Requires CostFunc == nil: weight is not an item count.
 	PreallocateMap bool
 
-	// Shards is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to
+	// ShardsCount is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to
 	// a power of two and capped at 128; shards are also halved until each holds at least 64 weight units. 0 means
 	// automatic: GOMAXPROCS. Capacity and ghost are divided evenly between shards; eviction operates within a single
-	// shard. Shards: 1 yields a globally deterministic eviction order (useful in tests).
-	Shards int
+	// shard. ShardsCount: 1 yields a globally deterministic eviction order (useful in tests).
+	ShardsCount int
 
 	// L2Cache is the optional second level.
 	L2Cache L2Cache[K, V]
@@ -116,7 +116,7 @@ func (c *Config[K, V]) isMemstashConfig() {}
 // shardCount computes the final number of shards: a power of two that does not split the cache into pointlessly tiny
 // pieces.
 func (c *Config[K, V]) shardCount() int {
-	count := c.Shards
+	count := c.ShardsCount
 	if count <= 0 {
 		count = runtime.GOMAXPROCS(0)
 	}

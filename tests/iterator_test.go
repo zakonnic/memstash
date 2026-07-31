@@ -106,7 +106,7 @@ func TestIteratorSkipsExpired(t *testing.T) {
 func TestIteratorSkipsEvictionTombstones(t *testing.T) {
 	ctx := context.Background()
 	const capacity = 100
-	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: capacity, Shards: 1})
+	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: capacity, ShardsCount: 1})
 
 	written := map[string]bool{}
 	for i := range 2000 {
@@ -128,7 +128,7 @@ func TestIteratorShardCounts(t *testing.T) {
 	ctx := context.Background()
 	for _, shards := range []int{1, 2, 8} {
 		t.Run(fmt.Sprintf("shards=%d", shards), func(t *testing.T) {
-			c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 4000, Shards: shards})
+			c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 4000, ShardsCount: shards})
 			want := map[string]string{}
 			for i := range 300 {
 				key := fmt.Sprintf("k%03d", i)
@@ -142,7 +142,7 @@ func TestIteratorShardCounts(t *testing.T) {
 
 func TestIteratorNoDuplicatesAndRepeatable(t *testing.T) {
 	ctx := context.Background()
-	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 4000, Shards: 8})
+	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 4000, ShardsCount: 8})
 	for i := range 500 {
 		require.NoError(t, c.Set(ctx, fmt.Sprintf("k%03d", i), "v"))
 	}
@@ -167,7 +167,7 @@ func TestIteratorNoDuplicatesAndRepeatable(t *testing.T) {
 func TestIteratorBreakBoundaries(t *testing.T) {
 	ctx := context.Background()
 	const total = 50
-	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 1000, Shards: 4})
+	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 1000, ShardsCount: 4})
 	for i := range total {
 		require.NoError(t, c.Set(ctx, fmt.Sprintf("k%d", i), "v"))
 	}
@@ -225,7 +225,7 @@ type iterPair struct{ A, B int64 }
 // A multi-word value is published under the seqlock, so a snapshot must never mix an old half with a new one.
 func TestIteratorConcurrentWritesNotTorn(t *testing.T) {
 	ctx := context.Background()
-	c, err := memstash.NewWithConfig[int, iterPair](&memstash.Config[int, iterPair]{MemoryCapacity: 1000, Shards: 1})
+	c, err := memstash.NewWithConfig[int, iterPair](&memstash.Config[int, iterPair]{MemoryCapacity: 1000, ShardsCount: 1})
 	require.NoError(t, err)
 	t.Cleanup(c.Close)
 
@@ -268,7 +268,7 @@ func TestIteratorConcurrentWritesNotTorn(t *testing.T) {
 // Growth reallocates the table mid-walk; the pass runs on the table it started with and must stay consistent.
 func TestIteratorConcurrentMutation(t *testing.T) {
 	ctx := context.Background()
-	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100_000, Shards: 2})
+	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100_000, ShardsCount: 2})
 	for i := range 500 {
 		require.NoError(t, c.Set(ctx, fmt.Sprintf("k%05d", i), "v"))
 	}

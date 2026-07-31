@@ -24,7 +24,7 @@ func TestModelAgainstMap(t *testing.T) {
 				c, err := memstash.NewWithConfig(&memstash.Config[string, int]{
 					MemoryCapacity: 10_000,
 					Policy:         tc.policy,
-					Shards:         shards,
+					ShardsCount:    shards,
 				})
 				require.NoError(t, err)
 				defer c.Close()

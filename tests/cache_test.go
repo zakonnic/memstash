@@ -105,7 +105,7 @@ func TestClockSecondChance(t *testing.T) {
 	c := newCache(t, memstash.Config[string, string]{
 		MemoryCapacity: 100,
 		Policy:         memstash.PolicyClock,
-		Shards:         1, // deterministic eviction order
+		ShardsCount:    1, // deterministic eviction order
 	})
 
 	for i := 0; i < 100; i++ {
@@ -146,7 +146,7 @@ func TestCostFunctionAccounting(t *testing.T) {
 	c := newCache(t, memstash.Config[string, string]{
 		MemoryCapacity: 1000,
 		CostFunc:       func(_ string, v string) uint32 { return uint32(len(v)) },
-		Shards:         1, // the exact "does not fit" boundary equals the whole capacity
+		ShardsCount:    1, // the exact "does not fit" boundary equals the whole capacity
 	})
 
 	// Ordered pipeline: every step changes the state the next one depends on.
@@ -323,7 +323,7 @@ func TestShardedCapacityAndConsistency(t *testing.T) {
 	ctx := context.Background()
 	c, err := memstash.New[int, int](
 		memstash.WithMemoryCapacity(1024),
-		memstash.WithShards(8),
+		memstash.WithShardsCount(8),
 	)
 	require.NoError(t, err)
 	defer c.Close()

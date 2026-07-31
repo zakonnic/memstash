@@ -83,7 +83,7 @@ func TestMemoryBudgetFixedTypes(t *testing.T) {
 	const budget = 64 << 10
 	c, err := memstash.NewWithConfig(&memstash.Config[uint64, uint64]{
 		MemoryBudget: budget,
-		Shards:       1,
+		ShardsCount:  1,
 		Policy:       memstash.PolicyClock,
 	})
 	require.NoError(t, err)

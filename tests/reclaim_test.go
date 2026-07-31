@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
 	"github.com/zakonnic/memstash"
 )
 
@@ -29,7 +28,7 @@ func TestDeleteBelowCapacityDoesNotLeak(t *testing.T) {
 			c, err := memstash.New[int, int](
 				memstash.WithMemoryCapacity(1024),
 				memstash.WithPolicy(tc.policy),
-				memstash.WithShards(1),
+				memstash.WithShardsCount(1),
 			)
 			require.NoError(t, err)
 			defer c.Close()
@@ -63,7 +62,7 @@ func TestSweepKeepsLiveItems(t *testing.T) {
 	ctx := context.Background()
 	c, err := memstash.New[int, int](
 		memstash.WithMemoryCapacity(1024),
-		memstash.WithShards(1),
+		memstash.WithShardsCount(1),
 	)
 	require.NoError(t, err)
 	defer c.Close()

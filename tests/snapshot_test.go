@@ -91,7 +91,7 @@ func TestSnapshotLoadMerges(t *testing.T) {
 // cache does not blow past the capacity.
 func TestSnapshotLoadRespectsCapacity(t *testing.T) {
 	ctx := context.Background()
-	src := newCache(t, memstash.Config[string, string]{MemoryCapacity: 500, Shards: 1})
+	src := newCache(t, memstash.Config[string, string]{MemoryCapacity: 500, ShardsCount: 1})
 	for i := range 500 {
 		require.NoError(t, src.Set(ctx, fmt.Sprintf("k%03d", i), "v"))
 	}
@@ -99,7 +99,7 @@ func TestSnapshotLoadRespectsCapacity(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, src.SaveTo(&buf, l2.StringCodec(), l2.StringCodec()))
 
-	dst := newCache(t, memstash.Config[string, string]{MemoryCapacity: 50, Shards: 1})
+	dst := newCache(t, memstash.Config[string, string]{MemoryCapacity: 50, ShardsCount: 1})
 	require.NoError(t, dst.LoadFrom(ctx, &buf, l2.StringCodec(), l2.StringCodec()))
 	assert.LessOrEqual(t, dst.Len(), 50, "loading must not exceed the capacity")
 	assert.Positive(t, dst.Len())

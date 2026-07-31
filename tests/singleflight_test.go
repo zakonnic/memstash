@@ -20,7 +20,7 @@ import (
 // have to spill into the overflow map. Coalescing must survive that.
 func TestSingleflightOverflowsOneBucket(t *testing.T) {
 	ctx := context.Background()
-	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 1000, Shards: 1})
+	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 1000, ShardsCount: 1})
 
 	const keys, perKey = 24, 3
 	var calls [keys]atomic.Int32

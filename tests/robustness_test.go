@@ -18,7 +18,7 @@ func TestOversizedOverwriteDropsStaleValue(t *testing.T) {
 	c := newCache(t, memstash.Config[string, string]{
 		MemoryCapacity: 1000,
 		CostFunc:       func(_ string, v string) uint32 { return uint32(len(v)) },
-		Shards:         1, // the exact "does not fit" boundary equals the whole capacity
+		ShardsCount:    1, // the exact "does not fit" boundary equals the whole capacity
 	})
 
 	require.NoError(t, c.Set(ctx, "a", "0123456789"))

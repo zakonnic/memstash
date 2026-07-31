@@ -23,7 +23,7 @@ func TestPreallocatedTableFillsWithoutRebuild(t *testing.T) {
 	ctx := context.Background()
 	const capacity = 4096
 
-	c, err := New[int, int](WithMemoryCapacity(capacity), WithShards(4), WithPreallocatedSize())
+	c, err := New[int, int](WithMemoryCapacity(capacity), WithShardsCount(4), WithPreallocatedSize())
 	require.NoError(t, err)
 	defer c.Close()
 
@@ -36,7 +36,7 @@ func TestPreallocatedTableFillsWithoutRebuild(t *testing.T) {
 	}
 	assert.Equal(t, initial, slotCounts(c), "a preallocated table must survive the fill untouched")
 
-	grown, err := New[int, int](WithMemoryCapacity(capacity), WithShards(4))
+	grown, err := New[int, int](WithMemoryCapacity(capacity), WithShardsCount(4))
 	require.NoError(t, err)
 	defer grown.Close()
 

@@ -22,7 +22,7 @@ func TestS3FIFOGhostPromotion(t *testing.T) {
 	c := newCache(t, memstash.Config[string, string]{
 		MemoryCapacity: 100,
 		Policy:         memstash.PolicyS3FIFO,
-		Shards:         1, // deterministic eviction order
+		ShardsCount:    1, // deterministic eviction order
 	})
 
 	require.NoError(t, c.Set(ctx, "A", "v"))
@@ -50,7 +50,7 @@ func TestS3FIFOHotSurvivesFlood(t *testing.T) {
 	c := newCache(t, memstash.Config[string, string]{
 		MemoryCapacity: 100,
 		Policy:         memstash.PolicyS3FIFO,
-		Shards:         1, // deterministic eviction order
+		ShardsCount:    1, // deterministic eviction order
 	})
 
 	hot := make([]string, 10)

@@ -68,7 +68,7 @@ func TestCustomEvictionPolicy(t *testing.T) {
 	ctx := context.Background()
 	c, err := memstash.New[string, int](
 		memstash.WithMemoryCapacity(8),
-		memstash.WithShards(1),
+		memstash.WithShardsCount(1),
 		memstash.WithCustomEvictionPolicy(newFIFOPolicy[string, int]),
 	)
 	require.NoError(t, err)
