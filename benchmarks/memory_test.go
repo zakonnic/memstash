@@ -14,7 +14,7 @@ import (
 	"github.com/zakonnic/memstash"
 )
 
-// Real heap footprint of a full cache, measured from the runtime rather than the built-in TotalWeight estimator:
+// Real heap footprint of a full cache, measured from the runtime rather than the built-in TotalSize estimator:
 // GC to a quiescent live set, snapshot HeapAlloc, build and fill, GC again, snapshot again. uint64/uint64 entries
 // are pointer-free and keys come from a counter, so the growth between snapshots is the cache and nothing else.
 
@@ -67,7 +67,7 @@ func measureFootprint(b *testing.B, capacity int64) *memstash.Cache[uint64, uint
 
 	live := c.Len()
 	heapBytes := after.HeapAlloc - before.HeapAlloc
-	estimate := c.TotalWeight()
+	estimate := c.TotalSize()
 	runtime.KeepAlive(c) // the cache must be alive at the second snapshot, or the GC reclaims what we are measuring
 
 	perEntryHeap := float64(heapBytes) / float64(live)

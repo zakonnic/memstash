@@ -56,7 +56,7 @@ func (a *memstashBytesAdapter) Close() { a.c.Close() }
 
 // GetSize adds Weight() to the structural total: the payload lives in heap allocations outside the cache, and the
 // cost function here is exactly len(key)+len(value), so Weight() is the payload byte total.
-func (a *memstashBytesAdapter) GetSize() uint64 { return uint64(a.c.TotalWeight() + a.c.Weight()) }
+func (a *memstashBytesAdapter) GetSize() uint64 { return uint64(a.c.TotalSize() + a.c.Weight()) }
 func (a *memstashBytesAdapter) Len() int        { return a.c.Len() }
 
 // --- ristretto ---

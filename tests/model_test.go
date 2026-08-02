@@ -90,7 +90,7 @@ func TestTombstoneChurnBounded(t *testing.T) {
 			for i := 0; i < window; i++ {
 				require.NoError(t, c.Set(ctx, i, i))
 			}
-			baseline := c.TotalWeight()
+			baseline := c.TotalSize()
 			for i := window; i < 60_000; i++ {
 				require.NoError(t, c.Set(ctx, i, i))
 				require.NoError(t, c.Delete(ctx, i-window))
@@ -104,8 +104,8 @@ func TestTombstoneChurnBounded(t *testing.T) {
 			}
 			// The structures may hold slack (pool freelist, queue chunks, tombstones between rebuilds), but must not
 			// grow in proportion to the 60k operations.
-			require.Less(t, c.TotalWeight(), baseline*8+1<<20,
-				"first-level structures grew unboundedly under delete churn (baseline %d, now %d)", baseline, c.TotalWeight())
+			require.Less(t, c.TotalSize(), baseline*8+1<<20,
+				"first-level structures grew unboundedly under delete churn (baseline %d, now %d)", baseline, c.TotalSize())
 		})
 	}
 }

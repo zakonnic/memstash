@@ -42,7 +42,7 @@ func (p *ClockPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 			return 0, false
 		}
 		item := p.items.At(candidate.Idx)
-		metaWord := item.Load()
+		metaWord := item.Metadata()
 		switch {
 		case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
 			return candidate.Idx, true

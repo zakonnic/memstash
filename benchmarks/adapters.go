@@ -59,7 +59,7 @@ func (a *memstashAdapter) Delete(key uint64) {
 func (a *memstashAdapter) Settle()         {} // memory writes are synchronous;
 func (a *memstashAdapter) Close()          { a.c.Close() }
 func (a *memstashAdapter) Expose() any     { return a.c }
-func (a *memstashAdapter) GetSize() uint64 { return uint64(a.c.TotalWeight()) }
+func (a *memstashAdapter) GetSize() uint64 { return uint64(a.c.TotalSize()) }
 
 // --- ristretto ---
 

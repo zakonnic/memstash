@@ -107,7 +107,7 @@ func (p *WTinyLFUPolicy[K, V]) evictWindowOnce(nowOff uint32) (uint32, bool) {
 	p.windowWeight -= int64(candidate.Cost)
 
 	item := p.items.At(candidate.Idx)
-	metaWord := item.Load()
+	metaWord := item.Metadata()
 	switch {
 	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
 		return candidate.Idx, true
@@ -134,7 +134,7 @@ func (p *WTinyLFUPolicy[K, V]) admit(candidateKey K) bool {
 		return true
 	}
 	victimState := p.items.At(victim.Idx)
-	if victimState.Load()&itemstore.Dead != 0 {
+	if victimState.Metadata()&itemstore.Dead != 0 {
 		return true
 	}
 	return p.sketch.estimate(p.keyHash(candidateKey)) > p.sketch.estimate(p.keyHash(victimState.Entry().Key))
@@ -147,7 +147,7 @@ func (p *WTinyLFUPolicy[K, V]) evictMainOnce(nowOff uint32) (uint32, bool) {
 		return 0, false
 	}
 	item := p.items.At(candidate.Idx)
-	metaWord := item.Load()
+	metaWord := item.Metadata()
 	switch {
 	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
 		return candidate.Idx, true

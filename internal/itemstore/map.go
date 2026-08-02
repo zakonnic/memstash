@@ -23,7 +23,7 @@ const MaxItems = int64(3) << 30
 // after the swap - indistinguishable from the Get racing the Set.
 type FlatHashMap[K comparable, V any] struct {
 	base      *Item[K, V]    // first slot; the backing array stays alive through this interior pointer
-	overflows *atomic.Uint32 // per group: how many keys homed in it live past its edge (overflows counts)
+	overflows *atomic.Uint32 // per group: how many keys homed in it live past its edge (SwissTable/f14 adaptation)
 	mask      uint32         // slot count minus one; the count is a power of two
 }
 
@@ -49,7 +49,7 @@ func (t *FlatHashMap[K, V]) Wrap(pos uint32) uint32 { return pos & t.mask }
 // scanned the group without a match may stop: the key is definitely absent.
 func (t *FlatHashMap[K, V]) Overflowed(home uint32) bool { return t.overflowAt(home).Load() != 0 }
 
-// NoteDisplaced records that home's key settled at pos; a no-op inside the home group.
+// NoteDisplaced increments the overflow count for home's group if the key settled outside its home group.
 func (t *FlatHashMap[K, V]) NoteDisplaced(home, pos uint32) {
 	if (home&t.mask)>>groupShift != (pos&t.mask)>>groupShift {
 		t.overflowAt(home).Add(1)
@@ -81,11 +81,11 @@ func (t *FlatHashMap[K, V]) InsertFresh(keyHash uint64, src *Item[K, V]) uint32 
 	}
 }
 
-func (t *FlatHashMap[K, V]) SlotCount() int { return int(t.mask) + 1 }
+func (t *FlatHashMap[K, V]) Len() int { return int(t.mask) + 1 }
 
 func (t *FlatHashMap[K, V]) Bytes() int64 {
-	slots := int64(t.SlotCount())
-	return int64(unsafe.Sizeof(*t)) + slots*int64(unsafe.Sizeof(Item[K, V]{})) + (slots>>groupShift)*4
+	length := int64(t.Len())
+	return int64(unsafe.Sizeof(*t)) + length*int64(unsafe.Sizeof(Item[K, V]{})) + (length>>groupShift)*4
 }
 
 // StorageProxy is a shard's stable handle to its current FlatHashMap: rebuilds swap the table underneath while the shard's

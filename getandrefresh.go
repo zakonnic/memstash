@@ -131,7 +131,7 @@ func (c *Cache[K, V]) peekMemory(key K) (V, bool) {
 		}
 		item := storage.At(pos)
 		for {
-			metaWord := item.Load()
+			metaWord := item.Metadata()
 			if metaWord == 0 {
 				return zero, false
 			}

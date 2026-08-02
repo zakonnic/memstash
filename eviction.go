@@ -9,7 +9,7 @@ type QNode = itemstore.QNode
 
 // Item is one cached item: its key/value Entry alongside eviction metadata (a dead bit, a 2-bit
 // reference counter set by lock-free reads, the expiration offset and an occupancy generation). See
-// Load/Entry/Kill/TouchWith/RevokeChance/ResetChances for what a policy may do with it.
+// Metadata/Entry/Kill/TouchWith/RevokeChance/ResetChances for what a policy may do with it.
 type Item[K comparable, V any] = itemstore.Item[K, V]
 
 // Items resolves queue-node indices into the items themselves; the cache hands one to a custom eviction policy's
@@ -50,7 +50,7 @@ func ItemExpired(metaWord uint64, nowOff uint32) bool { return itemstore.Expired
 // SIEVE) implement and a custom policy plugged in through WithCustomEvictionPolicy must satisfy. Every method is
 // called strictly under the owning shard's mutex, so implementations need no synchronization of their own - but
 // item reference counters are set concurrently by lock-free readers, so meta words must be read through
-// Item.Load.
+// Item.Metadata.
 type EvictionPolicy[K comparable, V any] interface {
 	// Add registers the node of a newly inserted item. The item already carries its Entry.
 	Add(node QNode)

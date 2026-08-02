@@ -68,7 +68,7 @@ func SweepQueue[K comparable, V any](q *EvictQueue, storage *FlatHashMap[K, V], 
 		if !ok {
 			return
 		}
-		if storage.At(node.Idx).Load()&Dead != 0 {
+		if storage.At(node.Idx).Metadata()&Dead != 0 {
 			onDrop(node)
 		} else {
 			q.Push(node)

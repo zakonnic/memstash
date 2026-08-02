@@ -333,7 +333,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 		}
 		item := storage.At(pos)
 		for {
-			metaWord := item.Load()
+			metaWord := item.Metadata()
 			if metaWord == 0 {
 				return zero, false // a never-occupied slot ends the probe chain
 			}
@@ -405,7 +405,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	reuse, hasReuse := uint32(0), false
 	for pos := home; ; pos++ {
 		item := storage.At(pos)
-		metaWord := item.Load()
+		metaWord := item.Metadata()
 		if metaWord == 0 {
 			// New key: claim this empty slot, or the first freed tombstone seen on the way.
 			if hasReuse {
@@ -472,10 +472,10 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 // a probe racing the swap may return a value as of the copy moment - the documented Get-racing-Set window. Called
 // under the shard mutex.
 func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *itemstore.FlatHashMap[K, V]) {
-	if (sh.live+sh.dirty)*4 < t.SlotCount()*3 {
+	if (sh.live+sh.dirty)*4 < t.Len()*3 {
 		return
 	}
-	newSize := t.SlotCount()
+	newSize := t.Len()
 	if sh.live*2 >= newSize {
 		newSize *= 2
 	}
@@ -483,7 +483,7 @@ func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *itemstore.FlatHashMap[K, 
 	live := 0
 	sh.policy.Rebuild(func(oldIdx uint32) (uint32, bool) {
 		item := t.At(oldIdx)
-		if item.Load()&itemstore.Dead != 0 {
+		if item.Metadata()&itemstore.Dead != 0 {
 			return 0, false
 		}
 		live++
@@ -514,7 +514,7 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 			if c.onDeletion != nil {
 				// The policy hands over expired items too; the meta word says which of the two it was.
 				cause := CauseEviction
-				if itemstore.Expired(item.Load(), nowOff) {
+				if itemstore.Expired(item.Metadata(), nowOff) {
 					cause = CauseExpiration
 				}
 				c.addDeletion(deletions, entry.Key, entry.Value, cause)
@@ -532,7 +532,7 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K, idx uint32) 
 	// The idx match and the Expired re-check reject the races: a re-claimed slot or a refreshed TTL means the item
 	// survives.
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
-	if ok && foundIdx == idx && itemstore.Expired(item.Load(), c.nowOff.Load()) {
+	if ok && foundIdx == idx && itemstore.Expired(item.Metadata(), c.nowOff.Load()) {
 		c.killAt(sh, h, foundIdx, item, CauseExpiration, &deletions)
 	}
 	sh.mu.Unlock()
@@ -555,7 +555,7 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 		}
 		item := storage.At(pos)
 		for {
-			metaWord := item.Load()
+			metaWord := item.Metadata()
 			if metaWord == 0 {
 				return false
 			}
@@ -602,7 +602,7 @@ func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, 
 			return 0, nil, false
 		}
 		item := storage.At(pos)
-		metaWord := item.Load()
+		metaWord := item.Metadata()
 		if metaWord == 0 {
 			return 0, nil, false
 		}
@@ -761,9 +761,9 @@ func (c *Cache[K, V]) iterateWithLife(yield func(K, V, time.Duration) bool) {
 	for i := range c.shards {
 		storage := c.shards[i].items.GetStorage()
 		nowOff := c.nowOff.Load()
-		for pos := 0; pos < storage.SlotCount(); pos++ {
+		for pos := 0; pos < storage.Len(); pos++ {
 			item := storage.At(uint32(pos))
-			metaWord := item.Load()
+			metaWord := item.Metadata()
 			if metaWord == 0 || metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff) {
 				continue
 			}
@@ -821,13 +821,13 @@ func (c *Cache[K, V]) Weight() int64 {
 	return total
 }
 
-// TotalWeight estimates the total memory footprint of the cache's first-level structures: item tables (items carry
+// TotalSize estimates the total memory footprint of the cache's first-level structures: item tables (items carry
 // their Entry inline), eviction bookkeeping and the fixed parts (the Cache struct, shards, flights buckets,
 // write-back buffer).
 //
 // An Entry is counted at its inline size, so heap data referenced by K or V is not included. When CostFunc measures
-// those bytes, TotalWeight() + Weight() gives the full footprint.
-func (c *Cache[K, V]) TotalWeight() int64 {
+// those bytes, TotalSize() + Weight() gives the full footprint.
+func (c *Cache[K, V]) TotalSize() int64 {
 	total := int64(unsafe.Sizeof(*c))
 	total += int64(len(c.shards)) * int64(unsafe.Sizeof(shard[K, V]{}))
 	total += int64(len(c.flights)) * int64(unsafe.Sizeof(flightBucket[K, V]{}))

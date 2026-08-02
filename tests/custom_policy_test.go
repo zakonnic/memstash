@@ -38,7 +38,7 @@ func (p *fifoPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 func (p *fifoPolicy[K, V]) Sweep(release func(idx uint32)) {
 	kept := p.nodes[:0]
 	for _, node := range p.nodes[p.head:] {
-		if p.items.At(node.Idx).Load()&memstash.ItemDead != 0 {
+		if p.items.At(node.Idx).Metadata()&memstash.ItemDead != 0 {
 			release(node.Idx)
 		} else {
 			kept = append(kept, node)

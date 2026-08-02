@@ -136,7 +136,7 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 		storage := sh.items.GetStorage()
 		pos := storage.Home(keyHash)
 		g.sh[i], g.keyHash[i], g.table[i], g.pos[i] = sh, keyHash, storage, pos
-		g.meta[i] = storage.At(pos).Load()
+		g.meta[i] = storage.At(pos).Metadata()
 	}
 	// walk each probe chain to its first candidate (or a definite miss); a candidate is its own slot, so the
 	// walk already loaded the line the validation stage needs.
@@ -158,7 +158,7 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 				break
 			}
 			pos++
-			metaWord = t.At(pos).Load()
+			metaWord = t.At(pos).Metadata()
 		}
 	}
 	// validate the candidates against the now-loaded items.

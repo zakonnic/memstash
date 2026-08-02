@@ -11,7 +11,7 @@ import (
 func slotCounts[K comparable, V any](c *Cache[K, V]) []int {
 	counts := make([]int, len(c.shards))
 	for i := range c.shards {
-		counts[i] = c.shards[i].items.GetStorage().SlotCount()
+		counts[i] = c.shards[i].items.GetStorage().Len()
 	}
 	return counts
 }

@@ -243,20 +243,20 @@ func TestRefreshTTLOnGet(t *testing.T) {
 	assert.EqualValues(t, 0, c.Weight(), "weight of the expired item was not subtracted")
 }
 
-func TestTotalWeight(t *testing.T) {
+func TestTotalSize(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range policies {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 1000, Policy: tc.policy})
 
-			empty := c.TotalWeight()
-			assert.GreaterOrEqual(t, empty, c.Weight(), "TotalWeight must be at least the logical Weight")
+			empty := c.TotalSize()
+			assert.GreaterOrEqual(t, empty, c.Weight(), "TotalSize must be at least the logical Weight")
 
 			for i := 0; i < 50; i++ {
 				require.NoError(t, c.Set(ctx, fmt.Sprintf("k%d", i), "v"))
 			}
-			assert.Greater(t, c.TotalWeight(), empty, "TotalWeight must grow as items are added")
-			assert.GreaterOrEqual(t, c.TotalWeight(), c.Weight(), "TotalWeight must stay at least the logical Weight")
+			assert.Greater(t, c.TotalSize(), empty, "TotalSize must grow as items are added")
+			assert.GreaterOrEqual(t, c.TotalSize(), c.Weight(), "TotalSize must stay at least the logical Weight")
 		})
 	}
 }

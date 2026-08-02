@@ -18,21 +18,21 @@ func TestItemSize(t *testing.T) {
 func TestSnapshotSeqlock(t *testing.T) {
 	item := NewFlatHashMap[string, string](64).At(0)
 	item.Publish(Entry[string, string]{Key: "k", Value: "old"}, 0, 0)
-	before := item.Load()
+	before := item.Metadata()
 
 	item.SetValue("new")
-	assert.Equal(t, before+2, item.Load(), "a multi-word overwrite must advance the generation twice")
+	assert.Equal(t, before+2, item.Metadata(), "a multi-word overwrite must advance the generation twice")
 	_, ok := item.Snapshot(before)
 	assert.False(t, ok, "a snapshot against the pre-overwrite meta word must fail validation")
-	entry, ok := item.Snapshot(item.Load())
+	entry, ok := item.Snapshot(item.Metadata())
 	assert.True(t, ok)
 	assert.Equal(t, "new", entry.Value)
 
 	word := NewFlatHashMap[uint64, uint64](64).At(0)
 	word.Publish(Entry[uint64, uint64]{Key: 1, Value: 10}, 0, 0)
-	wordBefore := word.Load()
+	wordBefore := word.Metadata()
 	word.SetValue(20)
-	assert.Equal(t, wordBefore, word.Load(), "a single-word overwrite must not disturb the meta word")
+	assert.Equal(t, wordBefore, word.Metadata(), "a single-word overwrite must not disturb the meta word")
 	wordEntry, ok := word.Snapshot(wordBefore)
 	assert.True(t, ok)
 	assert.EqualValues(t, 20, wordEntry.Value)
@@ -45,12 +45,12 @@ func TestSnapshotRejectsWriteInProgress(t *testing.T) {
 	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
 
 	item.beginWrite()
-	mid := item.Load()
+	mid := item.Metadata()
 	assert.NotZero(t, mid&1, "beginWrite must leave the generation odd")
 	_, ok := item.Snapshot(mid)
 	assert.False(t, ok, "a snapshot inside a write window must fail even with a stable meta word")
 	item.endWrite()
-	assert.Zero(t, item.Load()&1, "endWrite must settle the generation even")
+	assert.Zero(t, item.Metadata()&1, "endWrite must settle the generation even")
 }
 
 // TestGenWrapNeverLooksEmpty covers the generation wrapping on a item that carries nothing else: no TTL and a zero
@@ -61,10 +61,10 @@ func TestGenWrapNeverLooksEmpty(t *testing.T) {
 	item := NewFlatHashMap[string, string](64).At(0)
 	item.meta.Store(lastEven)
 	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
-	assert.NotZero(t, item.Load(), "a wrapped occupancy must not publish an empty-slot meta word")
+	assert.NotZero(t, item.Metadata(), "a wrapped occupancy must not publish an empty-slot meta word")
 
 	item.meta.Store(lastEven)
 	item.SetValue("wrapped")
-	assert.NotZero(t, item.Load(), "a wrapped in-place write must not leave an empty-slot meta word")
-	assert.Zero(t, item.Load()&1, "endWrite must settle the generation even")
+	assert.NotZero(t, item.Metadata(), "a wrapped in-place write must not leave an empty-slot meta word")
+	assert.Zero(t, item.Metadata()&1, "endWrite must settle the generation even")
 }

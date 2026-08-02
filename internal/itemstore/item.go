@@ -157,8 +157,8 @@ func (s *Item[K, V]) endWrite() {
 // Gen returns the item's current occupancy generation.
 func (s *Item[K, V]) Gen() uint32 { return uint32(s.meta.Load() & GenMask) }
 
-// Load returns the current meta word.
-func (s *Item[K, V]) Load() uint64 { return s.meta.Load() }
+// Metadata returns the current meta word.
+func (s *Item[K, V]) Metadata() uint64 { return s.meta.Load() }
 
 // TouchWith sets the next bit of the reference counter, given an already-loaded meta word; a saturated counter
 // writes nothing. A false positive on a reused slot (Get racing eviction) just grants a stranger one extra chance.

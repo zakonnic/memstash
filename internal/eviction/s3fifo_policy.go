@@ -100,7 +100,7 @@ func (p *S3FIFOPolicy[K, V]) evictSmallOnce(nowOff uint32) (uint32, bool) {
 	p.smallWeight -= int64(candidate.Cost)
 
 	item := p.items.At(candidate.Idx)
-	metaWord := item.Load()
+	metaWord := item.Metadata()
 	switch {
 	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
 		return candidate.Idx, true
@@ -122,7 +122,7 @@ func (p *S3FIFOPolicy[K, V]) evictMainOnce(nowOff uint32) (uint32, bool) {
 		return 0, false
 	}
 	item := p.items.At(candidate.Idx)
-	metaWord := item.Load()
+	metaWord := item.Metadata()
 	switch {
 	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
 		return candidate.Idx, true

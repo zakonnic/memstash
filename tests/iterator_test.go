@@ -292,7 +292,7 @@ func TestIteratorConcurrentMutation(t *testing.T) {
 		}
 	}()
 
-	footprintBefore := c.TotalWeight()
+	footprintBefore := c.TotalSize()
 	badValue, dupKey := "", ""
 	for range 100 {
 		seen := make(map[string]struct{}, 8192)
@@ -313,5 +313,5 @@ func TestIteratorConcurrentMutation(t *testing.T) {
 	assert.Empty(t, dupKey, "key yielded twice in one pass")
 	assert.Greater(t, writes.Load(), int64(1000), "writer never got going")
 	assert.Greater(t, deletes.Load(), int64(1000), "deleter never got going")
-	assert.Greater(t, c.TotalWeight(), footprintBefore, "the table never grew: no rebuild raced the walk")
+	assert.Greater(t, c.TotalSize(), footprintBefore, "the table never grew: no rebuild raced the walk")
 }

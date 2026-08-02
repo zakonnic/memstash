@@ -66,7 +66,7 @@ func (p *SievePolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 		}
 		node := &p.nodes[cur]
 		item := p.slots.At(node.item.Idx)
-		metaWord := item.Load()
+		metaWord := item.Metadata()
 		switch {
 		case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
 			return p.removeAt(cur, node), true
@@ -93,7 +93,7 @@ func (p *SievePolicy[K, V]) Sweep(release func(idx uint32)) {
 	for cur := p.head; cur != noLink; {
 		node := &p.nodes[cur]
 		next := node.next
-		if storage.At(node.item.Idx).Load()&itemstore.Dead != 0 {
+		if storage.At(node.item.Idx).Metadata()&itemstore.Dead != 0 {
 			if p.hand == cur {
 				// The walk goes head to tail, so prev nodes are already swept: the hand lands on a live node.
 				p.hand = node.prev

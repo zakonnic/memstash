@@ -40,5 +40,5 @@ func addFromPool(p interface{ Add(itemstore.QNode) }, a *arena, key string) uint
 // touch sets one reference-counter bit on the item, as a lock-free reader would.
 func touch(a *arena, idx uint32) {
 	item := a.items.At(idx)
-	item.TouchWith(item.Load())
+	item.TouchWith(item.Metadata())
 }

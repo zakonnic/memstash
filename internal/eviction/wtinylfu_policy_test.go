@@ -77,7 +77,7 @@ func TestWTinyLFUAdmission(t *testing.T) {
 	victim, ok := p.main.Peek()
 	require.True(t, ok)
 	assert.Equal(t, "resident", pool.items.At(victim.Idx).Entry().Key)
-	assert.Zero(t, pool.items.At(residentIdx).Load()&itemstore.Dead, "the protected resident must stay alive")
+	assert.Zero(t, pool.items.At(residentIdx).Metadata()&itemstore.Dead, "the protected resident must stay alive")
 }
 
 // TestWTinyLFUAdmitsFrequentKey verifies the other side of the filter: a candidate whose key was seen more often
@@ -116,7 +116,7 @@ func TestWTinyLFUAdmitsFrequentKey(t *testing.T) {
 		pool.release(idx)
 	}
 	assert.True(t, inMain("hot"), "the frequent candidate must be admitted to main")
-	assert.Zero(t, pool.items.At(hotIdx).Load()&itemstore.Dead, "the admitted key must stay alive")
+	assert.Zero(t, pool.items.At(hotIdx).Metadata()&itemstore.Dead, "the admitted key must stay alive")
 }
 
 // TestWTinyLFUBytes verifies Bytes is the sum of its parts, sketch included.
