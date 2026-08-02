@@ -268,7 +268,7 @@ func (s *scenario) logStats(logger *slog.Logger, start time.Time, prev meter) me
 	logger.Info("stats",
 		"uptime_sec", now.Sub(start).Seconds(),
 		"cache_len", s.cache.Len(),
-		"cache_weight_bytes", s.cache.TotalWeight(),
+		"cache_weight_bytes", s.cache.TotalSize(),
 		"ops_total", ops,
 		"gets_total", gets,
 		"sets_total", sets,
