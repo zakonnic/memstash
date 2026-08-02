@@ -66,13 +66,18 @@ bench-real: ## Run realistic and non-standard pattern benchmarks
 	go -C benchmarks test -run='^TestHitRateRealistic$$' -v
 bench-flight: ## Run hitrate benchmarks for singleflight
 	go -C benchmarks test -run=xxx -bench='^BenchmarkFlight' ./...
-
-.PHONY: bench
-bench: bench-speed bench-hitrate ## Run benchmarks
 bench-100kk:
 	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprintMemstash -tags=long
 bench-100kk-others:
 	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprint -tags=others
+
+.PHONY: bench
+ifeq ($(strip $(NAME)),)
+bench: bench-speed bench-hitrate ## Run benchmarks; NAME=<regexp> runs only the matching ones (make bench NAME=GetHit)
+else
+bench:
+	go -C benchmarks test -run=xxx -bench='^Benchmark$(NAME)$$' ./...
+endif
 
 integration-tests: ## Run integration tests against live redis/memcached (make up first); CGO off so the cgo-only valyala adapter is skipped
 	CGO_ENABLED=0 go -C tests/integration test ./... -v
