@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"sync/atomic"
 )
 
@@ -15,12 +17,16 @@ type errorLog struct {
 	count  atomic.Int64
 }
 
-func newErrorLog(path string) (*errorLog, error) {
+func newErrorLog(path string, con *console) (*errorLog, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	return &errorLog{logger: slog.New(slog.NewJSONHandler(f, nil)), file: f}, nil
+	handler := fanout{
+		slog.NewJSONHandler(f, nil),
+		slog.NewTextHandler(con.writer(), errorOptions),
+	}
+	return &errorLog{logger: slog.New(handler), file: f}, nil
 }
 
 func (e *errorLog) Close() error { return e.file.Close() }
@@ -47,6 +53,28 @@ func (e *errorLog) anomaly(scenario, key string, got []byte) {
 	e.count.Add(1)
 	e.logger.Error("hit on never-written key",
 		"scenario", scenario, "key", key, "got_len", len(got), "got_prefix", hexPrefix(got))
+}
+
+func (e *errorLog) l2Error(scenario, key string, err error) {
+	e.count.Add(1)
+	e.logger.Error("l2 error", "scenario", scenario, "key", key, "error", err.Error())
+}
+
+func (e *errorLog) cachePanic(scenario string, recovered any, handled bool) {
+	e.count.Add(1)
+	e.logger.Error("panic in cache", "scenario", scenario, "panic", fmt.Sprint(recovered), "handled", handled)
+}
+
+func (e *errorLog) recoverPanic(scenario, where string) {
+	if r := recover(); r != nil {
+		e.panicked(scenario, where, r)
+	}
+}
+
+func (e *errorLog) panicked(scenario, where string, recovered any) {
+	e.count.Add(1)
+	e.logger.Error("panic recovered",
+		"scenario", scenario, "where", where, "panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
 }
 
 func hexPrefix(b []byte) string {

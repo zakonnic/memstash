@@ -14,14 +14,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 
-	rueidislib "github.com/redis/rueidis"
-
+	"github.com/dustin/go-humanize"
 	"github.com/zakonnic/memstash"
-	rueidis_adapter "github.com/zakonnic/memstash/l2/rueidis_adapter"
 )
 
 // defaultRedisClusterAddr is the docker-compose Redis cluster; scenarios 2 and 3 use it unless config overrides.
@@ -30,30 +29,49 @@ const defaultRedisClusterAddr = "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213
 func main() {
 	logDir := flag.String("log-dir", ".", "directory to write the per-scenario JSON-lines log files into")
 	configPath := flag.String("config", "config.yaml", "optional YAML file overriding per-scenario defaults")
+	selfTest := flag.Bool("selftest", false,
+		"write one synthetic error of every kind and exit - checks the console and errors.log without running any load")
 	flag.Parse()
 
 	if err := os.MkdirAll(*logDir, 0o755); err != nil {
 		log.Fatalf("cannot create log dir %s: %v", *logDir, err)
 	}
 
+	// Everything printed goes through the console, so nothing lands in the middle of the status block.
+	con := newConsole(os.Stdout)
+	log.SetOutput(con.writer())
+
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("cannot load config %s: %v", *configPath, err)
 	}
 
-	errLog, err := newErrorLog(filepath.Join(*logDir, "errors.log"))
+	errPath := filepath.Join(*logDir, "errors.log")
+	errLog, err := newErrorLog(errPath, con)
 	if err != nil {
 		log.Fatalf("cannot open errors.log: %v", err)
 	}
 	defer errLog.Close()
+	defer logMainPanic(errLog) // registered after Close, so it runs first and still has the file
+
+	if *selfTest {
+		runSelfTest(con, errLog)
+		log.Printf("self test done: %d error(s) written to %s", errLog.count.Load(), errPath)
+		return
+	}
 
 	log.Println("building scenarios and their source-of-truth maps...")
-	scenarios, err := buildScenarios(*logDir, cfg, errLog)
+	scenarios, err := buildScenarios(*logDir, cfg, errLog, con)
 	if err != nil {
 		log.Fatalf("cannot build scenarios: %v", err)
 	}
 
 	printScenarios(scenarios)
+
+	truthHeap := measureTruthHeap(scenarios)
+	log.Printf("source-of-truth maps and value blob hold %s of heap - the price of verifying every Get. "+
+		"The stats report heap_alloc_bytes with it already subtracted; add "+
+		"the two together for what the process really holds.", humanize.IBytes(uint64(truthHeap)))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -68,7 +86,29 @@ func main() {
 	<-ctx.Done()
 	log.Println("shutting down, flushing final stats...")
 	wg.Wait()
-	log.Println("stopped")
+	log.Printf("stopped; %d error(s) logged to %s", errLog.count.Load(), errPath)
+}
+
+// logMainPanic gives a panic that unwound all the way out of main a line in errors.log before the runtime prints it
+// and kills the process. Must be deferred directly.
+func logMainPanic(errLog *errorLog) {
+	if r := recover(); r != nil {
+		errLog.panicked("", "main", r)
+		panic(r)
+	}
+}
+
+func measureTruthHeap(scenarios []*scenario) int64 {
+	runtime.GC()
+	runtime.GC()
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	truthHeap := int64(mem.HeapAlloc)
+	for _, s := range scenarios {
+		s.truthHeap = truthHeap
+	}
+	return truthHeap
 }
 
 // printScenarios prints each scenario's effective parameters (after config overrides) to stdout.
@@ -110,45 +150,24 @@ func evenSplit(n int, totalRPS float64) []float64 {
 	return rps
 }
 
-// buildCache builds a scenario's cache: L1-only when seeds is empty, else two-level over a rueidis client (which is
-// then non-nil and must be closed after the cache).
-func buildCache(seeds []string, opts ...memstash.Option) (*memstash.Cache[string, []byte], rueidislib.Client, error) {
-	opts = append(opts, memstash.WithStats()) // the monitor reports the cache's own counters
-	if len(seeds) == 0 {
-		c, err := memstash.New[string, []byte](opts...)
-		return c, nil, err
+func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog, con *console) ([]*scenario, error) {
+	var scenarios []*scenario
+	// fail releases whatever was already built - the caches hold background goroutines and a Redis client each.
+	fail := func(err error) ([]*scenario, error) {
+		closeAll(scenarios)
+		return nil, err
 	}
-	client, err := rueidislib.NewClient(rueidislib.ClientOption{InitAddress: seeds})
-	if err != nil {
-		return nil, nil, fmt.Errorf("dial redis %v: %w", seeds, err)
-	}
-	c, err := rueidis_adapter.NewBytesCache[string](client, opts...)
-	if err != nil {
-		client.Close()
-		return nil, nil, err
-	}
-	return c, client, nil
-}
 
-func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog) ([]*scenario, error) {
 	// Scenario 1: web sessions, L1 only by default. Zipf reads over a key space ~7.5x L1 capacity.
 	size1, err := effectiveSize(cfg, "scenario-1", 20_000)
 	if err != nil {
-		return nil, err
-	}
-	seeds1 := effectiveRedisAddress(cfg, "scenario-1", "")
-	cache1, client1, err := buildCache(seeds1, memstash.WithMemoryCapacity(size1))
-	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	s1 := &scenario{
 		name: "scenario-1",
 		description: "Web-session store (workload.SessionScenario, ~350-650 B JSON documents). Read-heavy, Zipf-skewed " +
 			"over a key space ~7.5x L1 capacity: L1 holds the hot head, the tail misses (L1 only, no L2).",
-		cache:         cache1,
 		cacheSize:     size1,
-		redisClient:   client1,
-		redisAddr:     seeds1,
 		goroutines:    10,
 		rps:           evenSplit(10, 10_000),
 		readPercent:   90,
@@ -159,25 +178,21 @@ func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog) ([]*scenari
 		errLog:        errLog,
 		logPath:       filepath.Join(logDir, "scenario-1.log"),
 	}
+	scenarios = append(scenarios, s1)
+	if err := s1.buildCache(effectiveRedisAddress(cfg, "scenario-1", ""), memstash.WithMemoryCapacity(size1)); err != nil {
+		return fail(err)
+	}
 
 	// Scenario 2: CDN assets, Redis cluster L2 by default. Zipf, balanced read/write, key space ~7.5x L1 capacity.
 	size2, err := effectiveSize(cfg, "scenario-2", 20_000)
 	if err != nil {
-		return nil, err
-	}
-	seeds2 := effectiveRedisAddress(cfg, "scenario-2", defaultRedisClusterAddr)
-	cache2, client2, err := buildCache(seeds2, memstash.WithMemoryCapacity(size2))
-	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	s2 := &scenario{
 		name: "scenario-2",
 		description: "CDN / static assets (workload.CDNScenario, bimodal 0.6-64 KiB blobs). Zipf-skewed, balanced " +
 			"read/write over a key space ~7.5x L1 capacity: L1 holds the hot head, L2 serves the tail. Redis L2.",
-		cache:         cache2,
 		cacheSize:     size2,
-		redisClient:   client2,
-		redisAddr:     seeds2,
 		goroutines:    5,
 		rps:           evenSplit(5, 10_000),
 		readPercent:   50,
@@ -188,20 +203,17 @@ func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog) ([]*scenari
 		errLog:        errLog,
 		logPath:       filepath.Join(logDir, "scenario-2.log"),
 	}
+	scenarios = append(scenarios, s2)
+	seeds2 := effectiveRedisAddress(cfg, "scenario-2", defaultRedisClusterAddr)
+	if err := s2.buildCache(seeds2, memstash.WithMemoryCapacity(size2)); err != nil {
+		return fail(err)
+	}
 
-	// Scenario 3: DB rows, byte-weighted L1 (CostFunc). ~10 MB budget holds ~28k rows; key space ~7x that. Zipf,
+	// Scenario 3: DB rows, byte-weighted L1 (CostFunc). ~10 MB budget holds ~36k rows; key space ~7x that. Zipf,
 	// read-heavy. Redis cluster L2.
 	size3, err := effectiveSize(cfg, "scenario-3", 10_000_000)
 	if err != nil {
-		return nil, err
-	}
-	seeds3 := effectiveRedisAddress(cfg, "scenario-3", defaultRedisClusterAddr)
-	cache3, client3, err := buildCache(seeds3,
-		memstash.WithMemoryCapacity(size3),
-		memstash.WithCostFunc(func(k string, v []byte) uint32 { return uint32(len(k) + len(v)) }),
-	)
-	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	rps3 := make([]float64, 40)
 	rps3[0] = 10_000
@@ -212,10 +224,7 @@ func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog) ([]*scenari
 		description: "DB row cache (workload.DBScenario, ~300-380 B serialized rows). Read-heavy, Zipf-skewed, " +
 			"byte-weighted L1 whose ~10 MB budget holds ~28k of the ~200k-key space; L2 serves the tail. Redis L2. " +
 			"One goroutine drives 10k rps; the rest share 30k rps.",
-		cache:         cache3,
 		cacheSize:     size3,
-		redisClient:   client3,
-		redisAddr:     seeds3,
 		goroutines:    40,
 		rps:           rps3,
 		readPercent:   90,
@@ -226,14 +235,22 @@ func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog) ([]*scenari
 		errLog:        errLog,
 		logPath:       filepath.Join(logDir, "scenario-3.log"),
 	}
+	scenarios = append(scenarios, s3)
+	seeds3 := effectiveRedisAddress(cfg, "scenario-3", defaultRedisClusterAddr)
+	err = s3.buildCache(seeds3,
+		memstash.WithMemoryCapacity(size3),
+		memstash.WithCostFunc(func(k string, v []byte) uint32 { return uint32(len(k) + len(v)) }),
+	)
+	if err != nil {
+		return fail(err)
+	}
 
-	scenarios := []*scenario{s1, s2, s3}
 	// Overrides can change writeKeySpace, so apply them before filling each source of truth.
-	for _, s := range scenarios {
+	for i, s := range scenarios {
+		s.console, s.slot = con, i
 		if override, ok := cfg.Scenarios[s.name]; ok {
 			if err := applyOverride(s, override); err != nil {
-				closeAll(scenarios)
-				return nil, err
+				return fail(err)
 			}
 		}
 	}

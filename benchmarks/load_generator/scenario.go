@@ -16,6 +16,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v3"
 	rueidislib "github.com/redis/rueidis"
 	"github.com/zakonnic/memstash"
+	rueidis_adapter "github.com/zakonnic/memstash/l2/rueidis_adapter"
 	"github.com/zakonnic/memstash/tests/workload"
 )
 
@@ -47,9 +48,48 @@ type scenario struct {
 	truth  *xsync.MapOf[string, []byte]
 	errLog *errorLog
 
-	logPath string
+	logPath   string
+	console   *console
+	slot      int
+	truthHeap int64
 
 	ops, errs atomic.Int64
+}
+
+// cacheOptions are the options every scenario's cache shares.
+func (s *scenario) cacheOptions() []memstash.Option {
+	return []memstash.Option{
+		memstash.WithStats(), // the monitor reports the cache's own counters
+		memstash.WithOnL2Error[string, []byte](func(key string, err error) {
+			s.errs.Add(1)
+			s.errLog.l2Error(s.name, key, err)
+		}),
+		memstash.WithPanicHandler(func(recovered any, handled bool) {
+			s.errs.Add(1)
+			s.errLog.cachePanic(s.name, recovered, handled)
+		}),
+	}
+}
+
+func (s *scenario) buildCache(redisHosts []string, opts ...memstash.Option) error {
+	s.redisAddr = redisHosts
+	opts = append(s.cacheOptions(), opts...)
+	if len(redisHosts) == 0 {
+		cache, err := memstash.New[string, []byte](opts...)
+		s.cache = cache
+		return err
+	}
+	client, err := rueidislib.NewClient(rueidislib.ClientOption{InitAddress: redisHosts})
+	if err != nil {
+		return fmt.Errorf("dial redis %v: %w", redisHosts, err)
+	}
+	cache, err := rueidis_adapter.NewBytesCache[string](client, opts...)
+	if err != nil {
+		client.Close()
+		return err
+	}
+	s.cache, s.redisClient = cache, client
+	return nil
 }
 
 // keyFor builds the key for index n. The scenario-name prefix keeps scenarios that share a Redis L2 from colliding
@@ -65,6 +105,7 @@ func (s *scenario) fillTruth() {
 		wg.Add(1)
 		go func(start int) {
 			defer wg.Done()
+			defer s.errLog.recoverPanic(s.name, "fill-truth")
 			for n := start; n < s.writeKeySpace; n += workers {
 				key := s.keyFor(n)
 				s.truth.Store(key, s.value(key))
@@ -78,6 +119,7 @@ func (s *scenario) fillTruth() {
 func (s *scenario) run(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer func() {
+		defer s.errLog.recoverPanic(s.name, "shutdown")
 		s.cache.Close() // flush write-back to L2 before closing the client
 		if s.redisClient != nil {
 			s.redisClient.Close()
@@ -100,6 +142,7 @@ const workerTick = 10 * time.Millisecond
 
 func (s *scenario) worker(ctx context.Context, wg *sync.WaitGroup, idx int) {
 	defer wg.Done()
+	defer s.errLog.recoverPanic(s.name, "worker")
 
 	rps := s.rps[idx]
 	if rps <= 0 {
@@ -183,8 +226,11 @@ func (s *scenario) doSet(ctx context.Context, key string) {
 	}
 }
 
-// monitor logs a stats snapshot once a minute (and once more on shutdown) to the scenario's own log file.
+// monitor logs a stats snapshot once a minute (and once more on shutdown) to the scenario's own log file, mirroring
+// every line into the scenario's console slot.
 func (s *scenario) monitor(ctx context.Context) {
+	defer s.errLog.recoverPanic(s.name, "monitor")
+
 	logFile, err := os.OpenFile(s.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		log.Printf("scenario %s: cannot open log file %s: %v", s.name, s.logPath, err)
@@ -192,7 +238,11 @@ func (s *scenario) monitor(ctx context.Context) {
 	}
 	defer logFile.Close()
 
-	logger := slog.New(slog.NewJSONHandler(logFile, nil)).With("scenario", s.name)
+	handler := fanout{
+		slog.NewJSONHandler(logFile, nil),
+		slog.NewTextHandler(statusWriter{con: s.console, slot: s.slot}, statusOptions),
+	}
+	logger := slog.New(handler).With("scenario", s.name)
 	logger.Info("scenario started",
 		"description", s.description,
 		"goroutines", s.goroutines,
@@ -200,6 +250,7 @@ func (s *scenario) monitor(ctx context.Context) {
 		"key_space", s.keySpace,
 		"write_key_space", s.writeKeySpace,
 		"redis_address", s.redisAddr, // empty when the scenario runs L1-only
+		"truth_map_heap_bytes", s.truthHeap,
 	)
 
 	cpu, cpuErr := processCPUTime()
@@ -239,20 +290,11 @@ func (s *scenario) logStats(logger *slog.Logger, start time.Time, prev meter) me
 	st := s.cache.Stats()
 	gets, sets := st.Gets(), st.Sets()
 	memHits, l2Gets, l2Hits, hits, misses := st.MemoryHits(), st.L2Gets(), st.L2Hits(), st.Hits(), st.Misses()
+	hitRate, memHitRate, l2HitRate := st.HitRate()*100, st.MemoryHitRate()*100, st.L2HitRate()*100
 
 	opsPerSec := float64(0)
 	if wall > 0 {
 		opsPerSec = float64(ops-prev.ops) / wall
-	}
-	// Rates over this interval, not since boot, so they reflect the current steady state rather than being dragged
-	// down forever by cold-start misses.
-	hitRate, memHitRate, l2HitRate := float64(0), float64(0), float64(0)
-	if dg := gets - prev.gets; dg > 0 {
-		hitRate = float64(hits-prev.hits) / float64(dg) * 100
-		memHitRate = float64(memHits-prev.memHits) / float64(dg) * 100
-	}
-	if dl2 := l2Gets - prev.l2Gets; dl2 > 0 {
-		l2HitRate = float64(l2Hits-prev.l2Hits) / float64(dl2) * 100
 	}
 
 	var mem runtime.MemStats
@@ -265,10 +307,18 @@ func (s *scenario) logStats(logger *slog.Logger, start time.Time, prev meter) me
 		cpuPercent = cpuCores / float64(runtime.NumCPU()) * 100
 	}
 
+	// Field order matters: the console wraps this line across the terminal, so the live numbers come first and the
+	// running totals after.
 	logger.Info("stats",
 		"uptime_sec", now.Sub(start).Seconds(),
+		"ops_per_sec", opsPerSec,
+		"errors_total", errs,
+		"hit_rate_pct", hitRate,
+		"mem_hit_rate_pct", memHitRate,
+		"l2_hit_rate_pct", l2HitRate,
 		"cache_len", s.cache.Len(),
-		"cache_weight_bytes", s.cache.TotalSize(),
+		"cache_weight", s.cache.Weight(),
+		"cache_total_size", s.cache.TotalSize(),
 		"ops_total", ops,
 		"gets_total", gets,
 		"sets_total", sets,
@@ -277,13 +327,7 @@ func (s *scenario) logStats(logger *slog.Logger, start time.Time, prev meter) me
 		"l2_gets_total", l2Gets,
 		"l2_hits_total", l2Hits,
 		"misses_total", misses,
-		"errors_total", errs,
-		"hit_rate_pct", hitRate,
-		"mem_hit_rate_pct", memHitRate,
-		"l2_hit_rate_pct", l2HitRate,
-		"ops_per_sec", opsPerSec,
-		// Process-wide (shared with the other scenarios running in this client), not scenario-isolated.
-		"process_heap_alloc_bytes", mem.HeapAlloc,
+		"heap_alloc_bytes", max(int64(mem.HeapAlloc)-s.truthHeap, 0),
 		"process_sys_bytes", mem.Sys,
 		"process_goroutines", runtime.NumGoroutine(),
 		"process_cpu_cores", cpuCores,
