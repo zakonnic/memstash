@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math"
 	"math/rand"
 	"os"
 	"runtime"
@@ -36,11 +37,13 @@ type scenario struct {
 	readPercent int // 0-100: chance an op is a Get rather than a Set
 
 	// Keys follow a Zipf distribution (skew zipfS, index 0 hottest): Gets over [0, keySpace), Sets over
-	// [0, writeKeySpace). keySpace is several times L1 capacity, so L1 holds only the hot head and the tail leans on
-	// L2 or misses.
+	// [0, writeKeySpace). Zipf never reaches the tail of the keyspace. To cover it, a share of operations
+	// uses uniformly random keys instead (randomPercent).
 	keySpace      int
 	writeKeySpace int
 	zipfS         float64
+	zipfV         float64
+	randomPercent int
 
 	// value derives a key's deterministic bytes (see values.go); truth holds them for every write key and is the
 	// oracle a Get is checked against.
@@ -90,6 +93,35 @@ func (s *scenario) buildCache(redisHosts []string, opts ...memstash.Option) erro
 	}
 	s.cache, s.redisClient = cache, client
 	return nil
+}
+
+// randomRate is how many uniform draws per second the scenario makes; 0 when it makes none.
+func (s *scenario) randomRate() float64 {
+	var total float64
+	for _, r := range s.rps {
+		total += r
+	}
+	return total * float64(s.randomPercent) / 100
+}
+
+// randomPeriod is how long a given key waits between uniform draws.
+func (s *scenario) randomPeriod() time.Duration {
+	rate := s.randomRate()
+	if rate <= 0 {
+		return 0
+	}
+	return time.Duration(float64(s.writeKeySpace) / rate * float64(time.Second))
+}
+
+// randomCover is how long until every key has come up at least once: N*ln(N) draws, not N - the last few keys are
+// the ones that keep the collector waiting.
+func (s *scenario) randomCover() time.Duration {
+	rate := s.randomRate()
+	if rate <= 0 || s.writeKeySpace < 2 {
+		return 0
+	}
+	n := float64(s.writeKeySpace)
+	return time.Duration(n * math.Log(n) / rate * float64(time.Second))
 }
 
 // keyFor builds the key for index n. The scenario-name prefix keeps scenarios that share a Redis L2 from colliding
@@ -149,8 +181,8 @@ func (s *scenario) worker(ctx context.Context, wg *sync.WaitGroup, idx int) {
 		return
 	}
 	rng := workload.Random()
-	reads := newZipf(rng, s.keySpace, s.zipfS)
-	writes := newZipf(rng, s.writeKeySpace, s.zipfS)
+	reads := newZipf(rng, s.keySpace, s.zipfS, s.zipfV)
+	writes := newZipf(rng, s.writeKeySpace, s.zipfS, s.zipfV)
 	opsPerTick := rps * workerTick.Seconds()
 
 	ticker := time.NewTicker(workerTick)
@@ -172,24 +204,34 @@ func (s *scenario) worker(ctx context.Context, wg *sync.WaitGroup, idx int) {
 	}
 }
 
-// newZipf builds a Zipf generator over [0, n) with skew s (index 0 hottest). s is clamped above 1, which NewZipf
-// requires.
-func newZipf(rng *rand.Rand, n int, s float64) *rand.Zipf {
+// newZipf builds a Zipf generator over [0, n) with skew s and shift v (index 0 hottest).
+func newZipf(rng *rand.Rand, n int, s, v float64) *rand.Zipf {
 	if s <= 1 {
 		s = 1.001
+	}
+	if v < 1 {
+		v = 1
 	}
 	if n < 2 {
 		n = 2
 	}
-	return rand.NewZipf(rng, s, 1, uint64(n-1))
+	return rand.NewZipf(rng, s, v, uint64(n-1))
+}
+
+func nextKey(rng *rand.Rand, z *rand.Zipf, n int, random bool) int {
+	if random {
+		return rng.Intn(n)
+	}
+	return int(z.Uint64())
 }
 
 func (s *scenario) doOp(rng *rand.Rand, reads, writes *rand.Zipf) {
 	ctx := context.Background()
+	random := s.randomPercent > 0 && rng.Intn(100) < s.randomPercent
 	if rng.Intn(100) < s.readPercent {
-		s.doGet(ctx, s.keyFor(int(reads.Uint64())))
+		s.doGet(ctx, s.keyFor(nextKey(rng, reads, s.writeKeySpace, random)))
 	} else {
-		s.doSet(ctx, s.keyFor(int(writes.Uint64())))
+		s.doSet(ctx, s.keyFor(nextKey(rng, writes, s.writeKeySpace, random)))
 	}
 	s.ops.Add(1)
 }
@@ -249,6 +291,9 @@ func (s *scenario) monitor(ctx context.Context) {
 		"read_percent", s.readPercent,
 		"key_space", s.keySpace,
 		"write_key_space", s.writeKeySpace,
+		"random_percent", s.randomPercent,
+		"random_key_sec", s.randomPeriod().Seconds(),
+		"random_cover_sec", s.randomCover().Seconds(),
 		"redis_address", s.redisAddr, // empty when the scenario runs L1-only
 		"truth_map_heap_bytes", s.truthHeap,
 	)

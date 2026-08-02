@@ -1,18 +1,18 @@
-# Per-scenario overrides for the load generator. Every field is optional; an omitted field, block, or file keeps
-# the built-in default from buildScenarios(). If you set goroutines, rps must have one entry per goroutine.
+# Per-scenario overrides. Every field is optional; omitted values keep the built-in defaults from buildScenarios().
+# If you set goroutines, rps must have one entry per goroutine.
 #
-# Ships pre-filled with the built-in defaults, so it also documents them. Copied next to the binary by
-# `make load-generator`, loaded from the working directory unless -config says otherwise.
+# Keys follow a Zipf distribution (zipf_s > 1, higher = more skew). key_space is several times L1 capacity,
+# so L1 holds only the hot head and the tail leans on L2 or misses.
+# Zipf alone rarely touches the cold tail of a large key space. random_percent fixes that: that share of ops
+# draws uniformly over write_key_space, simulating batch jobs, crawlers, and cold reads. The operation mix
+# is unchanged.
+# Two startup metrics follow from random_percent: how often a given key is touched, and how long until
+# every key has been seen.
 #
-# Values come from the workload package (scenario-1 = sessions, scenario-2 = CDN assets, scenario-3 = DB rows),
-# deterministic per key, stored in a source-of-truth map and re-checked after every Get; errors go to errors.log.
-#
-# Keys follow a Zipf distribution (zipf_s > 1, higher = more skew); key_space is several times L1 capacity, so L1
-# holds only the hot head and the tail leans on L2 or misses. redis_address: "" = L1 only, "host:port" = one node,
-# comma-separated = cluster; omit to keep the default (scenario-1 none, scenarios 2/3 the docker cluster).
+# redis_address: "" = L1 only, "host:port" = one node, comma-separated = cluster.
 
 scenarios:
-  # Web sessions, Zipf reads over a key space ~7.5x L1 capacity. L1 only.
+  # Web sessions: 1.5M live sessions over a 20k-item L1, 1M of them written.
   scenario-1:
     size: 20000
     redis_address: ""
@@ -20,7 +20,8 @@ scenarios:
     read_percent: 90
     key_space: 1500000
     write_key_space: 1000000
-    zipf_s: 1.1
+    zipf_s: 1.01
+    random_percent: 10
     rps:
       - 1000
       - 1000
@@ -33,15 +34,17 @@ scenarios:
       - 1000
       - 1000
 
-  # CDN / static assets, bimodal value sizes, key space ~7.5x L1. Redis L2 (cluster).
+  # CDN / static assets: a 1M-object catalog over a 20k-item L1 - the long tail that makes the L2 earn its keep is
+  # the point of this one. Values alias the shared blob, so a catalog this size costs ~90 MB of truth map, not gigabytes.
   scenario-2:
     size: 20000
-    redis_address: "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"
+    redis_address: "127.0.0.1:43210"
     goroutines: 5
     read_percent: 50
-    key_space: 150000
-    write_key_space: 150000
-    zipf_s: 1.1
+    key_space: 1000000
+    write_key_space: 1000000
+    zipf_s: 1.01
+    random_percent: 10
     rps:
       - 20000
       - 20000
@@ -49,16 +52,17 @@ scenarios:
       - 20000
       - 20000
 
-  # DB rows, byte-weighted L1 (~10 MB holds ~28k of the ~200k keys). Redis L2 (cluster). One goroutine drives 10k
-  # rps; the remaining 39 share 30k rps.
+  # DB rows: a 20M-row table over a byte-weighted L1 (~10 MB holds ~37k rows at ~270 B each).
+  # Redis L2 (cluster). One goroutine drives 10k rps, the remaining 39 share 30k.
   scenario-3:
     size: 10000000
-    redis_address: "127.0.0.1:43210"
+    redis_address: "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"
     goroutines: 40
     read_percent: 90
     key_space: 20000000
     write_key_space: 20000000
-    zipf_s: 1.1
+    zipf_s: 1.05
+    random_percent: 10
     rps:
       - 10000
       - 769.230769

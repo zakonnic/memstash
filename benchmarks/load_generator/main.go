@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/zakonnic/memstash"
@@ -126,11 +127,20 @@ func printScenarios(scenarios []*scenario) {
 		fmt.Printf("  goroutines:      %d\n", s.goroutines)
 		fmt.Printf("  rps (total):     %.0f\n", total)
 		fmt.Printf("  read / write:    %d%% Get / %d%% Set\n", s.readPercent, 100-s.readPercent)
-		fmt.Printf("  key space:       %d (Zipf s=%.2f)\n", s.keySpace, s.zipfS)
+		fmt.Printf("  key space:       %d (Zipf s=%.2f v=%.2f)\n", s.keySpace, s.zipfS, s.zipfV)
 		fmt.Printf("  write key space: %d\n", s.writeKeySpace)
+		fmt.Printf("  uniform keys:    %s\n", randomDisplay(s))
 		fmt.Printf("  log file:        %s\n", s.logPath)
 	}
 	fmt.Println()
+}
+
+func randomDisplay(s *scenario) string {
+	if s.randomPercent <= 0 {
+		return "none (Zipf only, the tail stays cold)"
+	}
+	return fmt.Sprintf("%d%% of ops, a given key every %s, all keys in %s",
+		s.randomPercent, s.randomPeriod().Round(time.Second), s.randomCover().Round(time.Minute))
 }
 
 func redisDisplay(seeds []string) string {
@@ -165,15 +175,16 @@ func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog, con *consol
 	}
 	s1 := &scenario{
 		name: "scenario-1",
-		description: "Web-session store (workload.SessionScenario, ~350-650 B JSON documents). Read-heavy, Zipf-skewed " +
-			"over a key space ~7.5x L1 capacity: L1 holds the hot head, the tail misses (L1 only, no L2).",
+		description: "Web-session store (workload.SessionScenario, ~170-490 B JSON documents). Read-heavy, Zipf-skewed: " +
+			"L1 holds the hot head, the tail misses or goes to L2. The parameters below are the effective ones.",
 		cacheSize:     size1,
 		goroutines:    10,
 		rps:           evenSplit(10, 10_000),
 		readPercent:   90,
 		keySpace:      150_000,
 		writeKeySpace: 150_000,
-		zipfS:         1.1,
+		zipfS:         1.01,
+		zipfV:         1,
 		value:         sessionValue,
 		errLog:        errLog,
 		logPath:       filepath.Join(logDir, "scenario-1.log"),
@@ -190,15 +201,16 @@ func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog, con *consol
 	}
 	s2 := &scenario{
 		name: "scenario-2",
-		description: "CDN / static assets (workload.CDNScenario, bimodal 0.6-64 KiB blobs). Zipf-skewed, balanced " +
-			"read/write over a key space ~7.5x L1 capacity: L1 holds the hot head, L2 serves the tail. Redis L2.",
+		description: "CDN / static assets (workload.CDNScenario, bimodal 0.6-64 KiB blobs, ~7.4 KiB average). " +
+			"Zipf-skewed, balanced read/write: L1 holds the hot head, L2 serves the tail.",
 		cacheSize:     size2,
 		goroutines:    5,
 		rps:           evenSplit(5, 10_000),
 		readPercent:   50,
 		keySpace:      150_000,
 		writeKeySpace: 150_000,
-		zipfS:         1.1,
+		zipfS:         1.01,
+		zipfV:         1.2,
 		value:         cdnValue,
 		errLog:        errLog,
 		logPath:       filepath.Join(logDir, "scenario-2.log"),
@@ -221,9 +233,10 @@ func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog, con *consol
 	copy(rps3[1:], rest)
 	s3 := &scenario{
 		name: "scenario-3",
-		description: "DB row cache (workload.DBScenario, ~300-380 B serialized rows). Read-heavy, Zipf-skewed, " +
-			"byte-weighted L1 whose ~10 MB budget holds ~28k of the ~200k-key space; L2 serves the tail. Redis L2. " +
-			"One goroutine drives 10k rps; the rest share 30k rps.",
+		description: "DB row cache (workload.DBScenario, ~250 B serialized rows, ~270 B per item with the key). " +
+			"Read-heavy Zipf point lookups plus uniformly drawn rows that ignore the popularity curve, over a " +
+			"byte-weighted L1 (CostFunc), so its item count follows the value sizes; L2 serves the tail. The first " +
+			"goroutine is the hot one, the rest share the remaining rps. The parameters below are the effective ones.",
 		cacheSize:     size3,
 		goroutines:    40,
 		rps:           rps3,
@@ -231,6 +244,8 @@ func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog, con *consol
 		keySpace:      200_000,
 		writeKeySpace: 200_000,
 		zipfS:         1.1,
+		zipfV:         1.5,
+		randomPercent: 5, // the traffic that does not follow the popularity curve: batch jobs, crawlers, cold reads
 		value:         dbValue,
 		errLog:        errLog,
 		logPath:       filepath.Join(logDir, "scenario-3.log"),
@@ -249,9 +264,10 @@ func buildScenarios(logDir string, cfg fileConfig, errLog *errorLog, con *consol
 	for i, s := range scenarios {
 		s.console, s.slot = con, i
 		if override, ok := cfg.Scenarios[s.name]; ok {
-			if err := applyOverride(s, override); err != nil {
-				return fail(err)
-			}
+			applyOverride(s, override)
+		}
+		if err := validateScenario(s); err != nil {
+			return fail(err)
 		}
 	}
 	for _, s := range scenarios {

@@ -17,6 +17,8 @@ type scenarioOverride struct {
 	KeySpace      *int      `yaml:"key_space"`
 	WriteKeySpace *int      `yaml:"write_key_space"`
 	ZipfS         *float64  `yaml:"zipf_s"` // Zipf skew (>1); higher = more concentrated on hot keys
+	// RandomPercent is the share of operations drawing their key uniformly instead of from the Zipf head.
+	RandomPercent *int `yaml:"random_percent"`
 	// RedisAddress: "" means L1 only, a comma-separated list dials a cluster; omitted keeps the built-in default.
 	RedisAddress *string `yaml:"redis_address"`
 }
@@ -72,8 +74,8 @@ func effectiveRedisAddress(cfg fileConfig, name, defaultAddr string) []string {
 	return seeds
 }
 
-// applyOverride merges o onto s, leaving any field o didn't set untouched, then validates the result.
-func applyOverride(s *scenario, o scenarioOverride) error {
+// applyOverride merges o onto s, leaving any field o didn't set untouched.
+func applyOverride(s *scenario, o scenarioOverride) {
 	if o.Goroutines != nil {
 		s.goroutines = *o.Goroutines
 	}
@@ -92,9 +94,21 @@ func applyOverride(s *scenario, o scenarioOverride) error {
 	if o.ZipfS != nil {
 		s.zipfS = *o.ZipfS
 	}
+	if o.RandomPercent != nil {
+		s.randomPercent = *o.RandomPercent
+	}
+}
 
+// validateScenario checks the effective parameters, override or built-in default alike - a scenario nobody overrode
+// is just as able to hold a value the generators refuse.
+func validateScenario(s *scenario) error {
+	// rand.NewZipf answers an out-of-range s or v with a nil generator, which surfaces as a panic on every worker at
+	// its first draw and leaves the scenario running with no load at all.
 	if s.zipfS <= 1 {
-		return fmt.Errorf("%s: zipf_s=%g must be > 1", s.name, s.zipfS)
+		return fmt.Errorf("%s: zipf_s=%g must be > 1 (math/rand.NewZipf requires it)", s.name, s.zipfS)
+	}
+	if s.zipfV < 1 {
+		return fmt.Errorf("%s: zipf_v=%g must be >= 1 (math/rand.NewZipf requires it)", s.name, s.zipfV)
 	}
 	if len(s.rps) != s.goroutines {
 		return fmt.Errorf("%s: rps has %d entries but goroutines=%d - config.yaml must give one rps value per goroutine",
@@ -102,6 +116,9 @@ func applyOverride(s *scenario, o scenarioOverride) error {
 	}
 	if s.readPercent < 0 || s.readPercent > 100 {
 		return fmt.Errorf("%s: read_percent=%d must be between 0 and 100", s.name, s.readPercent)
+	}
+	if s.randomPercent < 0 || s.randomPercent > 100 {
+		return fmt.Errorf("%s: random_percent=%d must be between 0 and 100", s.name, s.randomPercent)
 	}
 	if s.writeKeySpace <= 0 || s.writeKeySpace > s.keySpace {
 		return fmt.Errorf("%s: write_key_space=%d must be > 0 and <= key_space=%d", s.name, s.writeKeySpace, s.keySpace)

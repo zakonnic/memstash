@@ -82,7 +82,7 @@ integration-bench: up ## Run L1+L2 load-profile benchmarks against the live serv
 .PHONY: load-generator
 load-generator: ## Build the long-running load generator (+ config.yaml) into benchmarks/bin
 	go -C benchmarks build -o bin/load-generator$(if $(filter Windows_NT,$(OS)),.exe,) ./load_generator
-	cp benchmarks/load_generator/config.yaml benchmarks/bin/config.yaml
+	[ -f benchmarks/bin/config.yaml ] || cp benchmarks/load_generator/config.yaml benchmarks/bin/config.yaml
 
 check-new-libs: ## Checks for new versions of libraries
 	@OUT=$$(go list -m -u -f '{{if .Update}}{{.Path}}: {{.Version}} -> {{.Update.Version}}{{printf "\n"}}{{end}}' all); \

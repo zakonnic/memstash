@@ -78,7 +78,8 @@ func (s SessionScenario) Trace() []string {
 	return trace
 }
 
-// Value returns the key's deterministic ~350-650 byte JSON session document, sliced out of blob.
+// Value returns the key's deterministic JSON session document, sliced out of blob. Its size is the ~185-byte envelope
+// plus up to 300 bytes of padding, plus the key.
 func (SessionScenario) Value(blob []byte, key string) []byte {
 	h := fnv64(key)
 	pad := int(h % 300)
@@ -206,7 +207,8 @@ func (s DBScenario) Trace() []string {
 	return trace
 }
 
-// Value returns the key's deterministic ~300-380 byte serialized row, sliced out of blob.
+// Value returns the key's deterministic ~250 byte serialized row (fixed 120 bytes of it sliced out of blob); only the
+// key length varies it.
 func (DBScenario) Value(blob []byte, key string) []byte {
 	h := fnv64(key)
 	v := make([]byte, 0, 320)
