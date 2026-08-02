@@ -2,6 +2,7 @@ package memstash
 
 import (
 	"context"
+	"time"
 
 	"github.com/zakonnic/memstash/internal/itemstore"
 )
@@ -237,7 +238,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items List[K, V]) error {
 		return c.l2Cache.BatchSet(ctx, items, c.ttl)
 	case WriteBack:
 		for _, item := range items {
-			c.enqueueWriteBack(item.Key, item.Value)
+			c.enqueueWriteBack(item.Key, item.Value, c.ttl)
 		}
 	}
 	return nil
@@ -245,8 +246,8 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items List[K, V]) error {
 
 // enqueueWriteBack puts a write into the worker's buffer; on overflow or when the cache is closed it writes
 // synchronously so no data is lost.
-func (c *Cache[K, V]) enqueueWriteBack(key K, value V) {
-	c.enqueueL2(l2Write[K, V]{key: key, value: value})
+func (c *Cache[K, V]) enqueueWriteBack(key K, value V, ttl time.Duration) {
+	c.enqueueL2(l2Write[K, V]{key: key, value: value, ttl: ttl})
 }
 
 // enqueueDelete is enqueueWriteBack for a delete task.
@@ -262,7 +263,7 @@ func (c *Cache[K, V]) enqueueL2(write l2Write[K, V]) {
 		if write.del {
 			err = c.l2Cache.Delete(context.Background(), write.key)
 		} else {
-			err = c.l2Cache.Set(context.Background(), write.key, write.value, c.ttl)
+			err = c.l2Cache.Set(context.Background(), write.key, write.value, write.ttl)
 		}
 		if err != nil {
 			c.reportL2Err(write.key, err)

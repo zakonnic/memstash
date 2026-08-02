@@ -109,7 +109,7 @@ func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {
 		}
 	default:
 		for _, item := range loaded {
-			c.enqueueWriteBack(item.Key, item.Value)
+			c.enqueueWriteBack(item.Key, item.Value, c.ttl)
 		}
 	}
 }

@@ -193,7 +193,7 @@ func (c *Cache[K, V]) writeLoadedToL2(ctx context.Context, key K, value V, ttl t
 	case WriteThrough:
 		return c.l2Cache.Set(ctx, key, value, ttl)
 	case WriteBack:
-		c.enqueueWriteBack(key, value)
+		c.enqueueWriteBack(key, value, ttl)
 	}
 	return nil
 }

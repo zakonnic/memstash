@@ -375,8 +375,42 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 	if c.l2WritePolicy == WriteThrough {
 		return c.l2Cache.Set(ctx, key, value, c.ttl)
 	}
-	c.enqueueWriteBack(key, value)
+	c.enqueueWriteBack(key, value, c.ttl)
 	return nil
+}
+
+// SetWithTTL sets a per-entry lifetime. The cache must have been built with a TTL option; ttl is rounded up to the
+// scale's unit. A non-positive ttl is an error.
+// WithRefreshTTLOnGet extends by the cache's TTL: this ttl lasts only until the first read that refreshes it.
+func (c *Cache[K, V]) SetWithTTL(ctx context.Context, key K, value V, ttl time.Duration) error {
+	if c.ttlOff == 0 {
+		return ErrTTLDisabled
+	}
+	if ttl <= 0 {
+		return ErrBadTTL
+	}
+	expireOff, effectiveTTL := c.expireOffsetOf(ttl)
+	c.setMemory(key, value, expireOff)
+	c.stats.addSets(1)
+	if c.l2WritePolicy == WriteDisabled {
+		return nil
+	}
+	if c.l2WritePolicy == WriteThrough {
+		return c.l2Cache.Set(ctx, key, value, effectiveTTL)
+	}
+	c.enqueueWriteBack(key, value, effectiveTTL)
+	return nil
+}
+
+// expireOffsetOf is expireOffset for a caller-supplied lifetime: the offset for the item, and the lifetime it
+// actually got after rounding up to expireUnit and capping at the far edge of the unambiguous half of the scale.
+func (c *Cache[K, V]) expireOffsetOf(ttl time.Duration) (uint32, time.Duration) {
+	units := min((int64(ttl)+int64(c.expireUnit)-1)/int64(c.expireUnit), int64(itemstore.ExpireMax-1))
+	expireOff := (c.nowOff.Load() + uint32(units) + 1) & itemstore.ExpireWrapMask
+	if expireOff == 0 {
+		expireOff = 1
+	}
+	return expireOff, time.Duration(units) * c.expireUnit
 }
 
 // setMemory puts the value into the first level with the given expiration offset (0 = no TTL; callers that just
@@ -741,7 +775,7 @@ func (c *Cache[K, V]) storeLoaded(ctx context.Context, key K, value V) {
 			c.reportL2Err(key, err)
 		}
 	default:
-		c.enqueueWriteBack(key, value)
+		c.enqueueWriteBack(key, value, c.ttl)
 	}
 }
 
@@ -946,7 +980,7 @@ func (c *Cache[K, V]) flushWrite(first l2Write[K, V]) {
 		// len(writeCh) is the buffer fill counter the adaptive mode switches on.
 		if !first.del && (c.writeBackBatching == BatchingNone ||
 			(c.writeBackBatching == BatchingAdaptive && len(c.writeCh) <= cap(c.writeCh)/2)) {
-			c.writeBatch(List[K, V]{{Key: first.key, Value: first.value}})
+			c.writeBatch(List[K, V]{{Key: first.key, Value: first.value}}, first.ttl)
 			return
 		}
 		first, more = c.flushRun(first)
@@ -954,7 +988,7 @@ func (c *Cache[K, V]) flushWrite(first l2Write[K, V]) {
 }
 
 // flushRun coalesces the tasks of first's kind queued behind it and delivers them as one batch.
-// Returns next to flushWrite to seed the next run.
+// A run ends where the kind changes - a delete after writes, or a write carrying a different ttl.
 func (c *Cache[K, V]) flushRun(first l2Write[K, V]) (next l2Write[K, V], more bool) {
 	var sets List[K, V]
 	var deletes []K
@@ -969,10 +1003,10 @@ func (c *Cache[K, V]) flushRun(first l2Write[K, V]) (next l2Write[K, V], more bo
 			switch {
 			case write.flush != nil:
 				defer close(write.flush) // a Wait checkpoint must be released even if the delivery panics
-				c.deliverRun(sets, deletes)
+				c.deliverRun(sets, deletes, first.ttl)
 				return next, false
-			case write.del != first.del:
-				c.deliverRun(sets, deletes)
+			case write.del != first.del || write.ttl != first.ttl:
+				c.deliverRun(sets, deletes, first.ttl)
 				return write, true
 			case write.del:
 				deletes = append(deletes, write.key)
@@ -980,32 +1014,32 @@ func (c *Cache[K, V]) flushRun(first l2Write[K, V]) (next l2Write[K, V], more bo
 				sets = append(sets, KeyVal[K, V]{Key: write.key, Value: write.value})
 			}
 		default:
-			c.deliverRun(sets, deletes)
+			c.deliverRun(sets, deletes, first.ttl)
 			return next, false
 		}
 	}
-	c.deliverRun(sets, deletes)
+	c.deliverRun(sets, deletes, first.ttl)
 	return next, false
 }
 
-func (c *Cache[K, V]) deliverRun(sets List[K, V], deletes []K) {
+func (c *Cache[K, V]) deliverRun(sets List[K, V], deletes []K, ttl time.Duration) {
 	if len(deletes) > 0 {
 		c.deleteBatch(deletes)
 		return
 	}
-	c.writeBatch(sets)
+	c.writeBatch(sets, ttl)
 }
 
 // writeBatch delivers drained writes to L2: one Set for a single item, one BatchSet otherwise (duplicate keys
 // collapse to the last value there, as FIFO order would). A batch error is reported for every key it covers.
-func (c *Cache[K, V]) writeBatch(batch List[K, V]) {
+func (c *Cache[K, V]) writeBatch(batch List[K, V], ttl time.Duration) {
 	if len(batch) == 1 {
-		if err := c.l2Cache.Set(context.Background(), batch[0].Key, batch[0].Value, c.ttl); err != nil {
+		if err := c.l2Cache.Set(context.Background(), batch[0].Key, batch[0].Value, ttl); err != nil {
 			c.reportL2Err(batch[0].Key, err)
 		}
 		return
 	}
-	if err := c.l2Cache.BatchSet(context.Background(), batch, c.ttl); err != nil {
+	if err := c.l2Cache.BatchSet(context.Background(), batch, ttl); err != nil {
 		for _, item := range batch {
 			c.reportL2Err(item.Key, err)
 		}

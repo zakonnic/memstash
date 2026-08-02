@@ -56,10 +56,11 @@ const (
 
 // l2Write is a task for the background write-back worker. A non-nil flush marks a Wait checkpoint instead of a write:
 // the channel is FIFO, so by the time the worker reaches the marker every write enqueued before it has been handed to
-// L2, and closing flush releases the waiter. del marks a BatchDelete task (value is unused).
+// L2, and closing flush releases the waiter. del marks a BatchDelete task (value and ttl are unused).
 type l2Write[K comparable, V any] struct {
 	key   K
 	value V
+	ttl   time.Duration // provided by SetWithTTL
 	flush chan<- struct{}
 	del   bool
 }

@@ -24,6 +24,7 @@ var (
 	ErrNilCustomPolicy     = fmt.Errorf("%w: the custom eviction policy factory returned nil", Error)
 	ErrNilLoader           = fmt.Errorf("%w: loader must not be nil", Error)
 	ErrBadTTL              = fmt.Errorf("%w: TTL must not be negative", Error)
+	ErrTTLDisabled         = fmt.Errorf("%w: TTL must be enabled - see WithTTL option", Error)
 	ErrPanic               = fmt.Errorf("%w: panic recovered", Error)
 	ErrLoaderPanic         = fmt.Errorf("%w: loader panicked", ErrPanic)
 )
@@ -52,6 +53,7 @@ type Config[K comparable, V any] struct {
 	TTL time.Duration
 
 	// RefreshTTLOnGet makes every first-level hit extend the item's lifetime by a full TTL (sliding expiration).
+	// The extension always uses the cache's global TTL, not the one provided by SetWithTTL.
 	RefreshTTLOnGet bool
 
 	// Policy is the eviction policy. Defaults to PolicyS3FIFO.

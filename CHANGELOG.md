@@ -5,6 +5,22 @@ All notable changes to this project are documented here. The format follows
 
 Every module - the root and each `l2/*_adapter` - is tagged with the same version.
 
+## [Unreleased]
+
+### Added
+
+- **`SetWithTTL`** - a lifetime for one entry. Needs a cache built with `WithTTL` (the expiry scale is fixed at
+  construction), rounds the lifetime up to that scale's unit and caps it at the scale's range; the resulting lifetime
+  goes to L2 as well. `WithRefreshTTLOnGet` still extends by the cache's own TTL, so a custom lifetime holds until the
+  first read that refreshes it.
+- **`ErrTTLDisabled`** - `SetWithTTL` on a cache without a TTL.
+
+### Changed
+
+- The write-back worker carries a lifetime per queued write instead of always using the cache's TTL: batches now end
+  where the lifetime changes, since `BatchSet` takes one per call. A restored snapshot's remaining lifetime reaches L2
+  through the write-back path too, which it previously lost.
+
 ## [0.9.6] - 2026-07-31
 
 ### Added
