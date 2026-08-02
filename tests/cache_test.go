@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -398,5 +399,26 @@ func TestConcurrentReadsDuringGrowth(t *testing.T) {
 			close(done)
 			wg.Wait()
 		})
+	}
+}
+
+// TestTableSpanningChunks fills one shard well past a single storage chunk, so probing, growth rebuilds and reads all
+// have to cross chunk boundaries.
+func TestTableSpanningChunks(t *testing.T) {
+	const count = 150_000 // settles at 256Ki slots: four chunks
+	ctx := context.Background()
+	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: count, ShardsCount: 1})
+
+	for i := range count {
+		require.NoError(t, c.Set(ctx, strconv.Itoa(i), strconv.Itoa(i)))
+	}
+	require.Equal(t, count, c.Len(), "a shard sized for the fill must not evict")
+
+	for i := range count {
+		key := strconv.Itoa(i)
+		v, ok := c.GetFromMemory(key)
+		if !ok || v != key {
+			t.Fatalf("key %s: got %q, present %v", key, v, ok)
+		}
 	}
 }

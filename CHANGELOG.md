@@ -17,6 +17,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 
 ### Changed
 
+- A shard's table is now allocated in chunks of 64Ki slots instead of one contiguous block, so a big cache no longer
+  asks the allocator for a single multi-gigabyte run of memory. Slot indices, capacity and behavior are unchanged; a
+  table that fits one chunk still gets exactly one allocation of its own size.
 - The write-back worker carries a lifetime per queued write instead of always using the cache's TTL: batches now end
   where the lifetime changes, since `BatchSet` takes one per call. A restored snapshot's remaining lifetime reaches L2
   through the write-back path too, which it previously lost.

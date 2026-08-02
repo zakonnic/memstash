@@ -9,6 +9,14 @@ import (
 // group, so a zero count usually proves absence right at the group edge.
 const groupShift = 3
 
+// chunkShift splits the slot space into chunks of 64Ki slots - a few MiB each, whatever the item type. A big table is
+// then a handful of those instead of one multi-gigabyte block the allocator has to find contiguous space for.
+const (
+	chunkShift = 16
+	chunkSlots = 1 << chunkShift
+	chunkMask  = chunkSlots - 1
+)
+
 // MaxItems caps the item count: 3/4 (the rebuild load factor) of the 2^32 slot positions.
 const MaxItems = int64(3) << 30
 
@@ -22,20 +30,36 @@ const MaxItems = int64(3) << 30
 // A rebuild swaps the whole table: readers mid-probe finish on the superseded one and may miss a write that landed
 // after the swap - indistinguishable from the Get racing the Set.
 type FlatHashMap[K comparable, V any] struct {
-	base      *Item[K, V]    // first slot; the backing array stays alive through this interior pointer
-	overflows *atomic.Uint32 // per group: how many keys homed in it live past its edge (SwissTable/f14 adaptation)
-	mask      uint32         // slot count minus one; the count is a power of two
+	short     []Item[K, V]              // the whole table while it fits one chunk - most tables do
+	chunks    []*[chunkSlots]Item[K, V] // past that: the slot's high bits pick the chunk, the low ones the slot in it
+	overflows *atomic.Uint32            // per group: how many keys homed in it live past its edge (SwissTable/f14)
+	mask      uint32                    // slot count minus one; the count is a power of two
 }
 
+// NewFlatHashMap allocates a table of itemCount slots, a power of two. Below chunkSlots the table is one flat run of
+// exactly that many slots, so a small shard costs no more than it used to.
 func NewFlatHashMap[K comparable, V any](itemCount int) *FlatHashMap[K, V] {
-	items := make([]Item[K, V], itemCount)
+	t := &FlatHashMap[K, V]{mask: uint32(itemCount - 1)}
+	if itemCount <= chunkSlots {
+		t.short = make([]Item[K, V], itemCount)
+	} else {
+		t.chunks = make([]*[chunkSlots]Item[K, V], itemCount>>chunkShift)
+		for i := range t.chunks {
+			t.chunks[i] = new([chunkSlots]Item[K, V])
+		}
+	}
 	over := make([]atomic.Uint32, itemCount>>groupShift)
-	return &FlatHashMap[K, V]{base: &items[0], overflows: &over[0], mask: uint32(itemCount - 1)}
+	t.overflows = &over[0]
+	return t
 }
 
 // At resolves a probe position (any uint32; wrapped by the mask) into its item.
 func (t *FlatHashMap[K, V]) At(idx uint32) *Item[K, V] {
-	return (*Item[K, V])(unsafe.Add(unsafe.Pointer(t.base), uintptr(idx&t.mask)*unsafe.Sizeof(Item[K, V]{})))
+	idx &= t.mask
+	if t.mask < chunkSlots { // the mask already says which of the two layouts is in use
+		return &t.short[idx]
+	}
+	return &t.chunks[idx>>chunkShift][idx&chunkMask]
 }
 
 // Home is the probe start for a key hash: the high hash bits, so the slot position stays uncorrelated with the tag
@@ -85,7 +109,8 @@ func (t *FlatHashMap[K, V]) Len() int { return int(t.mask) + 1 }
 
 func (t *FlatHashMap[K, V]) Bytes() int64 {
 	length := int64(t.Len())
-	return int64(unsafe.Sizeof(*t)) + length*int64(unsafe.Sizeof(Item[K, V]{})) + (length>>groupShift)*4
+	chunkPtrs := int64(len(t.chunks)) * int64(unsafe.Sizeof(uintptr(0)))
+	return int64(unsafe.Sizeof(*t)) + chunkPtrs + length*int64(unsafe.Sizeof(Item[K, V]{})) + (length>>groupShift)*4
 }
 
 // StorageProxy is a shard's stable handle to its current FlatHashMap: rebuilds swap the table underneath while the shard's
