@@ -49,6 +49,8 @@ test: ## Run local tests
 	go test -v -race ./...
 test-load-generator: ## Run the load generator's own tests
 	go -C benchmarks/load_generator test -race ./...
+test-integration: up ## Run integration tests against live L2 servers (make up first)
+	go -C tests/integration test ./... -v
 test-all: ## Run all tests
 	@for m in $(MODULES); do \
 		echo "==> $$m"; \
@@ -82,6 +84,8 @@ bench-100kk: ## Run memstash benchmarks for 100M items cache
 	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprintMemstash -tags=long
 bench-100kk-others: ## Run benchmarks for 100M items other caches
 	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprint -tags=others
+bench-integration: up ## Run L1+L2 load-profile benchmarks against the live servers (make up first)
+	go -C tests/integration test -run xxx -bench . -benchtime 1s ./...
 
 .PHONY: bench
 ifeq ($(strip $(NAME)),)
@@ -90,11 +94,6 @@ else
 bench:
 	go -C benchmarks test -run=xxx -bench='^Benchmark$(NAME)$$' ./...
 endif
-
-integration-tests: up ## Run integration tests against live L2 servers (make up first)
-	go -C tests/integration test ./... -v
-integration-bench: up ## Run L1+L2 load-profile benchmarks against the live servers (make up first)
-	go -C tests/integration test -run xxx -bench . -benchtime 1s ./...
 
 .PHONY: load-generator
 load-generator: ## Build the long-running load generator (+ config.yaml) into benchmarks/bin
