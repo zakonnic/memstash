@@ -34,6 +34,10 @@ const multiKeyBudget = 12 * 1024
 // argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).
 const argWireOverhead = 16
 
+// MaxMsetItems is the longest batch that can still fit multiKeyBudget. Past it the framing alone busts the budget
+// whatever the values weigh, so BatchSet builds the SendMany requests directly and never boxes the flat MSET args.
+const MaxMsetItems = multiKeyBudget / (2 * argWireOverhead)
+
 // New creates the adapter with an explicit value codec. By default keys must be strings (identity mapping); for other
 // key types pass l2.WithKeyFunc.
 func New[K comparable, V any](sender redispiperedis.Sender, codec memstash.Codec[V], opts ...memstash.Option) (*Cache[K, V], error) {
@@ -234,7 +238,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	if len(items) == 0 {
 		return nil
 	}
-	if c.singleNode && ttl <= 0 {
+	if c.singleNode && ttl <= 0 && len(items) <= MaxMsetItems {
 		args := make([]interface{}, 0, 2*len(items))
 		size := 0
 		for _, item := range items {
@@ -255,6 +259,10 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		}
 		return sendManyErr(c.sync.SendMany(ctx, requests))
 	}
+	var millis int64
+	if ttl > 0 {
+		millis = l2.RedisMillis(ttl)
+	}
 	requests := make([]redispiperedis.Request, 0, len(items))
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
@@ -262,7 +270,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 			return err
 		}
 		if ttl > 0 {
-			requests = append(requests, redispiperedis.Req("SET", c.keyFunc(item.Key), data, "PX", l2.RedisMillis(ttl)))
+			requests = append(requests, redispiperedis.Req("SET", c.keyFunc(item.Key), data, "PX", millis))
 		} else {
 			requests = append(requests, redispiperedis.Req("SET", c.keyFunc(item.Key), data))
 		}

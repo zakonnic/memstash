@@ -46,6 +46,10 @@ const MultiKeyBudget = 16 * 1024
 // argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).
 const argWireOverhead = 16
 
+// MaxMsetItems is the longest batch that can still fit MultiKeyBudget. Past it the framing alone busts the budget
+// whatever the values weigh, so BatchSet pipelines straight from the items and never boxes the flat MSET args.
+const MaxMsetItems = MultiKeyBudget / (2 * argWireOverhead)
+
 // New creates the adapter with an explicit value codec. By default keys must be strings (identity mapping); for other
 // key types pass l2.WithKeyFunc.
 func New[K comparable, V any](client redis.Cmdable, codec memstash.Codec[V], opts ...memstash.Option) (*Cache[K, V], error) {
@@ -222,7 +226,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	if len(items) == 0 {
 		return nil
 	}
-	if c.singleNode && ttl <= 0 {
+	if c.singleNode && ttl <= 0 && len(items) <= MaxMsetItems {
 		pairs := make([]any, 0, 2*len(items))
 		size := 0
 		for _, item := range items {

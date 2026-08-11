@@ -30,6 +30,10 @@ const multiKeyBudget = 3500
 // argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).
 const argWireOverhead = 16
 
+// MaxMsetItems is the longest batch that can still fit multiKeyBudget. Past it the framing alone busts the budget
+// whatever the values weigh, so BatchSet marshals straight into Send and never boxes the flat MSET args.
+const MaxMsetItems = multiKeyBudget / (2 * argWireOverhead)
+
 // New creates the adapter with an explicit value codec. By default keys must be strings (identity mapping); for other
 // key types pass l2.WithKeyFunc.
 func New[K comparable, V any](pool *redigolib.Pool, codec memstash.Codec[V], opts ...memstash.Option) (*Cache[K, V], error) {
@@ -164,15 +168,7 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 			return err
 		}
 	}
-	if err := conn.Flush(); err != nil {
-		return err
-	}
-	for range args {
-		if _, err := conn.Receive(); err != nil {
-			return err
-		}
-	}
-	return nil
+	return flushReceive(conn, len(args))
 }
 
 // BatchGet fetches all keys in one round trip: one MGET command when the batch fits multiKeyBudget, otherwise a
@@ -248,6 +244,11 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	if len(items) == 0 {
 		return nil
 	}
+	// The flat MSET args are only worth boxing for a no-TTL batch short enough to still fit the budget. With a TTL, or
+	// past the item ceiling, the pipeline is a foregone conclusion and marshals straight into Send.
+	if ttl > 0 || len(items) > MaxMsetItems {
+		return c.pipelineSet(ctx, items, ttl)
+	}
 	args := make([]any, 0, 2*len(items))
 	size := 0
 	for _, item := range items {
@@ -259,7 +260,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		args = append(args, storageKey, data)
 		size += len(storageKey) + len(data) + 2*argWireOverhead
 	}
-	if ttl <= 0 && size <= multiKeyBudget {
+	if size <= multiKeyBudget {
 		_, err := c.do(ctx, "MSET", args...)
 		return err
 	}
@@ -270,19 +271,48 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	defer conn.Close()
 
 	for i := 0; i < len(args); i += 2 {
+		if err := conn.Send("SET", args[i], args[i+1]); err != nil {
+			return err
+		}
+	}
+	return flushReceive(conn, len(items))
+}
+
+// pipelineSet marshals and sends one SET per item (Send/Flush/Receive); ttl <= 0 stores them without expiration.
+func (c *Cache[K, V]) pipelineSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
+	conn, err := c.pool.GetContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	var millis int64
+	if ttl > 0 {
+		millis = l2.RedisMillis(ttl)
+	}
+	for _, item := range items {
+		data, err := c.codec.Marshal(item.Value)
+		if err != nil {
+			return err
+		}
 		if ttl > 0 {
-			err = conn.Send("SET", args[i], args[i+1], "PX", l2.RedisMillis(ttl))
+			err = conn.Send("SET", c.keyFunc(item.Key), data, "PX", millis)
 		} else {
-			err = conn.Send("SET", args[i], args[i+1])
+			err = conn.Send("SET", c.keyFunc(item.Key), data)
 		}
 		if err != nil {
 			return err
 		}
 	}
+	return flushReceive(conn, len(items))
+}
+
+// flushReceive flushes a pipeline and drains n replies, returning the first error.
+func flushReceive(conn redigolib.Conn, n int) error {
 	if err := conn.Flush(); err != nil {
 		return err
 	}
-	for range items {
+	for range n {
 		if _, err := conn.Receive(); err != nil {
 			return err
 		}

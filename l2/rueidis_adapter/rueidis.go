@@ -26,6 +26,10 @@ const multiKeyBudget = 16 * 1024
 // argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).
 const argWireOverhead = 16
 
+// MaxMsetItems is the longest batch that can still fit multiKeyBudget. Past it the framing alone busts the budget
+// whatever the values weigh, so BatchSet goes straight to the pipeline and never builds the MSET map.
+const MaxMsetItems = multiKeyBudget / (2 * argWireOverhead)
+
 // New creates the adapter with an explicit value codec. By default keys must be strings (identity mapping); for other
 // key types pass l2.WithKeyFunc.
 func New[K comparable, V any](client rueidislib.Client, codec memstash.Codec[V], opts ...memstash.Option) (*Cache[K, V], error) {
@@ -211,40 +215,52 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	if len(items) == 0 {
 		return nil
 	}
-	if ttl <= 0 {
-		kvs := make(map[string]string, len(items))
-		size := 0
-		for _, item := range items {
-			data, err := c.codec.Marshal(item.Value)
-			if err != nil {
-				return err
-			}
-			storageKey := c.keyFunc(item.Key)
-			kvs[storageKey] = rueidislib.BinaryString(data)
-			size += len(storageKey) + len(data) + 2*argWireOverhead
-		}
-		if size <= multiKeyBudget {
-			for _, err := range rueidislib.MSet(c.client, ctx, kvs) {
-				if err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		cmds := make([]rueidislib.Completed, 0, len(kvs))
-		for storageKey, data := range kvs {
-			cmds = append(cmds, c.client.B().Set().Key(storageKey).Value(data).Build())
-		}
-		return doMultiErr(c.client.DoMulti(ctx, cmds...))
+	if ttl > 0 {
+		return c.pipelineSet(ctx, items, l2.RedisMillis(ttl))
 	}
-	cmds := make([]rueidislib.Completed, 0, len(items))
+	if len(items) > MaxMsetItems {
+		return c.pipelineSet(ctx, items, 0)
+	}
+	kvs := make(map[string]string, len(items))
+	size := 0
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
 			return err
 		}
-		cmds = append(cmds, c.client.B().Set().Key(c.keyFunc(item.Key)).Value(rueidislib.BinaryString(data)).
-			PxMilliseconds(l2.RedisMillis(ttl)).Build())
+		storageKey := c.keyFunc(item.Key)
+		kvs[storageKey] = rueidislib.BinaryString(data)
+		size += len(storageKey) + len(data) + 2*argWireOverhead
+	}
+	if size <= multiKeyBudget {
+		for _, err := range rueidislib.MSet(c.client, ctx, kvs) {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	cmds := make([]rueidislib.Completed, 0, len(kvs))
+	for storageKey, data := range kvs {
+		cmds = append(cmds, c.client.B().Set().Key(storageKey).Value(data).Build())
+	}
+	return doMultiErr(c.client.DoMulti(ctx, cmds...))
+}
+
+// pipelineSet sends one SET per item through DoMulti; millis == 0 stores them without expiration.
+func (c *Cache[K, V]) pipelineSet(ctx context.Context, items memstash.List[K, V], millis int64) error {
+	cmds := make([]rueidislib.Completed, len(items))
+	for i, item := range items {
+		data, err := c.codec.Marshal(item.Value)
+		if err != nil {
+			return err
+		}
+		set := c.client.B().Set().Key(c.keyFunc(item.Key)).Value(rueidislib.BinaryString(data))
+		if millis > 0 {
+			cmds[i] = set.PxMilliseconds(millis).Build()
+		} else {
+			cmds[i] = set.Build()
+		}
 	}
 	return doMultiErr(c.client.DoMulti(ctx, cmds...))
 }
