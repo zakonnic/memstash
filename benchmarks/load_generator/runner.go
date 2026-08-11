@@ -193,7 +193,7 @@ func (r *runner[K, V]) doOp(rng *rand.Rand, reads, writes *rand.Zipf) {
 	ctx := context.Background()
 	random := r.RandomPercent > 0 && rng.Intn(100) < r.RandomPercent
 	if rng.Intn(100) < r.ReadPercent {
-		r.doGet(ctx, nextKey(rng, reads, r.WriteKeySpace, random))
+		r.doGet(ctx, nextKey(rng, reads, r.KeySpace, random))
 	} else {
 		r.doSet(ctx, nextKey(rng, writes, r.WriteKeySpace, random))
 	}
