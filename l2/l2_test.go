@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
 )
@@ -135,35 +134,35 @@ func TestCodecs(t *testing.T) {
 }
 
 // TestWithKeyFuncAndResolveOptions covers the adapter-constructor option plumbing: WithKeyFunc is a regular
-// memstash.Option that ResolveOptions picks out of a mixed option list, falling back to ResolveKeyFunc's own rules
+// memstash.Option that ExtractKeyFunc picks out of a mixed option list, falling back to ResolveKeyFunc's own rules
 // when it is absent, and reporting ErrOptionMismatch when it was built for a different key type.
 func TestWithKeyFuncAndResolveOptions(t *testing.T) {
 	t.Run("WithKeyFunc overrides the default mapping", func(t *testing.T) {
 		opts := []memstash.Option{l2.WithKeyFunc[int](strconv.Itoa)}
-		resolved, err := l2.ResolveOptions[int](opts)
+		resolved, err := l2.ExtractKeyFunc[int](opts)
 		require.NoError(t, err)
 		assert.Equal(t, "7", resolved(7))
 	})
 
 	t.Run("no WithKeyFunc falls back to ResolveKeyFunc's rules", func(t *testing.T) {
-		resolved, err := l2.ResolveOptions[string](nil)
+		resolved, err := l2.ExtractKeyFunc[string](nil)
 		require.NoError(t, err)
 		assert.Equal(t, "k", resolved("k"))
 
-		_, err = l2.ResolveOptions[int](nil)
+		_, err = l2.ExtractKeyFunc[int](nil)
 		require.ErrorIs(t, err, l2.ErrKeyFuncRequired)
 	})
 
 	t.Run("foreign options (with no ApplyTyped) are ignored", func(t *testing.T) {
 		opts := []memstash.Option{memstash.WithMemoryCapacity(10)}
-		resolved, err := l2.ResolveOptions[string](opts)
+		resolved, err := l2.ExtractKeyFunc[string](opts)
 		require.NoError(t, err)
 		assert.Equal(t, "k", resolved("k"))
 	})
 
 	t.Run("a key-func option built for a different key type is a mismatch", func(t *testing.T) {
 		opts := []memstash.Option{l2.WithKeyFunc[int](strconv.Itoa)}
-		_, err := l2.ResolveOptions[string](opts)
+		_, err := l2.ExtractKeyFunc[string](opts)
 		require.ErrorIs(t, err, memstash.ErrOptionMismatch)
 	})
 }

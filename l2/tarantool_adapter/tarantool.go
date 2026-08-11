@@ -60,7 +60,7 @@ func New[K comparable, V any](doer tarantool.Doer, codec memstash.Codec[V], spac
 	if space == "" {
 		space = DefaultSpace
 	}
-	keyFunc, err := l2.ResolveOptions[K](opts)
+	keyFunc, err := l2.ExtractKeyFunc[K](opts)
 	if err != nil {
 		return nil, err
 	}

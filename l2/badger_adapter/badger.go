@@ -36,7 +36,7 @@ func New[K comparable, V any](db *badger.DB, codec memstash.Codec[V], opts ...me
 	if codec == nil {
 		return nil, l2.ErrNilCodec
 	}
-	keyFunc, err := l2.ResolveOptions[K](opts)
+	keyFunc, err := l2.ExtractKeyFunc[K](opts)
 	if err != nil {
 		return nil, err
 	}

@@ -43,7 +43,7 @@ func New[K comparable, V any](pool *redigolib.Pool, codec memstash.Codec[V], opt
 	if codec == nil {
 		return nil, l2.ErrNilCodec
 	}
-	keyFunc, err := l2.ResolveOptions[K](opts)
+	keyFunc, err := l2.ExtractKeyFunc[K](opts)
 	if err != nil {
 		return nil, err
 	}

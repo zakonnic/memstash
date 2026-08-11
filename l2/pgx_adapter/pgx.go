@@ -68,7 +68,7 @@ func New[K comparable, V any](db DB, codec memstash.Codec[V], table string, opts
 	if table == "" {
 		table = DefaultTable
 	}
-	keyFunc, err := l2.ResolveOptions[K](opts)
+	keyFunc, err := l2.ExtractKeyFunc[K](opts)
 	if err != nil {
 		return nil, err
 	}

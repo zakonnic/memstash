@@ -46,7 +46,7 @@ func PrefixedString(prefix string) func(string) string {
 
 // --- adapter constructor options ---
 
-// keyFuncTarget is the option target the adapters fill via ResolveOptions. keyFuncMarker distinguishes "a key-func
+// keyFuncTarget is the option target the adapters fill via ExtractKeyFunc. keyFuncMarker distinguishes "a key-func
 // target of foreign key type" (an error) from "not a key-func target at all" (for example the cache Config - skip),
 // as required by the memstash.Option dispatch protocol.
 type keyFuncTarget[K comparable] struct {
@@ -74,9 +74,9 @@ func WithKeyFunc[K comparable](keyFunc func(K) string) memstash.Option {
 	}}
 }
 
-// ResolveOptions extracts the WithKeyFunc option from the option list (foreign options are ignored) and resolves the
+// ExtractKeyFunc extracts the WithKeyFunc option from the option list (foreign options are ignored) and resolves the
 // key function (see ResolveKeyFunc).
-func ResolveOptions[K comparable](opts []memstash.Option) (func(K) string, error) {
+func ExtractKeyFunc[K comparable](opts []memstash.Option) (func(K) string, error) {
 	var target keyFuncTarget[K]
 	for _, opt := range opts {
 		if opt.ApplyTyped == nil {

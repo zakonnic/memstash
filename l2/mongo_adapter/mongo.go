@@ -44,7 +44,7 @@ func New[K comparable, V any](coll *mongo.Collection, codec memstash.Codec[V], o
 	if codec == nil {
 		return nil, l2.ErrNilCodec
 	}
-	keyFunc, err := l2.ResolveOptions[K](opts)
+	keyFunc, err := l2.ExtractKeyFunc[K](opts)
 	if err != nil {
 		return nil, err
 	}
