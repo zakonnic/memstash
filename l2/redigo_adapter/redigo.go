@@ -18,9 +18,16 @@ type Cache[K comparable, V any] struct {
 	pool    *redigolib.Pool
 	codec   memstash.Codec[V]
 	keyFunc func(K) string
+	// orderedMget marks a pool whose MGET replies come back in key order. See l2.WithOrderedMget.
+	orderedMget bool
 }
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
+
+// IsOrderedMgetAvailable reports whether MGET on this pool returns its replies in key order. A redigo pool dials one
+// address and redigo has no cluster mode, so this is always true; front the pool with a proxy that fans keys out and
+// you own the claim - turn it off with l2.WithOrderedMget(memstash.Disabled).
+func IsOrderedMgetAvailable(*redigolib.Pool) bool { return true }
 
 // Multi-key commands (MGET/MSET) beat a per-key pipeline while they stay small.
 // But one huge command is worse than a stream of small ones, so we set this limit.
@@ -47,7 +54,16 @@ func New[K comparable, V any](pool *redigolib.Pool, codec memstash.Codec[V], opt
 	if err != nil {
 		return nil, err
 	}
-	return &Cache[K, V]{pool: pool, codec: codec, keyFunc: keyFunc}, nil
+	mgetMode, err := l2.ExtractOrderedMget(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Cache[K, V]{
+		pool:        pool,
+		codec:       codec,
+		keyFunc:     keyFunc,
+		orderedMget: l2.ResolveOrderedMget(mgetMode, func() bool { return IsOrderedMgetAvailable(pool) }),
+	}, nil
 }
 
 // NewJSON creates the adapter that marshals values with encoding/json.
@@ -171,8 +187,8 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	return flushReceive(conn, len(args))
 }
 
-// BatchGet fetches all keys in one round trip: one MGET command when the batch fits multiKeyBudget, otherwise a
-// pipeline of GETs (Send/Flush/Receive).
+// BatchGet fetches all keys in one round trip: one MGET command when the pool returns ordered replies (see
+// l2.WithOrderedMget) and the batch fits multiKeyBudget, otherwise a pipeline of GETs (Send/Flush/Receive).
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	length := len(keys)
 	found := make(memstash.List[K, V], 0, length)
@@ -186,7 +202,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		args[i] = storageKey
 		size += len(storageKey) + argWireOverhead
 	}
-	if size <= multiKeyBudget {
+	if c.orderedMget && size <= multiKeyBudget {
 		replies, err := redigolib.Values(c.do(ctx, "MGET", args...))
 		if err != nil {
 			return found, err

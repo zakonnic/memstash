@@ -17,6 +17,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **`l2/valkey_adapter`** - Valkey backend on [valkey-io/valkey-go](https://github.com/valkey-io/valkey-go), with the
   same batching as the rueidis adapter: MGET/MSET/DEL multi-key commands while a batch stays under the wire budget, a
   pipeline of per-key commands above it. Works against a standalone node or a cluster.
+- **`memstash.DetectMode`** (`AutoDetect`/`Disabled`/`Enabled`) and **`l2.WithOrderedMget`** - let the Redis-family
+  adapters read an MGET reply array by position instead of going through the key-to-reply map their client's
+  multi-get helper builds. Valid only while every key of a batch reaches one server; adapters probe for that
+  themselves through their new `IsOrderedMgetAvailable`, so the default needs no configuration.
 
 ### Changed
 

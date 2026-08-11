@@ -283,6 +283,20 @@ c, _ := rueidis_adapter.NewJSONCache[int, User](client,
 )
 ```
 
+**Ordered MGET** — on the Redis-family adapters `BatchGet` reads the MGET reply array positionally
+when every key of a batch lands on the same server, which drops the key-to-reply map (~37% fewer
+bytes allocated per `BatchGet`). Adapters probe the client for it by default; override the probe
+when you know better — for example a cluster client whose batches stay inside one slot:
+
+```go
+c, _ := rueidis_adapter.NewJSONCache[string, User](client,
+	l2.WithOrderedMget(memstash.Enabled),
+)
+```
+
+Asserting `Enabled` on a client that fans a batch across nodes pairs values with the wrong keys, so
+leave it at `memstash.AutoDetect` unless the topology is yours to guarantee.
+
 **Custom serializer** — `NewCache` takes any `memstash.Codec[V]`, so a binary format works just as
 well as JSON. You can encode each field directly instead of going through JSON:
 

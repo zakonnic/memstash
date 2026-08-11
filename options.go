@@ -248,3 +248,15 @@ func WithStats() Option {
 		f.statsEnabled = &on
 	}}
 }
+
+// DetectMode says how an adapter decides whether an optional backend capability is there.
+type DetectMode uint8
+
+const (
+	// AutoDetect probes the client and takes the answer from it. Default.
+	AutoDetect DetectMode = iota
+	// Disabled disables the capability.
+	Disabled
+	// Enabled asserts the capability without probing.
+	Enabled
+)

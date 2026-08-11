@@ -3,6 +3,7 @@ package valkey_adapter
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	valkeylib "github.com/valkey-io/valkey-go"
@@ -15,9 +16,18 @@ type Cache[K comparable, V any] struct {
 	client  valkeylib.Client
 	codec   memstash.Codec[V]
 	keyFunc func(K) string
+	// orderedMget marks a client whose MGET replies come back in key order, letting BatchGet read them positionally
+	// instead of through the MGet helper's key-to-reply map. See l2.WithOrderedMget.
+	orderedMget bool
 }
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
+
+// IsOrderedMgetAvailable reports whether MGET on this client returns its replies in key order. It holds for a client
+// that talks to a single node: a cluster client splits a batch per node and the helper regroups it, losing the order.
+func IsOrderedMgetAvailable(client valkeylib.Client) bool {
+	return client != nil && len(client.Nodes()) <= 1
+}
 
 // Multi-key commands (MGET/MSET) beat a per-key pipeline while they stay small.
 // But one huge command is worse than a stream of small ones, so we set this limit.
@@ -43,7 +53,16 @@ func New[K comparable, V any](client valkeylib.Client, codec memstash.Codec[V], 
 	if err != nil {
 		return nil, err
 	}
-	return &Cache[K, V]{client: client, codec: codec, keyFunc: keyFunc}, nil
+	mgetMode, err := l2.ExtractOrderedMget(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Cache[K, V]{
+		client:      client,
+		codec:       codec,
+		keyFunc:     keyFunc,
+		orderedMget: l2.ResolveOrderedMget(mgetMode, func() bool { return IsOrderedMgetAvailable(client) }),
+	}, nil
 }
 
 // NewJSON creates the adapter that marshals values with encoding/json.
@@ -152,8 +171,8 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	return doMultiErr(c.client.DoMulti(ctx, cmds...))
 }
 
-// BatchGet fetches all keys in one round trip: the valkey MGet helper within multiKeyBudget, a DoMulti pipeline of
-// GETs above it.
+// BatchGet fetches all keys in one round trip: within multiKeyBudget a single MGET when the client returns ordered
+// replies (see l2.WithOrderedMget) and the valkey MGet helper otherwise, a DoMulti pipeline of GETs above it.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	length := len(keys)
 	found := make(memstash.List[K, V], 0, length)
@@ -167,6 +186,9 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		size += len(storageKeys[i]) + argWireOverhead
 	}
 	if size <= multiKeyBudget {
+		if c.orderedMget {
+			return c.batchGetOrdered(ctx, keys, storageKeys, found)
+		}
 		replies, err := valkeylib.MGet(c.client, ctx, storageKeys)
 		if err != nil {
 			return found, err
@@ -198,6 +220,34 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 			if valkeylib.IsValkeyNil(err) {
 				continue
 			}
+			return found, err
+		}
+		value, err := c.codec.Unmarshal(data)
+		if err != nil {
+			return found, err
+		}
+		found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
+	}
+	return found, nil
+}
+
+// batchGetOrdered reads the batch with one MGET and walks the reply array by position, so no key-to-reply map is
+// built. found is passed in already sized by the caller.
+func (c *Cache[K, V]) batchGetOrdered(ctx context.Context, keys []K, storageKeys []string, found memstash.List[K, V]) (memstash.List[K, V], error) {
+	cmd := c.client.B().Mget().Key(storageKeys...).Build()
+	replies, err := c.client.Do(ctx, cmd).ToArray()
+	if err != nil {
+		return found, err
+	}
+	if len(replies) != len(keys) {
+		return found, fmt.Errorf("memstash/l2/valkey: MGET returned %d replies for %d keys", len(replies), len(keys))
+	}
+	for i := range replies {
+		if replies[i].IsNil() {
+			continue
+		}
+		data, err := replies[i].AsBytes() // a zero-copy view into the reply
+		if err != nil {
 			return found, err
 		}
 		value, err := c.codec.Unmarshal(data)

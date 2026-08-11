@@ -21,6 +21,9 @@ type Cache[K comparable, V any] struct {
 	// singleNode marks client types whose commands always reach one server, so MGET/MSET commands available.
 	// On a cluster keep the per-key pipeline instead.
 	singleNode bool
+	// orderedMget marks a client whose MGET replies come back in key order. Same probe as singleNode by default, but
+	// l2.WithOrderedMget can override it on its own.
+	orderedMget bool
 }
 
 // isSingleNode reports whether every command on the client reaches the same server. Mocks count as multi-node.
@@ -31,6 +34,10 @@ func isSingleNode(client redis.Cmdable) bool {
 	}
 	return false
 }
+
+// IsOrderedMgetAvailable reports whether MGET on this client returns its replies in key order. It holds for a client
+// that never fans a batch out; a cluster or ring client splits the keys by slot and the order is lost.
+func IsOrderedMgetAvailable(client redis.Cmdable) bool { return isSingleNode(client) }
 
 // stringToBytes reinterprets s as a read-only []byte without copying - like StringCmd.Bytes() in redis.
 func stringToBytes(s string) []byte {
@@ -63,7 +70,17 @@ func New[K comparable, V any](client redis.Cmdable, codec memstash.Codec[V], opt
 	if err != nil {
 		return nil, err
 	}
-	return &Cache[K, V]{client: client, codec: codec, keyFunc: keyFunc, singleNode: isSingleNode(client)}, nil
+	mgetMode, err := l2.ExtractOrderedMget(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Cache[K, V]{
+		client:      client,
+		codec:       codec,
+		keyFunc:     keyFunc,
+		singleNode:  isSingleNode(client),
+		orderedMget: l2.ResolveOrderedMget(mgetMode, func() bool { return IsOrderedMgetAvailable(client) }),
+	}, nil
 }
 
 // NewJSON creates the adapter that marshals values with encoding/json.
@@ -159,15 +176,15 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	return err
 }
 
-// BatchGet fetches all keys in one round trip: a single MGET command on a single-node client when the batch fits
-// multiKeyBudget, otherwise a pipeline of GETs.
+// BatchGet fetches all keys in one round trip: a single MGET command when the client returns ordered replies (see
+// l2.WithOrderedMget) and the batch fits MultiKeyBudget, otherwise a pipeline of GETs.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	length := len(keys)
 	found := make(memstash.List[K, V], 0, length)
 	if length == 0 {
 		return found, nil
 	}
-	if c.singleNode {
+	if c.orderedMget {
 		storageKeys := make([]string, length)
 		size := 0
 		for i, key := range keys {

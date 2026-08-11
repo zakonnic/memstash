@@ -89,6 +89,50 @@ func ExtractKeyFunc[K comparable](opts []memstash.Option) (func(K) string, error
 	return ResolveKeyFunc(target.keyFunc)
 }
 
+// orderedMgetTarget is the option target the adapters fill via ExtractOrderedMget.
+type orderedMgetTarget struct {
+	mode memstash.DetectMode
+}
+
+// WithOrderedMget tells a Redis-family adapter that MGET hands its replies back in the order the keys were sent, so
+// BatchGet can read the reply array positionally instead of going through the key-to-reply map its client's portable
+// multi-get helper builds. Needs a single-shard setup. Adapters resolve that through their own IsOrderedMgetAvailable.
+func WithOrderedMget(mode memstash.DetectMode) memstash.Option {
+	return memstash.Option{ApplyTyped: func(target any) error {
+		if typed, ok := target.(*orderedMgetTarget); ok {
+			typed.mode = mode
+		}
+		return nil // some other package's target (for example the cache Config) - not ours to fill
+	}}
+}
+
+// ExtractOrderedMget extracts the WithOrderedMget option from the option list (foreign options are ignored),
+// defaulting to memstash.AutoDetect.
+func ExtractOrderedMget(opts []memstash.Option) (memstash.DetectMode, error) {
+	var target orderedMgetTarget
+	for _, opt := range opts {
+		if opt.ApplyTyped == nil {
+			continue
+		}
+		if err := opt.ApplyTyped(&target); err != nil {
+			return target.mode, err
+		}
+	}
+	return target.mode, nil
+}
+
+// ResolveOrderedMget turns the mode into the flag an adapter stores, calling probe only for memstash.AutoDetect.
+func ResolveOrderedMget(mode memstash.DetectMode, probe func() bool) bool {
+	switch mode {
+	case memstash.Enabled:
+		return true
+	case memstash.Disabled:
+		return false
+	default:
+		return probe()
+	}
+}
+
 // --- sequential batch fallbacks ---
 
 // BatchGetSequential implements L2Cache.BatchGet for backends without a native multi-get by looping over Get. The

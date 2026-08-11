@@ -23,9 +23,19 @@ type Cache[K comparable, V any] struct {
 	// singleNode marks a plain *redisconn.Connection sender, whose commands always reach one server, so batches may
 	// use MGET/MSET - other senders (rediscluster, wrappers) keep the per-key SendMany.
 	singleNode bool
+	// orderedMget marks a sender whose MGET replies come back in key order. Same probe as singleNode by default, but
+	// l2.WithOrderedMget can override it on its own.
+	orderedMget bool
 }
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
+
+// IsOrderedMgetAvailable reports whether MGET on this sender returns its replies in key order. It holds for a plain
+// *redisconn.Connection; a rediscluster sender splits the keys by slot and the order is lost.
+func IsOrderedMgetAvailable(sender redispiperedis.Sender) bool {
+	_, ok := sender.(*redisconn.Connection)
+	return ok
+}
 
 // Multi-key commands (MGET/MSET) beat a per-key batch while they stay small.
 // But one huge command is worse than a stream of small ones, so we set this limit.
@@ -51,8 +61,18 @@ func New[K comparable, V any](sender redispiperedis.Sender, codec memstash.Codec
 	if err != nil {
 		return nil, err
 	}
+	mgetMode, err := l2.ExtractOrderedMget(opts)
+	if err != nil {
+		return nil, err
+	}
 	_, singleNode := sender.(*redisconn.Connection)
-	return &Cache[K, V]{sync: redispiperedis.SyncCtx{S: sender}, codec: codec, keyFunc: keyFunc, singleNode: singleNode}, nil
+	return &Cache[K, V]{
+		sync:        redispiperedis.SyncCtx{S: sender},
+		codec:       codec,
+		keyFunc:     keyFunc,
+		singleNode:  singleNode,
+		orderedMget: l2.ResolveOrderedMget(mgetMode, func() bool { return IsOrderedMgetAvailable(sender) }),
+	}, nil
 }
 
 // NewJSON creates the adapter that marshals values with encoding/json.
@@ -159,15 +179,15 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	return sendManyErr(c.sync.SendMany(ctx, requests))
 }
 
-// BatchGet fetches all keys in one round trip: a single MGET request on a plain connection when the batch fits
-// multiKeyBudget, otherwise a SendMany batch of GETs.
+// BatchGet fetches all keys in one round trip: a single MGET request when the sender returns ordered replies (see
+// l2.WithOrderedMget) and the batch fits multiKeyBudget, otherwise a SendMany batch of GETs.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
 	length := len(keys)
 	found := make(memstash.List[K, V], 0, length)
 	if length == 0 {
 		return found, nil
 	}
-	if c.singleNode {
+	if c.orderedMget {
 		args := make([]interface{}, length)
 		size := 0
 		for i, key := range keys {
