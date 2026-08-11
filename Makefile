@@ -31,9 +31,13 @@ up: ## Start containers for the integration tests (waits for healthchecks)
 down: ## Stop and remove the integration containers
 	$(DC) $(DC_FILES) down
 
-update-packages: ## Update go modules versions
-	go get -u ./...
-	go mod tidy
+.PHONY: update-packages
+update-packages: ## Update go modules versions in every module of the repo
+	@for m in $(MODULES); do \
+		echo "==> $$m"; \
+		go -C $$m get -u ./... || exit 1; \
+		go -C $$m mod tidy || exit 1; \
+	done
 
 lint: ## Run linter with settings from .golangci.yml (needs golangci-lint v2)
 	golangci-lint run -v
@@ -74,9 +78,9 @@ bench-real: ## Run realistic and non-standard pattern benchmarks
 	go -C benchmarks test -run='^TestHitRateRealistic$$' -v
 bench-flight: ## Run hitrate benchmarks for singleflight
 	go -C benchmarks test -run=xxx -bench='^BenchmarkFlight' ./...
-bench-100kk:
+bench-100kk: ## Run memstash benchmarks for 100M items cache
 	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprintMemstash -tags=long
-bench-100kk-others:
+bench-100kk-others: ## Run benchmarks for 100M items other caches
 	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprint -tags=others
 
 .PHONY: bench
@@ -94,7 +98,7 @@ integration-bench: up ## Run L1+L2 load-profile benchmarks against the live serv
 
 .PHONY: load-generator
 load-generator: ## Build the long-running load generator (+ config.yaml) into benchmarks/bin
-	go -C benchmarks build -o bin/load-generator$(if $(filter Windows_NT,$(OS)),.exe,) ./load_generator
+	go -C benchmarks/load_generator build -o ../bin/load-generator$(if $(filter Windows_NT,$(OS)),.exe,) ./cmd/load-generator
 	[ -f benchmarks/bin/config.yaml ] || cp benchmarks/load_generator/config.yaml benchmarks/bin/config.yaml
 
 check-new-libs: ## Checks for new versions of libraries

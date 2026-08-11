@@ -4,7 +4,7 @@ go 1.24
 
 require (
 	github.com/tarantool/go-tarantool/v2 v2.4.2
-	github.com/zakonnic/memstash v0.9.0
+	github.com/zakonnic/memstash v0.9.6
 )
 
 require (

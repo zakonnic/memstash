@@ -2,7 +2,7 @@ module github.com/zakonnic/memstash/l2/gomemcache_adapter
 
 go 1.24
 
-require github.com/zakonnic/memstash v0.9.0
+require github.com/zakonnic/memstash v0.9.6
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
