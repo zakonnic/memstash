@@ -19,6 +19,8 @@ type Cache[K comparable, V any] struct {
 	// orderedMget marks a client whose MGET replies come back in key order, letting BatchGet read them positionally
 	// instead of through the MGet helper's key-to-reply map. See l2.WithOrderedMget.
 	orderedMget bool
+	// singleNode gates the dedicated-connection path: a cluster client panics on a cross-slot pipeline there.
+	singleNode bool
 }
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
@@ -62,6 +64,7 @@ func New[K comparable, V any](client valkeylib.Client, codec memstash.Codec[V], 
 		codec:       codec,
 		keyFunc:     keyFunc,
 		orderedMget: l2.ResolveOrderedMget(mgetMode, func() bool { return IsOrderedMgetAvailable(client) }),
+		singleNode:  len(client.Nodes()) <= 1,
 	}, nil
 }
 
@@ -168,7 +171,7 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	for i, storageKey := range storageKeys {
 		cmds[i] = c.client.B().Del().Key(storageKey).Build()
 	}
-	return doMultiErr(c.client.DoMulti(ctx, cmds...))
+	return c.doMultiLarge(ctx, cmds)
 }
 
 // BatchGet fetches all keys in one round trip: within multiKeyBudget a single MGET when the client returns ordered
@@ -214,7 +217,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	for i, storageKey := range storageKeys {
 		cmds[i] = c.client.B().Get().Key(storageKey).Build()
 	}
-	for i, resp := range c.client.DoMulti(ctx, cmds...) {
+	for i, resp := range c.doMultiLargeResults(ctx, cmds) {
 		data, err := resp.AsBytes()
 		if err != nil {
 			if valkeylib.IsValkeyNil(err) {
@@ -294,7 +297,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	for storageKey, data := range kvs {
 		cmds = append(cmds, c.client.B().Set().Key(storageKey).Value(data).Build())
 	}
-	return doMultiErr(c.client.DoMulti(ctx, cmds...))
+	return c.doMultiLarge(ctx, cmds)
 }
 
 // pipelineSet sends one SET per item through DoMulti; millis == 0 stores them without expiration.
@@ -312,7 +315,30 @@ func (c *Cache[K, V]) pipelineSet(ctx context.Context, items memstash.List[K, V]
 			cmds[i] = set.Build()
 		}
 	}
-	return doMultiErr(c.client.DoMulti(ctx, cmds...))
+	return c.doMultiLarge(ctx, cmds)
+}
+
+// doMultiLarge sends a pipeline that busted multiKeyBudget, on a connection of its own where the client allows it.
+// valkey-go pipelines every command onto shared connections and only moves a pipeline off them past
+// ClientOption.BlockingPipeline limit, which counts commands: a batch of large values stays far below that count
+// and still holds the connection long enough to stall every read queued behind it.
+func (c *Cache[K, V]) doMultiLarge(ctx context.Context, cmds []valkeylib.Completed) error {
+	if !c.singleNode {
+		return doMultiErr(c.client.DoMulti(ctx, cmds...)) // a cluster pipeline spans slots, which cannot be dedicated
+	}
+	dedicated, cancel := c.client.Dedicate()
+	defer cancel()
+	return doMultiErr(dedicated.DoMulti(ctx, cmds...))
+}
+
+// doMultiLargeResults is doMultiLarge for a pipeline whose replies the caller reads.
+func (c *Cache[K, V]) doMultiLargeResults(ctx context.Context, cmds []valkeylib.Completed) []valkeylib.ValkeyResult {
+	if !c.singleNode {
+		return c.client.DoMulti(ctx, cmds...)
+	}
+	dedicated, cancel := c.client.Dedicate()
+	defer cancel()
+	return dedicated.DoMulti(ctx, cmds...)
 }
 
 // doMultiErr returns the first error of a DoMulti result set.

@@ -35,6 +35,14 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   map them all a second time for the pipeline - so with a prefixing key function it paid two string allocations per
   key. On redispipe the discarded copy was boxed as well.
 
+### Fixed
+
+- The rueidis and valkey adapters send oversized pipelines on a dedicated connection. Both clients auto-pipeline
+  onto shared connections and only split off a pipeline past `ClientOption.BlockingPipeline`, which counts commands -
+  a write-back batch of large values stays far below that limit yet holds the connection long enough to stall
+  reads behind it. Cluster clients keep the shared pipeline (cross-slot batches can't be dedicated). Pool-based adapters
+  (go-redis, redigo) take a connection per pipeline and were never affected.
+
 ### Removed
 
 - **`l2/valyala_adapter`** - the memcached backend on [valyala/ybc](https://github.com/valyala/ybc). The client needs
