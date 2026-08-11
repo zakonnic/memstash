@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zakonnic/memstash"
@@ -122,10 +121,10 @@ func newTestScenario(t *testing.T, sink *logSink, l2 memstash.L2Cache[string, []
 	t.Helper()
 	r := &runner[string, []byte]{
 		Scenario: Scenario[string, []byte]{
-			Name: "scenario-test", CacheSize: 64, Value: SessionValue, Equal: bytes.Equal,
+			Name: "scenario-test", CacheSize: 64, WriteKeySpace: 100, Value: SessionValue, Equal: bytes.Equal,
 		}.withDefaults(),
-		truth:  xsync.NewMapOf[string, []byte](),
 		errLog: sink.errLog,
+		verify: true,
 	}
 	opts := r.cacheOptions()
 	if l2 != nil {
@@ -143,9 +142,9 @@ func TestFailingL2ReachesErrorLog(t *testing.T) {
 	sink := newLogSink(t)
 	s := newTestScenario(t, sink, failingL2{})
 
-	s.doGet(context.Background(), s.Key(1)) // L1 miss -> L2 read error, returned to the caller
-	s.doSet(context.Background(), s.Key(2)) // write-back: the error surfaces only through OnL2Error
-	s.cache.Close()                         // flushes the write-back buffer
+	s.doGet(context.Background(), 1) // L1 miss -> L2 read error, returned to the caller
+	s.doSet(context.Background(), 2) // write-back: the error surfaces only through OnL2Error
+	s.cache.Close()                  // flushes the write-back buffer
 
 	assert.Equal(t, []string{"cache operation failed", "l2 error"}, sink.messages())
 	assert.Equal(t, int64(2), s.errs.Load(), "both errors must show up in the scenario's errors_total")
@@ -157,7 +156,7 @@ func TestPanickingL2ReachesErrorLog(t *testing.T) {
 	sink := newLogSink(t)
 	s := newTestScenario(t, sink, panickingL2{})
 
-	s.doSet(context.Background(), s.Key(1))
+	s.doSet(context.Background(), 1)
 	s.cache.Close()
 
 	assert.Contains(t, sink.messages(), "panic in cache")

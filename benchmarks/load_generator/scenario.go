@@ -11,8 +11,8 @@ import (
 )
 
 // Scenario describes one cache under load: the shape of its key space, its mix of operations, and the values it
-// holds. It is plain data - New builds the cache, the source-of-truth map and the workers around it. K and V are the
-// cache's own key and value types: the cache is built as memstash.Cache[K, V] and Value must produce a V for a K.
+// holds. It is plain data - New builds the cache and the workers around it. K and V are the cache's own key and value
+// types: the cache is built as memstash.Cache[K, V] and Value must produce a V for a K.
 //
 // Goroutines, KeySpace, ZipfV, Key, Equal and Codec take a default when left at zero (see the fields); everything
 // else is used as written and checked by New.
@@ -45,7 +45,8 @@ type Scenario[K comparable, V any] struct {
 	// [0, WriteKeySpace). Zipf never reaches the tail of the key space. To cover it, a share of operations uses
 	// uniformly random keys instead (RandomPercent).
 	KeySpace int // defaults to WriteKeySpace
-	// WriteKeySpace is also how many keys the source of truth holds, so it decides what verification costs in heap.
+	// WriteKeySpace is where the writes stop: nothing ever writes a key above it, so a Get that hits one is a value
+	// from somewhere else and gets logged as such.
 	WriteKeySpace int
 	ZipfS         float64
 	ZipfV         float64 // defaults to 1
@@ -55,8 +56,8 @@ type Scenario[K comparable, V any] struct {
 	// Key turns the index the distributions draw into the key itself, so it must map distinct n to distinct keys.
 	// String keys default to "<Name>:key-<n>"; any other key type has to bring its own.
 	Key func(n int) K
-	// Value returns the value stored under a key. It must be a pure function of the key: it is called once per write
-	// key before the run, and every Get is verified against what it returned.
+	// Value returns the value stored under a key. It must be a pure deterministic function of the key: it is called
+	// on every Set, and again on every Get that hits, to verify what came back.
 	Value func(key K) V
 	// Equal decides whether a value read back is the one that was written. Defaults to reflect.DeepEqual.
 	Equal func(got, want V) bool

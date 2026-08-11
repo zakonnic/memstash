@@ -1,7 +1,7 @@
 // Command load-generator drives three memstash caches under continuous, independent load until interrupted
 // (Ctrl+C / SIGTERM), writing a per-scenario stats snapshot once a minute. Values come from the workload package
-// and are verified against a source-of-truth map after every Get; errors land in errors.log. Scenarios, their
-// Redis L2, and every knob are configurable via config.yaml (see buildScenarios for the built-in defaults).
+// and are verified against the scenario's Value function after every Get; errors land in errors.log. Scenarios,
+// their Redis L2, and every knob are configurable via config.yaml (see buildScenarios for the built-in defaults).
 //
 // It is also the reference for using the package from your own main: build a []load_generator.Scenario, hand it to
 // New, Start it.
@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/dustin/go-humanize"
 	load_generator "github.com/zakonnic/memstash/benchmarks/load_generator"
 )
 
@@ -51,7 +50,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Println("building scenarios and their source-of-truth maps...")
+	log.Println("building scenarios...")
 	app, err := load_generator.New(scenarios, load_generator.WithLogDir(*logDir))
 	if err != nil {
 		log.Fatalf("cannot start the load generator: %v", err)
@@ -63,9 +62,6 @@ func main() {
 	log.SetOutput(app.Writer())
 	app.PrintScenarios(app.Writer())
 
-	log.Printf("source-of-truth maps and value blob hold %s of heap - the price of verifying every Get. "+
-		"The stats report heap_alloc_bytes with it already subtracted; add "+
-		"the two together for what the process really holds.", humanize.IBytes(uint64(app.TruthHeap())))
 	log.Printf("load generator running %d scenario(s), logging to %s once a minute; press Ctrl+C to stop",
 		len(scenarios), *logDir)
 

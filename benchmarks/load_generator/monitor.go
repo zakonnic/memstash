@@ -27,7 +27,7 @@ func (r *runner[K, V]) monitor(ctx context.Context) {
 		"random_key_sec", r.randomPeriod().Seconds(),
 		"random_cover_sec", r.randomCover().Seconds(),
 		"redis_address", r.RedisAddress, // empty when the scenario runs L1-only
-		"truth_map_heap_bytes", r.truthHeap,
+		"verification", r.verify,
 	)
 
 	cpu, cpuErr := processCPUTime()
@@ -104,7 +104,7 @@ func (r *runner[K, V]) logStats(logger *slog.Logger, start time.Time, prev meter
 		"l2_gets_total", l2Gets,
 		"l2_hits_total", l2Hits,
 		"misses_total", misses,
-		"heap_alloc_bytes", max(int64(mem.HeapAlloc)-r.truthHeap, 0),
+		"heap_alloc_bytes", mem.HeapAlloc,
 		"process_sys_bytes", mem.Sys,
 		"process_goroutines", runtime.NumGoroutine(),
 		"process_cpu_cores", cpuCores,

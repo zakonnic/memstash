@@ -35,7 +35,7 @@ scenarios:
       - 1000
 
   # CDN / static assets: a 1M-object catalog over a 20k-item L1 - the long tail that makes the L2 earn its keep is
-  # the point of this one. Values alias the shared blob, so a catalog this size costs ~90 MB of truth map, not gigabytes.
+  # the point of this one. Values are sliced from a shared blob on demand, so the catalog costs the generator nothing.
   scenario-2:
     size: 20000
     redis_address: "127.0.0.1:43210"

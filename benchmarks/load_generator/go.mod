@@ -3,8 +3,6 @@ module github.com/zakonnic/memstash/benchmarks/load_generator
 go 1.25.0
 
 require (
-	github.com/dustin/go-humanize v1.0.1
-	github.com/puzpuzpuz/xsync/v3 v3.5.1
 	github.com/redis/rueidis v1.0.76
 	github.com/stretchr/testify v1.11.1
 	github.com/zakonnic/memstash v0.9.6
@@ -17,6 +15,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
 )
 
 replace github.com/zakonnic/memstash => ../..

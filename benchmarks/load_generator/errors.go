@@ -42,7 +42,7 @@ func (e *errorLog) opError(scenario, op string, key, value any, err error) {
 	e.logger.Error("cache operation failed", args...)
 }
 
-// badValue records a Get whose value didn't match the source of truth.
+// badValue records a Get whose value didn't match what the scenario's Value returned for the key.
 func (e *errorLog) badValue(scenario string, key, got, want any) {
 	e.count.Add(1)
 	e.logger.Error("value mismatch",

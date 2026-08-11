@@ -550,13 +550,14 @@ Three parallel scenarios, each with its own cache, goroutines, and key space:
 Keys follow Zipf distribution over a key space several times larger than L1 capacity, plus a `random_percent` share drawn uniformly
 instead.
 
-**Every Get is verified** against a pre-computed truth map. Everything that can go wrong lands in `errors.log`.
+**Every Get is verified** against what the scenario's `Value` function returns for that key — `load_generator.WithNoVerification()`
+turns that off when you want the load without the check. Everything that can go wrong lands in `errors.log`.
 Logged once per minute + on shutdown (`scenario-N.log`, JSON lines).
 Tuning via [config.yaml](benchmarks/load_generator/config.yaml). All fields optional.
 
-It is a module of its own, so the same engine can drive your scenarios — the three above
+It's a standalone module, so the same engine can run your own scenarios — the three above
 live in [cmd/load-generator](benchmarks/load_generator/cmd/load-generator) and are nothing but a
-`[]Scenario[K, V]`. You can create the app with `load_generator.New`. 
+`[]Scenario[K, V]`. You can use it as an example and create the app with `load_generator.New`. 
 
 **What you can check:**
 - **Correctness** — empty `errors.log` after hours of 150k+ rps

@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v3"
 	rueidislib "github.com/redis/rueidis"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
@@ -18,16 +16,14 @@ import (
 	"github.com/zakonnic/memstash/tests/workload"
 )
 
-// runner is a Scenario plus everything the run needs: its cache, its source of truth, and its counters. All runners
-// of an app run in parallel, each with its own goroutines and log file.
+// runner is a Scenario plus everything the run needs: its cache, its log file and its counters. All runners of an app
+// run in parallel, each with its own goroutines and log file.
 type runner[K comparable, V any] struct {
 	Scenario[K, V]
 
 	cache       *memstash.Cache[K, V]
 	redisClient rueidislib.Client // nil when L1-only
 
-	// truth holds the value of every write key and is the oracle a Get is checked against.
-	truth  *xsync.MapOf[K, V]
 	errLog *errorLog
 
 	console *console
@@ -36,7 +32,7 @@ type runner[K comparable, V any] struct {
 	logPath       string
 	logFile       *os.File
 	statsInterval time.Duration
-	truthHeap     int64
+	verify        bool
 
 	ops, errs atomic.Int64
 }
@@ -122,25 +118,6 @@ func (r *runner[K, V]) close() {
 	}
 }
 
-// fillTruth populates the source of truth for every write key, in parallel, before any worker runs.
-func (r *runner[K, V]) fillTruth() {
-	r.truth = xsync.NewMapOf[K, V]()
-	workers := runtime.NumCPU()
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func(start int) {
-			defer wg.Done()
-			defer r.errLog.recoverPanic(r.Name, "fill-truth")
-			for n := start; n < r.WriteKeySpace; n += workers {
-				key := r.Key(n)
-				r.truth.Store(key, r.Value(key))
-			}
-		}(w)
-	}
-	wg.Wait()
-}
-
 // run starts the worker goroutines and blocks in the monitor loop until ctx is canceled.
 func (r *runner[K, V]) run(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -216,39 +193,38 @@ func (r *runner[K, V]) doOp(rng *rand.Rand, reads, writes *rand.Zipf) {
 	ctx := context.Background()
 	random := r.RandomPercent > 0 && rng.Intn(100) < r.RandomPercent
 	if rng.Intn(100) < r.ReadPercent {
-		r.doGet(ctx, r.Key(nextKey(rng, reads, r.WriteKeySpace, random)))
+		r.doGet(ctx, nextKey(rng, reads, r.WriteKeySpace, random))
 	} else {
-		r.doSet(ctx, r.Key(nextKey(rng, writes, r.WriteKeySpace, random)))
+		r.doSet(ctx, nextKey(rng, writes, r.WriteKeySpace, random))
 	}
 	r.ops.Add(1)
 }
 
-// doGet reads the key and checks any returned value against the source of truth. Cache/Redis errors and
-// verification failures both count as errors and are logged.
-func (r *runner[K, V]) doGet(ctx context.Context, key K) {
+// doGet reads key n and checks any returned value against what Value returns for it, unless verification is off.
+// Cache/Redis errors and verification failures both count as errors and are logged.
+func (r *runner[K, V]) doGet(ctx context.Context, n int) {
+	key := r.Key(n)
 	got, ok, err := r.cache.Get(ctx, key)
 	switch {
 	case err != nil:
 		r.errs.Add(1)
 		r.errLog.opError(r.Name, "get", key, nil, err)
-	case ok:
-		if want, known := r.truth.Load(key); !known {
+	case ok && r.verify:
+		// Reads run over KeySpace but writes only over WriteKeySpace, so a hit above it is a value nobody wrote.
+		if n >= r.WriteKeySpace {
 			r.errs.Add(1)
 			r.errLog.badKey(r.Name, key, got)
-		} else if !r.Equal(got, want) {
+		} else if want := r.Value(key); !r.Equal(got, want) {
 			r.errs.Add(1)
 			r.errLog.badValue(r.Name, key, got, want)
 		}
 	}
 }
 
-// doSet writes the key's source-of-truth value, so a later Get always has the right bytes to verify against.
-func (r *runner[K, V]) doSet(ctx context.Context, key K) {
-	value, ok := r.truth.Load(key)
-	if !ok { // pre-filled for every write key; defensive fallback
-		value = r.Value(key)
-		r.truth.Store(key, value)
-	}
+// doSet writes what Value returns for key n, so a later Get has the right bytes to verify against.
+func (r *runner[K, V]) doSet(ctx context.Context, n int) {
+	key := r.Key(n)
+	value := r.Value(key)
 	if err := r.cache.Set(ctx, key, value); err != nil {
 		r.errs.Add(1)
 		r.errLog.opError(r.Name, "set", key, value, err)

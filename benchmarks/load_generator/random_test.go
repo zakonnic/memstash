@@ -60,8 +60,7 @@ func TestNextKeyReachesTail(t *testing.T) {
 	assert.Less(t, zipfSeen*3, uniformSeen, "Zipf spends the same draws redrawing its head")
 }
 
-// TestNextKeyStaysInSpace: an out-of-range index would build a key the truth map never heard of and report a bogus
-// anomaly.
+// TestNextKeyStaysInSpace: an out-of-range index would build a key nothing ever writes and report a bogus anomaly.
 func TestNextKeyStaysInSpace(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	z := newZipf(rng, 5, 1.1, 1)

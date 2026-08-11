@@ -3,13 +3,13 @@ package load_generator
 import "github.com/zakonnic/memstash/tests/workload"
 
 // Ready-made Scenario.Value functions, from the workload package the benchmarks use. Each is a pure function of the
-// key, so the source-of-truth map can verify Gets and values stay the same across runs.
+// key, so a Get can be verified against it and values stay the same across runs.
 
-// truthBlobSeed fixes the byte pool the values are sliced from, so it doesn't change between runs.
-const truthBlobSeed = 20260715
+// blobSeed fixes the byte pool the values are sliced from, so it doesn't change between runs.
+const blobSeed = 20260715
 
 var (
-	sharedBlob = workload.NewBlob(truthBlobSeed, workload.DefaultBlobSize)
+	sharedBlob = workload.NewBlob(blobSeed, workload.DefaultBlobSize)
 
 	sessionScenario = workload.SessionScenario{}
 	cdnScenario     = workload.CDNScenario{}

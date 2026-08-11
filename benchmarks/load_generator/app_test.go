@@ -16,7 +16,7 @@ import (
 )
 
 // testScenario is a tiny L1-only scenario: a key space small enough to fill in a blink, a rate low enough not to
-// matter, and values the truth map can verify.
+// matter, and values Value can verify.
 func testScenario(name string) Scenario[string, []byte] {
 	return Scenario[string, []byte]{
 		Name:          name,
@@ -70,8 +70,6 @@ func TestAppRunsUntilContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	app, dir := newTestApp(t, testScenario("scenario-1"), testScenario("scenario-2"))
-
-	assert.Positive(t, app.TruthHeap(), "the truth maps are filled before Start")
 
 	done := make(chan struct{})
 	go func() {
@@ -193,8 +191,25 @@ func TestGenericScenario(t *testing.T) {
 	app.Start(ctx)
 	require.NoError(t, app.Shutdown())
 
-	assert.Zero(t, app.Errors(), "struct values must verify against the truth map like any other")
+	assert.Zero(t, app.Errors(), "struct values must verify against Value like any other")
 	assert.Contains(t, records(t, filepath.Join(dir, "rows.log")), "stats")
+}
+
+// TestWithNoVerification: the option reaches every runner - New is the only place they are built.
+func TestWithNoVerification(t *testing.T) {
+	dir := t.TempDir()
+	out, err := os.Create(filepath.Join(dir, "console.txt"))
+	require.NoError(t, err)
+	t.Cleanup(func() { out.Close() })
+
+	scenarios := []Scenario[string, []byte]{testScenario("scenario-1"), testScenario("scenario-2")}
+	app, err := New(scenarios, WithLogDir(dir), WithOutput(out), WithNoVerification())
+	require.NoError(t, err)
+	t.Cleanup(func() { app.Shutdown() })
+
+	for _, r := range app.runners {
+		assert.False(t, r.verify, r.Name)
+	}
 }
 
 // TestScenarioDefaults: the fields a caller can leave out, and what they become.

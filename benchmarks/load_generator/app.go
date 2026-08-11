@@ -1,7 +1,7 @@
 // Package load_generator drives memstash caches under continuous, verified load. You describe the scenarios; it
-// builds their caches, runs the workers, checks every Get against a source-of-truth map, and writes a stats snapshot
-// per scenario once a minute. Anything that goes wrong - failed operations, values that don't match, panics - lands
-// in errors.log next to the per-scenario logs.
+// builds their caches, runs the workers, checks every Get against the scenario's Value function, and writes a stats
+// snapshot per scenario once a minute. Anything that goes wrong - failed operations, values that don't match,
+// panics - lands in errors.log next to the per-scenario logs.
 //
 //	scenarios := []load_generator.Scenario[string, []byte]{ ... }
 //
@@ -23,7 +23,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -39,10 +38,11 @@ type options struct {
 	logDir        string
 	out           *os.File
 	statsInterval time.Duration
+	verify        bool
 }
 
 func defaultOptions() options {
-	return options{logDir: ".", out: os.Stdout, statsInterval: time.Minute}
+	return options{logDir: ".", out: os.Stdout, statsInterval: time.Minute, verify: true}
 }
 
 // WithLogDir writes errors.log and the per-scenario logs into dir, which is created if it doesn't exist. Default is
@@ -55,6 +55,10 @@ func WithOutput(f *os.File) Option { return func(o *options) { o.out = f } }
 
 // WithStatsInterval sets how often each scenario writes a stats snapshot. Default is a minute.
 func WithStatsInterval(d time.Duration) Option { return func(o *options) { o.statsInterval = d } }
+
+// WithNoVerification stops checking what Gets return: no Value call per hit, no mismatch and no never-written-key
+// errors. Failed operations, L2 errors and panics still reach errors.log.
+func WithNoVerification() Option { return func(o *options) { o.verify = false } }
 
 // openLogging creates the log directory and opens errors.log together with the console it mirrors into.
 func (o options) openLogging() (*console, *errorLog, string, error) {
@@ -88,13 +92,10 @@ type App[K comparable, V any] struct {
 	cancel   context.CancelFunc // stops the run Start is blocked in; nil until it launches
 	stopping sync.Once
 	stopErr  error
-
-	truthHeap int64
 }
 
-// New builds every scenario's cache and source-of-truth map and opens the log files; no load runs until Start, and
-// nothing here needs a context. Filling the truth maps is what takes the time - it touches every write key of every
-// scenario.
+// New builds every scenario's cache and opens the log files; no load runs until Start, and nothing here needs a
+// context.
 //
 // The App holds a Redis client and background goroutines per scenario, so call Shutdown even when Start never runs.
 func New[K comparable, V any](scenarios []Scenario[K, V], opts ...Option) (*App[K, V], error) {
@@ -134,17 +135,13 @@ func New[K comparable, V any](scenarios []Scenario[K, V], opts ...Option) (*App[
 			slot:          i,
 			logPath:       filepath.Join(o.logDir, s.Name+".log"),
 			statsInterval: o.statsInterval,
+			verify:        o.verify,
 		}
 		app.runners = append(app.runners, r)
 		if err := r.open(); err != nil {
 			return nil, app.abort(err)
 		}
 	}
-
-	for _, r := range app.runners {
-		r.fillTruth()
-	}
-	app.truthHeap = measureTruthHeap(app.runners)
 	return app, nil
 }
 
@@ -212,10 +209,6 @@ func (a *App[K, V]) Errors() int64 { return a.errLog.count.Load() }
 // ErrorLogPath is the file those errors go to.
 func (a *App[K, V]) ErrorLogPath() string { return a.errPath }
 
-// TruthHeap is what the source-of-truth maps and the values they hold cost in bytes - the price of verifying every
-// Get. The stats report heap_alloc_bytes with it already subtracted.
-func (a *App[K, V]) TruthHeap() int64 { return a.truthHeap }
-
 // Recover gives a panic that unwound out of the caller a line in errors.log before the runtime prints it and kills
 // the process, then re-panics. Must be deferred directly: defer app.Recover("main").
 func (a *App[K, V]) Recover(where string) {
@@ -223,21 +216,6 @@ func (a *App[K, V]) Recover(where string) {
 		a.errLog.panicked("", where, r)
 		panic(r)
 	}
-}
-
-// measureTruthHeap reads the heap once the truth maps are filled and nothing else is running yet, and gives every
-// runner the same baseline - the maps live in one process heap, so there is nothing per-scenario to measure.
-func measureTruthHeap[K comparable, V any](runners []*runner[K, V]) int64 {
-	runtime.GC()
-	runtime.GC()
-	var mem runtime.MemStats
-	runtime.ReadMemStats(&mem)
-
-	truthHeap := int64(mem.HeapAlloc)
-	for _, r := range runners {
-		r.truthHeap = truthHeap
-	}
-	return truthHeap
 }
 
 // PrintScenarios writes every scenario's effective parameters - defaults filled in, whatever the caller passed
