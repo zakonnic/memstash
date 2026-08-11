@@ -80,6 +80,20 @@ jobs:
       - run: go -C l2/${{ matrix.adapter }} build ./...
       - run: go -C l2/${{ matrix.adapter }} vet ./...
 
+  load-generator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+      # The soak-test engine is its own module, so nothing else in CI compiles it.
+      - run: go -C benchmarks/load_generator build ./...
+      - run: go -C benchmarks/load_generator vet ./...
+      - run: go -C benchmarks/load_generator test -race -count=1 ./...
+        timeout-minutes: 10
+
   integration:
     runs-on: ubuntu-latest
     # The suite skips any backend that is not listening, so a service that fails to come up degrades to a skip.

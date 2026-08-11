@@ -1,19 +1,26 @@
-package main
+package load_generator
 
 import "github.com/zakonnic/memstash/tests/workload"
 
-// Values come from the workload package; its three scenario types, in declaration order, map onto the three
-// scenarios: scenario-1 -> SessionScenario, scenario-2 -> CDNScenario, scenario-3 -> DBScenario. Each Value is a
-// pure function of the key, so the source-of-truth map can verify Gets and values stay stable across runs.
+// Ready-made Scenario.Value functions, from the workload package the benchmarks use. Each is a pure function of the
+// key, so the source-of-truth map can verify Gets and values stay the same across runs.
 
 // truthBlobSeed fixes the byte pool the values are sliced from, so it doesn't change between runs.
 const truthBlobSeed = 20260715
 
-var sharedBlob = workload.NewBlob(truthBlobSeed, workload.DefaultBlobSize)
+var (
+	sharedBlob = workload.NewBlob(truthBlobSeed, workload.DefaultBlobSize)
 
-// valueFunc returns the deterministic value bytes for a key.
-type valueFunc func(key string) []byte
+	sessionScenario = workload.SessionScenario{}
+	cdnScenario     = workload.CDNScenario{}
+	dbScenario      = workload.DBScenario{}
+)
 
-func sessionValue(key string) []byte { return workload.SessionScenario{}.Value(sharedBlob, key) }
-func cdnValue(key string) []byte     { return workload.CDNScenario{}.Value(sharedBlob, key) }
-func dbValue(key string) []byte      { return workload.DBScenario{}.Value(sharedBlob, key) }
+// SessionValue returns a web-session document, ~170-490 B of JSON.
+func SessionValue(key string) []byte { return sessionScenario.Value(sharedBlob, key) }
+
+// CDNValue returns a static asset, bimodal 0.6-64 KiB, ~7.4 KiB on average.
+func CDNValue(key string) []byte { return cdnScenario.Value(sharedBlob, key) }
+
+// DBValue returns a serialized DB row, ~250 B.
+func DBValue(key string) []byte { return dbScenario.Value(sharedBlob, key) }

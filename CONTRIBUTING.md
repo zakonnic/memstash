@@ -13,6 +13,7 @@ The repository is a multi-module workspace:
 | `/tests` | (part of the root) | the behavioural suite |
 | `/tests/integration` | separate | tests against live Redis, memcached, Postgres, ... |
 | `/benchmarks` | separate | throughput, hit-ratio and footprint benchmarks vs other caches |
+| `/benchmarks/load_generator` | separate | the soak-test engine, importable: describe scenarios, `New`, `Start` |
 | `/l2/<name>_adapter` | separate, one each | L2 adapters, so the core never pulls in a client SDK |
 
 An adapter lives in its own module on purpose: adding one never changes the root module's dependency graph.
@@ -63,6 +64,14 @@ The cross-library benchmarks live in their own module:
 ```sh
 make bench-speed     # throughput vs other caches
 make bench-hitrate   # hit ratio across Zipf, Zipf+scan, one-hit-wonder workloads
+```
+
+So does the load generator, which is a module of its own so importing it never touches the benchmark module's
+dependencies:
+
+```sh
+make load-generator        # build ./cmd/load-generator into benchmarks/bin
+make test-load-generator   # its own tests, under -race
 ```
 
 ## Style

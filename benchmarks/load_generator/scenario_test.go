@@ -1,4 +1,4 @@
-package main
+package load_generator
 
 import (
 	"bytes"
@@ -12,10 +12,10 @@ import (
 )
 
 // logOneStats runs a single stats snapshot through a logger of its own and returns the record it wrote.
-func logOneStats(t *testing.T, s *scenario) map[string]any {
+func logOneStats(t *testing.T, r *runner[string, []byte]) map[string]any {
 	t.Helper()
 	var buf bytes.Buffer
-	s.logStats(slog.New(slog.NewJSONHandler(&buf, nil)), time.Now(), meter{t: time.Now()})
+	r.logStats(slog.New(slog.NewJSONHandler(&buf, nil)), time.Now(), meter{t: time.Now()})
 
 	var record map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &record))
@@ -37,12 +37,15 @@ func TestStatsHeapIsNetOfTruthMap(t *testing.T) {
 
 // TestMeasureTruthHeapSharesOneBaseline: the maps live in one process heap, so every scenario reports the same tax.
 func TestMeasureTruthHeapSharesOneBaseline(t *testing.T) {
-	scenarios := []*scenario{{name: "scenario-1"}, {name: "scenario-2"}}
+	runners := []*runner[string, []byte]{
+		{Scenario: Scenario[string, []byte]{Name: "scenario-1"}},
+		{Scenario: Scenario[string, []byte]{Name: "scenario-2"}},
+	}
 
-	truthHeap := measureTruthHeap(scenarios)
+	truthHeap := measureTruthHeap(runners)
 
 	assert.Positive(t, truthHeap)
-	for _, s := range scenarios {
-		assert.Equal(t, truthHeap, s.truthHeap)
+	for _, r := range runners {
+		assert.Equal(t, truthHeap, r.truthHeap)
 	}
 }

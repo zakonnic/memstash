@@ -20,6 +20,7 @@ ADAPTERS = \
 	l2/tarantool_adapter \
 	l2/valyala_adapter
 TAGS = v$(V) $(addsuffix /v$(V), $(ADAPTERS))
+MODULES = . benchmarks benchmarks/load_generator tests/integration $(ADAPTERS)
 
 .PHONY: help
 help: ## Show help message
@@ -41,7 +42,14 @@ lint-fix: ## Linter tries to fix issues automatically
 
 .PHONY: test
 test: ## Run local tests
-	go test -v ./...
+	go test -v -race ./...
+test-load-generator: ## Run the load generator's own tests
+	go -C benchmarks/load_generator test -race ./...
+test-all: ## Run all tests
+	@for m in $(MODULES); do \
+		echo "==> $$m"; \
+		go -C $$m test -race ./... \
+	done
 
 cover-gen: ## Generate merged test coverage across all packages (tests/ and l2/ exercise the root and internal packages)
 	@mkdir -p var

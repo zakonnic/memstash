@@ -554,6 +554,10 @@ instead.
 Logged once per minute + on shutdown (`scenario-N.log`, JSON lines).
 Tuning via [config.yaml](benchmarks/load_generator/config.yaml). All fields optional.
 
+It is a module of its own, so the same engine can drive your scenarios — the three above
+live in [cmd/load-generator](benchmarks/load_generator/cmd/load-generator) and are nothing but a
+`[]Scenario[K, V]`. You can create the app with `load_generator.New`. 
+
 **What you can check:**
 - **Correctness** — empty `errors.log` after hours of 150k+ rps
 - **Real hit rates** — configure `size`, `key_space`, `zipf_s` to match your service

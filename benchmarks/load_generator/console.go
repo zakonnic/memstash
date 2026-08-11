@@ -1,4 +1,4 @@
-package main
+package load_generator
 
 import (
 	"fmt"

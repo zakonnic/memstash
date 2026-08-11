@@ -1,4 +1,4 @@
-package main
+package load_generator
 
 import (
 	"math"
@@ -75,13 +75,13 @@ func TestNextKeyStaysInSpace(t *testing.T) {
 // all of them have. The second is the first times ln(N), which is what makes uniform draws a slow way to cover a
 // large space.
 func TestRandomTiming(t *testing.T) {
-	s := &scenario{writeKeySpace: 20_000_000, rps: evenSplit(40, 40_000), randomPercent: 5}
+	s := Scenario[string, []byte]{WriteKeySpace: 20_000_000, RPS: EvenSplit(40, 40_000), RandomPercent: 5}
 
 	assert.Equal(t, 10_000*time.Second, s.randomPeriod(), "20M keys / (40k rps * 5%)")
 	assert.InEpsilon(t, math.Log(20_000_000), s.randomCover().Seconds()/s.randomPeriod().Seconds(), 0.001)
 	assert.InDelta(t, 46.7, s.randomCover().Hours(), 0.1)
 
-	off := &scenario{writeKeySpace: 100, rps: []float64{1_000}}
+	off := Scenario[string, []byte]{WriteKeySpace: 100, RPS: []float64{1_000}}
 	assert.Zero(t, off.randomPeriod())
 	assert.Zero(t, off.randomCover())
 }

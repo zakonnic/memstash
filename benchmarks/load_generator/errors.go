@@ -1,4 +1,4 @@
-package main
+package load_generator
 
 import (
 	"encoding/hex"
@@ -10,7 +10,8 @@ import (
 )
 
 // errorLog is the shared JSON-lines sink for every runtime error (timestamp, scenario, key/value, error text). slog
-// handlers are concurrency-safe, so all workers share one instance.
+// handlers are concurrency-safe, so all workers share one instance. Keys and values arrive as any: one log serves
+// every scenario whatever its K and V.
 type errorLog struct {
 	logger *slog.Logger
 	file   *os.File
@@ -31,33 +32,34 @@ func newErrorLog(path string, con *console) (*errorLog, error) {
 
 func (e *errorLog) Close() error { return e.file.Close() }
 
-// opError records a Get/Set error from the cache.
-func (e *errorLog) opError(scenario, op, key string, valueLen int, err error) {
+// opError records a Get/Set error from the cache; value is nil on the read side.
+func (e *errorLog) opError(scenario, op string, key, value any, err error) {
 	e.count.Add(1)
-	e.logger.Error("cache operation failed",
-		"scenario", scenario, "op", op, "key", key, "value_len", valueLen, "error", err.Error())
+	args := []any{"scenario", scenario, "op", op, "key", keyText(key), "error", err.Error()}
+	if value != nil {
+		args = append(args, "value", valueDigest(value))
+	}
+	e.logger.Error("cache operation failed", args...)
 }
 
-// mismatch records a Get whose value didn't match the source of truth. Values can be tens of KiB, so it logs
-// lengths and hex prefixes rather than the full payloads.
-func (e *errorLog) mismatch(scenario, key string, got, want []byte) {
+// badValue records a Get whose value didn't match the source of truth.
+func (e *errorLog) badValue(scenario string, key, got, want any) {
 	e.count.Add(1)
 	e.logger.Error("value mismatch",
-		"scenario", scenario, "key", key,
-		"got_len", len(got), "want_len", len(want),
-		"got_prefix", hexPrefix(got), "want_prefix", hexPrefix(want))
+		"scenario", scenario, "key", keyText(key),
+		"got", valueDigest(got), "want", valueDigest(want))
 }
 
-// anomaly records a hit on a key the scenario never wrote - a sign of contamination in the shared L2.
-func (e *errorLog) anomaly(scenario, key string, got []byte) {
+// badKey records a hit on a key the scenario never wrote - a sign of contamination in the shared L2.
+func (e *errorLog) badKey(scenario string, key, got any) {
 	e.count.Add(1)
 	e.logger.Error("hit on never-written key",
-		"scenario", scenario, "key", key, "got_len", len(got), "got_prefix", hexPrefix(got))
+		"scenario", scenario, "key", keyText(key), "got", valueDigest(got))
 }
 
-func (e *errorLog) l2Error(scenario, key string, err error) {
+func (e *errorLog) l2Error(scenario string, key any, err error) {
 	e.count.Add(1)
-	e.logger.Error("l2 error", "scenario", scenario, "key", key, "error", err.Error())
+	e.logger.Error("l2 error", "scenario", scenario, "key", keyText(key), "error", err.Error())
 }
 
 func (e *errorLog) cachePanic(scenario string, recovered any, handled bool) {
@@ -77,10 +79,29 @@ func (e *errorLog) panicked(scenario, where string, recovered any) {
 		"scenario", scenario, "where", where, "panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
 }
 
-func hexPrefix(b []byte) string {
-	const n = 16
-	if len(b) > n {
-		b = b[:n]
+// keyText renders a key of any type as one string, so the JSON log and its console copy show the same thing - slog
+// would otherwise write a struct key as an object in one and a Go literal in the other.
+func keyText(key any) string {
+	if s, ok := key.(string); ok {
+		return s
 	}
-	return hex.EncodeToString(b)
+	return fmt.Sprint(key)
+}
+
+// valueDigest describes a value without dumping it: values run to tens of KiB, so bytes and strings are logged as a
+// length plus a short prefix, and anything else as its %v cut to the same order of size.
+func valueDigest(value any) string {
+	const prefix = 16
+	switch v := value.(type) {
+	case []byte:
+		return fmt.Sprintf("len=%d hex=%s", len(v), hex.EncodeToString(v[:min(prefix, len(v))]))
+	case string:
+		return fmt.Sprintf("len=%d str=%q", len(v), v[:min(prefix, len(v))])
+	default:
+		text := fmt.Sprint(value)
+		if len(text) > 4*prefix {
+			text = text[:4*prefix] + "..."
+		}
+		return text
+	}
 }

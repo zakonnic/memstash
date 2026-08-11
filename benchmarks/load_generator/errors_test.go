@@ -1,6 +1,7 @@
-package main
+package load_generator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -98,9 +99,9 @@ func (s *logSink) consoleText() string {
 func TestErrorLogWritesEveryKind(t *testing.T) {
 	sink := newLogSink(t)
 
-	sink.errLog.opError("scenario-1", "get", "scenario-1:key-1", 0, errL2Down)
-	sink.errLog.mismatch("scenario-1", "scenario-1:key-2", []byte("got"), []byte("want"))
-	sink.errLog.anomaly("scenario-1", "scenario-1:key-3", []byte("got"))
+	sink.errLog.opError("scenario-1", "get", "scenario-1:key-1", nil, errL2Down)
+	sink.errLog.badValue("scenario-1", "scenario-1:key-2", []byte("got"), []byte("want"))
+	sink.errLog.badKey("scenario-1", "scenario-1:key-3", []byte("got"))
 	sink.errLog.l2Error("scenario-1", "scenario-1:key-4", errL2Down)
 	sink.errLog.cachePanic("scenario-1", "boom", true)
 	sink.errLog.panicked("scenario-1", "worker", "boom")
@@ -116,23 +117,24 @@ func TestErrorLogWritesEveryKind(t *testing.T) {
 	assert.Contains(t, console, "l2 is down")
 }
 
-// newTestScenario builds a scenario with the same handler wiring the real ones get; a nil l2 leaves it L1-only.
-func newTestScenario(t *testing.T, sink *logSink, l2 memstash.L2Cache[string, []byte]) *scenario {
+// newTestScenario builds a runner with the same handler wiring the real ones get; a nil l2 leaves it L1-only.
+func newTestScenario(t *testing.T, sink *logSink, l2 memstash.L2Cache[string, []byte]) *runner[string, []byte] {
 	t.Helper()
-	s := &scenario{
-		name:   "scenario-test",
-		value:  sessionValue,
+	r := &runner[string, []byte]{
+		Scenario: Scenario[string, []byte]{
+			Name: "scenario-test", CacheSize: 64, Value: SessionValue, Equal: bytes.Equal,
+		}.withDefaults(),
 		truth:  xsync.NewMapOf[string, []byte](),
 		errLog: sink.errLog,
 	}
-	opts := append(s.cacheOptions(), memstash.WithMemoryCapacity(64))
+	opts := r.cacheOptions()
 	if l2 != nil {
 		opts = append(opts, memstash.WithL2Cache[string, []byte](l2))
 	}
 	cache, err := memstash.New[string, []byte](opts...)
 	require.NoError(t, err)
-	s.cache = cache
-	return s
+	r.cache = cache
+	return r
 }
 
 // TestFailingL2ReachesErrorLog is the end-to-end check that a broken L2 cannot pass unnoticed. The write-back path is
@@ -141,9 +143,9 @@ func TestFailingL2ReachesErrorLog(t *testing.T) {
 	sink := newLogSink(t)
 	s := newTestScenario(t, sink, failingL2{})
 
-	s.doGet(context.Background(), s.keyFor(1)) // L1 miss -> L2 read error, returned to the caller
-	s.doSet(context.Background(), s.keyFor(2)) // write-back: the error surfaces only through OnL2Error
-	s.cache.Close()                            // flushes the write-back buffer
+	s.doGet(context.Background(), s.Key(1)) // L1 miss -> L2 read error, returned to the caller
+	s.doSet(context.Background(), s.Key(2)) // write-back: the error surfaces only through OnL2Error
+	s.cache.Close()                         // flushes the write-back buffer
 
 	assert.Equal(t, []string{"cache operation failed", "l2 error"}, sink.messages())
 	assert.Equal(t, int64(2), s.errs.Load(), "both errors must show up in the scenario's errors_total")
@@ -155,7 +157,7 @@ func TestPanickingL2ReachesErrorLog(t *testing.T) {
 	sink := newLogSink(t)
 	s := newTestScenario(t, sink, panickingL2{})
 
-	s.doSet(context.Background(), s.keyFor(1))
+	s.doSet(context.Background(), s.Key(1))
 	s.cache.Close()
 
 	assert.Contains(t, sink.messages(), "panic in cache")
