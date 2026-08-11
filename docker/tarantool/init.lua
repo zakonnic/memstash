@@ -2,7 +2,7 @@
 -- tarantool_adapter expects ([key string, value varbinary, expire_at unsigned], primary index on the key).
 local cfg = {
     listen = 3301,
-    memtx_memory = 384 * 1024 * 1024,
+    memtx_memory = 6 * 1024 * 1024 * 1024,
     net_msg_max = 1024,
     log_level = 5,
     -- no WAL and no periodic snapshots (only set on initial startup)

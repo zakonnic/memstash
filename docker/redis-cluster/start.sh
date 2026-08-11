@@ -5,6 +5,7 @@
 set -e
 
 PORTS="${REDIS_CLUSTER_PORTS:-7001 7002 7003}"
+MAXMEMORY="${REDIS_CLUSTER_MAXMEMORY:-2300mb}" # per node
 
 for port in $PORTS; do
   redis-server \
@@ -13,7 +14,7 @@ for port in $PORTS; do
     --cluster-config-file "/tmp/nodes-$port.conf" \
     --cluster-node-timeout 5000 \
     --cluster-announce-ip 127.0.0.1 \
-    --maxmemory 512mb \
+    --maxmemory "$MAXMEMORY" \
     --maxmemory-policy allkeys-lru \
     --save '' \
     --appendonly no \

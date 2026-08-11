@@ -14,14 +14,15 @@ services:
   redis:
     image: redis:7-alpine
     # A single-node cache: LRU eviction, no persistence (no disk writes), keepalive on long-idle connections.
+    # maxmemory counts only the dataset - the gap to mem_limit absorbs fragmentation and client output buffers.
     command:
       - redis-server
-      - --maxmemory 768mb
+      - --maxmemory 7gb
       - --maxmemory-policy allkeys-lru
       - --save ''
       - --appendonly no
       - --tcp-keepalive 60
-    mem_limit: 1g
+    mem_limit: 8g
     ports:
       - "43210:6379"
     healthcheck:
@@ -32,16 +33,21 @@ services:
 
   # A 3-master Redis Cluster in one container, emulating a production cache cluster; /tmp is a tmpfs so
   # the cluster-config file and node logs never touch the disk. To remap, override REDIS_CLUSTER_PORTS.
+  # The maxmemory below is per node: 3 x 2300mb = 6.9g of dataset under the same 8g ceiling the single node gets.
   redis-cluster:
     image: redis:7-alpine
     command: ["sh", "/redis-cluster/start.sh"]
     environment:
       REDIS_CLUSTER_PORTS: "43211 43212 43213"
+      REDIS_CLUSTER_MAXMEMORY: "2300mb"
     volumes:
       - ./redis-cluster:/redis-cluster:ro
-    tmpfs:
-      - /tmp
-    mem_limit: 2g
+      # capped: a tmpfs defaults to half the VM's RAM.
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 128m
+    mem_limit: 8g
     ports:
       - "43211:43211"
       - "43212:43212"
@@ -56,12 +62,12 @@ services:
     image: valkey/valkey:8-alpine
     command:
       - valkey-server
-      - --maxmemory 768mb
+      - --maxmemory 7gb
       - --maxmemory-policy allkeys-lru
       - --save ''
       - --appendonly no
       - --tcp-keepalive 60
-    mem_limit: 1g
+    mem_limit: 8g
     ports:
       - "43221:6379"
     healthcheck:
@@ -72,8 +78,9 @@ services:
 
   memcached:
     image: memcached:1.6-alpine
-    command: ["memcached", "-m", "512", "-c", "2048", "-t", "4"]
-    mem_limit: 1024m
+    # -m bounds the slab storage only; connection buffers and the hash table live on top of it.
+    command: ["memcached", "-m", "7168", "-c", "2048", "-t", "4"]
+    mem_limit: 8g
     ports:
       - "43214:11211"
     # memcached has no built-in healthcheck command; the TCP port opening is the readiness signal.
@@ -84,17 +91,17 @@ services:
     command:
       - postgres
       - -c
-      - shared_buffers=256MB
+      - shared_buffers=2GB
       - -c
-      - effective_cache_size=1024MB
+      - effective_cache_size=6GB
       - -c
-      - work_mem=8MB
+      - work_mem=16MB
       - -c
-      - maintenance_work_mem=64MB
+      - maintenance_work_mem=512MB
       - -c
       - random_page_cost=1.1
       - -c
-      - max_wal_size=2GB
+      - max_wal_size=4GB
       - -c
       - checkpoint_timeout=15min
       - -c
@@ -109,7 +116,9 @@ services:
       POSTGRES_USER: memstash
       POSTGRES_PASSWORD: memstash
       POSTGRES_DB: memstash
-    mem_limit: 1024m
+    mem_limit: 8g
+    # parallel workers put their shared segments in /dev/shm, which docker defaults to 64m.
+    shm_size: 1g
     ports:
       - "43215:5432"
     healthcheck:
@@ -122,13 +131,13 @@ services:
     image: mariadb:11
     # durability relaxed to spare the disk.
     command:
-      - --innodb-buffer-pool-size=636M
+      - --innodb-buffer-pool-size=5G
       - --innodb-flush-log-at-trx-commit=2
       - --innodb-doublewrite=0
       - --max-connections=200
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --innodb-log-file-size=512M
+      - --innodb-log-file-size=1G
       - --innodb-io-capacity=2000
       - --innodb-io-capacity-max=4000
     environment:
@@ -136,7 +145,7 @@ services:
       MARIADB_USER: memstash
       MARIADB_PASSWORD: memstash
       MARIADB_DATABASE: memstash
-    mem_limit: 1024m
+    mem_limit: 8g
     ports:
       - "43216:3306"
     healthcheck:
@@ -147,14 +156,18 @@ services:
 
   mongo:
     image: mongo:7
-    command: ["mongod", "--wiredTigerCacheSizeGB", "0.35", "--auth"]
+    command: ["mongod", "--wiredTigerCacheSizeGB", "2", "--auth"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: memstash
       MONGO_INITDB_ROOT_PASSWORD: memstash
-    # the ephemeral data dir lives on a tmpfs to keep it off the disk.
-    tmpfs:
-      - /data/db
-    mem_limit: 1024m
+    # the ephemeral data dir lives on a tmpfs to keep it off the disk, so the files are charged to mem_limit too:
+    # 4g of data plus the 2g cache leaves the container room to breathe. An uncapped tmpfs defaults to half the VM.
+    volumes:
+      - type: tmpfs
+        target: /data/db
+        tmpfs:
+          size: 4g
+    mem_limit: 8g
     ports:
       - "43217:27017"
     healthcheck:
@@ -165,8 +178,9 @@ services:
 
   dynamodb:
     image: amazon/dynamodb-local
-    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
-    mem_limit: 1024m
+    # -inMemory keeps the tables in the JVM heap, and the JVM would otherwise take a quarter of mem_limit for it.
+    command: ["-Xmx6g", "-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    mem_limit: 8g
     ports:
       - "43218:8000"
 
@@ -177,7 +191,8 @@ services:
     command: ["asd", "--config-file", "/etc/aerospike/memstash.conf"]
     volumes:
       - ./aerospike/aerospike.conf:/etc/aerospike/memstash.conf:ro
-    mem_limit: 2g
+    # data-size in the config bounds the records; the primary index (64 B each) is charged on top of it.
+    mem_limit: 8g
     ports:
       - "43219:3000"
     healthcheck:
@@ -191,7 +206,7 @@ services:
     command: ["tarantool", "/opt/tarantool/init.lua"]
     volumes:
       - ./tarantool/init.lua:/opt/tarantool/init.lua:ro
-    mem_limit: 1024m
+    mem_limit: 8g
     ports:
       - "43220:3301"
     healthcheck:
