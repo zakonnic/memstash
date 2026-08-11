@@ -160,21 +160,23 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	if c.singleNode {
-		args := make([]interface{}, len(keys))
-		size := 0
-		for i, key := range keys {
-			storageKey := c.keyFunc(key)
-			args[i] = storageKey
-			size += len(storageKey) + argWireOverhead
-		}
-		if size <= multiKeyBudget {
-			return redispiperedis.AsError(c.sync.Do(ctx, "DEL", args...))
-		}
-	}
-	requests := make([]redispiperedis.Request, len(keys))
+	storageKeys := make([]string, len(keys))
+	size := 0
 	for i, key := range keys {
-		requests[i] = redispiperedis.Req("DEL", c.keyFunc(key))
+		storageKeys[i] = c.keyFunc(key)
+		size += len(storageKeys[i]) + argWireOverhead
+	}
+	if c.singleNode && size <= multiKeyBudget {
+		// Boxing happens here only: the SendMany path below takes the keys as they are.
+		args := make([]interface{}, len(storageKeys))
+		for i, storageKey := range storageKeys {
+			args[i] = storageKey
+		}
+		return redispiperedis.AsError(c.sync.Do(ctx, "DEL", args...))
+	}
+	requests := make([]redispiperedis.Request, len(storageKeys))
+	for i, storageKey := range storageKeys {
+		requests[i] = redispiperedis.Req("DEL", storageKey)
 	}
 	return sendManyErr(c.sync.SendMany(ctx, requests))
 }
@@ -187,16 +189,17 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	if length == 0 {
 		return found, nil
 	}
-	if c.orderedMget {
+	storageKeys := make([]string, length)
+	size := 0
+	for i, key := range keys {
+		storageKeys[i] = c.keyFunc(key)
+		size += len(storageKeys[i]) + argWireOverhead
+	}
+	if c.orderedMget && size <= multiKeyBudget {
+		// Boxing happens here only: the SendMany path below takes the keys as they are.
 		args := make([]interface{}, length)
-		size := 0
-		for i, key := range keys {
-			storageKey := c.keyFunc(key)
+		for i, storageKey := range storageKeys {
 			args[i] = storageKey
-			size += len(storageKey) + argWireOverhead
-		}
-		if size > multiKeyBudget {
-			return c.batchGetSendMany(ctx, keys)
 		}
 		result := c.sync.Do(ctx, "MGET", args...)
 		if err := redispiperedis.AsError(result); err != nil {
@@ -222,15 +225,16 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		}
 		return found, nil
 	}
-	return c.batchGetSendMany(ctx, keys)
+	return c.batchGetSendMany(ctx, keys, storageKeys)
 }
 
-// batchGetSendMany is the per-key BatchGet path: a SendMany batch of GETs.
-func (c *Cache[K, V]) batchGetSendMany(ctx context.Context, keys []K) (memstash.List[K, V], error) {
+// batchGetSendMany is the per-key BatchGet path: a SendMany batch of GETs. storageKeys is the caller's already
+// mapped keys, positionally matching keys.
+func (c *Cache[K, V]) batchGetSendMany(ctx context.Context, keys []K, storageKeys []string) (memstash.List[K, V], error) {
 	found := make(memstash.List[K, V], 0, len(keys))
-	requests := make([]redispiperedis.Request, len(keys))
-	for i, key := range keys {
-		requests[i] = redispiperedis.Req("GET", c.keyFunc(key))
+	requests := make([]redispiperedis.Request, len(storageKeys))
+	for i, storageKey := range storageKeys {
+		requests[i] = redispiperedis.Req("GET", storageKey)
 	}
 	for i, result := range c.sync.SendMany(ctx, requests) {
 		if err := redispiperedis.AsError(result); err != nil {

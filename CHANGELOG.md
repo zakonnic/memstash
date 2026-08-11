@@ -30,6 +30,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - The write-back worker carries a lifetime per queued write instead of always using the cache's TTL: batches now end
   where the lifetime changes, since `BatchSet` takes one per call. A restored snapshot's remaining lifetime reaches L2
   through the write-back path too, which it previously lost.
+- `BatchGet` and `BatchDelete` on the go-redis and redispipe adapters map every key once and hand the result to
+  whichever branch runs. A batch over the wire budget used to map its keys for the multi-key command, drop them, and
+  map them all a second time for the pipeline - so with a prefixing key function it paid two string allocations per
+  key. On redispipe the discarded copy was boxed as well.
 
 ### Removed
 

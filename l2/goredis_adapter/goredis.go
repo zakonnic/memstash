@@ -184,36 +184,34 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	if length == 0 {
 		return found, nil
 	}
-	if c.orderedMget {
-		storageKeys := make([]string, length)
-		size := 0
-		for i, key := range keys {
-			storageKeys[i] = c.keyFunc(key)
-			size += len(storageKeys[i]) + argWireOverhead
+	storageKeys := make([]string, length)
+	size := 0
+	for i, key := range keys {
+		storageKeys[i] = c.keyFunc(key)
+		size += len(storageKeys[i]) + argWireOverhead
+	}
+	if c.orderedMget && size <= MultiKeyBudget {
+		replies, err := c.client.MGet(ctx, storageKeys...).Result()
+		if err != nil {
+			return found, err
 		}
-		if size <= MultiKeyBudget {
-			replies, err := c.client.MGet(ctx, storageKeys...).Result()
+		for i, reply := range replies {
+			data, ok := reply.(string)
+			if !ok { // nil = a miss
+				continue
+			}
+			value, err := c.codec.Unmarshal(stringToBytes(data))
 			if err != nil {
 				return found, err
 			}
-			for i, reply := range replies {
-				data, ok := reply.(string)
-				if !ok { // nil = a miss
-					continue
-				}
-				value, err := c.codec.Unmarshal(stringToBytes(data))
-				if err != nil {
-					return found, err
-				}
-				found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
-			}
-			return found, nil
+			found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 		}
+		return found, nil
 	}
 	cmds := make([]*redis.StringCmd, length)
 	if _, err := c.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		for i, key := range keys {
-			cmds[i] = pipe.Get(ctx, c.keyFunc(key))
+		for i, storageKey := range storageKeys {
+			cmds[i] = pipe.Get(ctx, storageKey)
 		}
 		return nil
 	}); err != nil && !errors.Is(err, redis.Nil) { // Pipelined reports redis.Nil for ordinary misses
