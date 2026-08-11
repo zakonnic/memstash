@@ -76,6 +76,7 @@ var suiteScenarios = []struct {
 	{name: "WriteBackFlushOnClose", run: suiteWriteBackFlushOnClose},
 	{name: "WriteBackVisibleAfterWait", run: suiteWriteBackVisibleAfterWait},
 	{name: "BatchSetGet", run: suiteBatchSetGet},
+	{name: "BatchOverBudget", run: suiteBatchOverBudget},
 	{name: "EvictedItemsServedFromL2", run: suiteEvictedItemsServedFromL2},
 	{name: "GetOrLoadPrefersL2", run: suiteGetOrLoadPrefersL2},
 	{name: "TTLReachesL2", run: suiteTTLReachesL2},
@@ -231,6 +232,43 @@ func suiteBatchSetGet(t *testing.T, newCache cacheFactory) {
 	// The L2 part of the batch must have been promoted into the reader's memory.
 	_, ok = reader.GetFromMemory("k0")
 	assert.True(t, ok, "BatchGet did not promote L2 hits to L1")
+}
+
+// suiteBatchOverBudget drives batches past the adapters' multi-key byte budget, where one command turns into several
+// pipeline flushes. The split is where a batch can silently pair a key with another key's value.
+func suiteBatchOverBudget(t *testing.T, newCache cacheFactory) {
+	ctx := context.Background()
+	prefix := uniquePrefix(t)
+	writer := newCache(t, prefix, memstash.WithWritePolicy(memstash.WriteThrough))
+
+	// 40 x 2 KiB busts every adapter's budget - the smallest is 3500 bytes - without reaching any backend's item limit.
+	const batch, valueSize = 40, 2048
+	items := make(memstash.List[string, string], 0, batch)
+	keys := make([]string, 0, batch)
+	for i := 0; i < batch; i++ {
+		key := fmt.Sprintf("big%d", i)
+		items = append(items, memstash.KeyVal[string, string]{
+			Key:   key,
+			Value: fmt.Sprintf("%d:%s", i, strings.Repeat(string(rune('a'+i%26)), valueSize)),
+		})
+		keys = append(keys, key)
+	}
+	require.NoError(t, writer.BatchSet(ctx, items))
+
+	reader := newCache(t, prefix)
+	got, err := reader.BatchGet(ctx, keys)
+	require.NoError(t, err)
+	require.Len(t, got, batch, "an over-budget batch lost keys")
+	gotByKey := got.ToMap()
+	for _, item := range items {
+		assert.Equal(t, item.Value, gotByKey[item.Key], "key %s came back holding another key's value", item.Key)
+	}
+
+	require.NoError(t, writer.BatchDelete(ctx, keys))
+	after := newCache(t, prefix)
+	got, err = after.BatchGet(ctx, keys)
+	require.NoError(t, err)
+	assert.Empty(t, got, "an over-budget BatchDelete left keys behind")
 }
 
 // suiteEvictedItemsServedFromL2 is the intended default mode of the two-level cache: the hot set lives in L1, a long
