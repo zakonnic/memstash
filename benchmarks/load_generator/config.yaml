@@ -39,6 +39,7 @@ scenarios:
   scenario-2:
     size: 20000
     redis_address: "127.0.0.1:43210"
+    workers: 4
     goroutines: 5
     read_percent: 50
     key_space: 1000000
@@ -57,6 +58,7 @@ scenarios:
   scenario-3:
     size: 10000000
     redis_address: "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"
+    workers: 4
     goroutines: 40
     read_percent: 90
     key_space: 20000000

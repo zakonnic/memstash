@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zakonnic/memstash"
 )
 
 // scenarioOverride is a scenario's config block; a nil pointer (or empty slice) keeps the built-in default.
@@ -21,6 +23,8 @@ type scenarioOverride struct {
 	RandomPercent *int `yaml:"random_percent"`
 	// RedisAddress: "" means L1 only, a comma-separated list dials a cluster; omitted keeps the built-in default.
 	RedisAddress *string `yaml:"redis_address"`
+	// Workers is the write-back pool size (memstash.WithWriteBackWorkers); omitted keeps the cache's own default.
+	Workers *int `yaml:"workers"`
 }
 
 // fileConfig is the root of config.yaml: an override block per scenario name.
@@ -80,6 +84,13 @@ func applyOverride(s *bytesScenario, cfg fileConfig) error {
 	}
 	if o.RandomPercent != nil {
 		s.RandomPercent = *o.RandomPercent
+	}
+	if o.Workers != nil {
+		if *o.Workers <= 0 {
+			return fmt.Errorf("%s: workers=%d must be positive", s.Name, *o.Workers)
+		}
+		// Appended last, so it overrides a WithWriteBackWorkers the scenario set itself.
+		s.CacheOptions = append(s.CacheOptions, memstash.WithWriteBackWorkers(*o.Workers))
 	}
 	return nil
 }

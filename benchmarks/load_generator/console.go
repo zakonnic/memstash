@@ -91,6 +91,10 @@ func (c *console) draw() {
 		if line == "" {
 			continue
 		}
+		if c.drawn > 0 {
+			fmt.Fprintln(c.out) // a status wraps over several rows, so a blank one is what shows where the next begins
+			c.drawn++
+		}
 		for _, row := range wrapLine(line, width-1) {
 			fmt.Fprintln(c.out, row)
 			c.drawn++

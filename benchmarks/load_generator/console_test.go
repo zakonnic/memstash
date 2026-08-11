@@ -35,10 +35,10 @@ func TestConsoleStatusBlockStaysBelow(t *testing.T) {
 	con.setStatus(1, "scenario-2 second")
 
 	out := read()
-	assert.Contains(t, out, "\x1b[2F\x1b[J", "the two drawn status lines must be erased before anything is written over")
-	assert.True(t, strings.HasSuffix(out, "scenario-1 first\nscenario-2 second\n"), "got: %q", out)
+	assert.Contains(t, out, "\x1b[3F\x1b[J", "the drawn rows, blank separator included, must be erased before anything is written over")
+	assert.True(t, strings.HasSuffix(out, "scenario-1 first\n\nscenario-2 second\n"), "got: %q", out)
 	assert.Equal(t, 1, strings.Count(out, "cache operation failed"), "an error is printed once and never redrawn")
-	assert.Equal(t, 2, con.drawn)
+	assert.Equal(t, 3, con.drawn, "two status lines and the blank row between them")
 }
 
 // TestConsoleWithoutTerminal: with output redirected there is nothing to rewrite, so every line just scrolls.

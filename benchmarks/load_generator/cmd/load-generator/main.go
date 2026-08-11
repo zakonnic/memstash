@@ -64,6 +64,7 @@ func main() {
 
 	log.Printf("load generator running %d scenario(s), logging to %s once a minute; press Ctrl+C to stop",
 		len(scenarios), *logDir)
+	log.Println()
 
 	app.Start(ctx)
 
