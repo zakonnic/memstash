@@ -2,17 +2,15 @@ package main
 
 import (
 	"bytes"
+	"time"
 
 	"github.com/zakonnic/memstash"
-	load_generator "github.com/zakonnic/memstash/benchmarks/load_generator"
+	"github.com/zakonnic/memstash/benchmarks/load_generator"
 )
 
 // bytesScenario is what all three built-ins are: string keys, []byte values. Another pair of types would work just
 // as well - the engine builds a memstash.Cache[K, V] out of whatever the scenario is instantiated with.
 type bytesScenario = load_generator.Scenario[string, []byte]
-
-// defaultRedisClusterAddr is the docker-compose Redis cluster; scenarios 2 and 3 use it unless config overrides.
-const defaultRedisClusterAddr = "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"
 
 // buildScenarios returns the three built-in scenarios with config.yaml's overrides applied. Write your own set like
 // this one and hand it to load_generator.New - nothing here is privileged.
@@ -32,12 +30,12 @@ func buildScenarios(cfg fileConfig) ([]bytesScenario, error) {
 			Description: "Web-session store (workload.SessionScenario, ~170-490 B JSON documents). Read-heavy, " +
 				"Zipf-skewed: L1 holds the hot head, the tail misses or goes to L2. The parameters below are the " +
 				"effective ones.",
-			CacheSize:     20_000,
+			CacheSize:     100_000,
 			Goroutines:    10,
-			RPS:           load_generator.EvenSplit(10, 10_000),
+			RPS:           load_generator.EvenSplit(10, 1_000_000),
 			ReadPercent:   90,
-			KeySpace:      150_000,
-			WriteKeySpace: 150_000,
+			KeySpace:      100_000_000,
+			WriteKeySpace: 100_000_000,
 			ZipfS:         1.01,
 			ZipfV:         1,
 			Value:         load_generator.SessionValue,
@@ -49,7 +47,9 @@ func buildScenarios(cfg fileConfig) ([]bytesScenario, error) {
 			Description: "CDN / static assets (workload.CDNScenario, bimodal 0.6-64 KiB blobs, ~7.4 KiB average). " +
 				"Zipf-skewed, balanced read/write: L1 holds the hot head, L2 serves the tail.",
 			CacheSize:     20_000,
-			RedisAddress:  redisSeeds(defaultRedisClusterAddr),
+			CacheOptions:  []memstash.Option{memstash.WithTTL(10 * time.Minute)},
+			L2ClientType:  load_generator.Rueidis,
+			Address:       seeds("127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"),
 			Goroutines:    5,
 			RPS:           load_generator.EvenSplit(5, 10_000),
 			ReadPercent:   50,
@@ -69,8 +69,9 @@ func buildScenarios(cfg fileConfig) ([]bytesScenario, error) {
 				"first goroutine is the hot one, the rest share the remaining rps. The parameters below are the " +
 				"effective ones.",
 			CacheSize:     10_000_000,
-			CacheOptions:  []memstash.Option{byteWeighted},
-			RedisAddress:  redisSeeds(defaultRedisClusterAddr),
+			CacheOptions:  []memstash.Option{byteWeighted, memstash.WithTTL(time.Hour)},
+			L2ClientType:  load_generator.Valkey,
+			Address:       seeds("127.0.0.1:43221"),
 			Goroutines:    40,
 			RPS:           rps3,
 			ReadPercent:   90,

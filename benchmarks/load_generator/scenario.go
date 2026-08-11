@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/zakonnic/memstash"
@@ -28,8 +29,11 @@ type Scenario[K comparable, V any] struct {
 	// CacheOptions are passed to the cache after the ones the app sets itself (stats, capacity, and the handlers
 	// feeding errors.log), so they can override any of them. A non-string K with an L2 needs l2.WithKeyFunc here.
 	CacheOptions []memstash.Option
-	// RedisAddress lists the rueidis seed nodes used as L2; empty runs the scenario on L1 alone.
-	RedisAddress []string
+	// Address lists the L2 seed nodes; empty runs the scenario on L1 alone. One entry dials a single server, several
+	// a cluster where the client has one - see ServerType for which do.
+	Address []string
+	// L2ClientType is the adapter dialed at Address. Defaults to Rueidis.
+	L2ClientType ServerType
 	// Codec encodes values for that L2. Defaults to raw pass-through for []byte and string values and to JSON for
 	// everything else.
 	Codec memstash.Codec[V]
@@ -83,6 +87,9 @@ func (s Scenario[K, V]) withDefaults() Scenario[K, V] {
 	}
 	if s.ZipfV == 0 {
 		s.ZipfV = 1
+	}
+	if s.L2ClientType == "" {
+		s.L2ClientType = Rueidis
 	}
 	if s.Key == nil {
 		s.Key = stringKeys[K](s.Name) // nil for every K but string
@@ -144,6 +151,15 @@ func (s Scenario[K, V]) validate() error {
 	if s.WriteKeySpace <= 0 || s.WriteKeySpace > s.KeySpace {
 		return fmt.Errorf("%s: WriteKeySpace=%d must be > 0 and <= KeySpace=%d",
 			s.Name, s.WriteKeySpace, s.KeySpace)
+	}
+	if len(s.Address) == 0 {
+		return nil // L1 only: the server type is never dialed
+	}
+	if !s.L2ClientType.valid() {
+		return fmt.Errorf("%s: unknown L2ClientType %q, want one of %v", s.Name, s.L2ClientType, ServerTypes())
+	}
+	if len(s.Address) > 1 && slices.Contains(singleNodeOnly, s.L2ClientType) {
+		return fmt.Errorf("%s: L2ClientType %q takes one address, got %d", s.Name, s.L2ClientType, len(s.Address))
 	}
 	return nil
 }

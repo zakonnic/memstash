@@ -18,7 +18,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	load_generator "github.com/zakonnic/memstash/benchmarks/load_generator"
+	"github.com/zakonnic/memstash/benchmarks/load_generator"
 )
 
 func main() {

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/zakonnic/memstash"
+	"github.com/zakonnic/memstash/benchmarks/load_generator"
+	"gopkg.in/yaml.v3"
 )
 
 // scenarioOverride is a scenario's config block; a nil pointer (or empty slice) keeps the built-in default.
@@ -21,8 +24,10 @@ type scenarioOverride struct {
 	ZipfS         *float64  `yaml:"zipf_s"` // Zipf skew (>1); higher = more concentrated on hot keys
 	// RandomPercent is the share of operations drawing their key uniformly instead of from the Zipf head.
 	RandomPercent *int `yaml:"random_percent"`
-	// RedisAddress: "" means L1 only, a comma-separated list dials a cluster; omitted keeps the built-in default.
-	RedisAddress *string `yaml:"redis_address"`
+	// Address: "" means L1 only, a comma-separated list dials a cluster; omitted keeps the built-in default.
+	Address *string `yaml:"address"`
+	// L2ClientType names the adapter dialed at Address (see load_generator.ServerTypes); omitted keeps the default.
+	L2ClientType *string `yaml:"l2_client_type"`
 	// Workers is the write-back pool size (memstash.WithWriteBackWorkers); omitted keeps the cache's own default.
 	Workers *int `yaml:"workers"`
 }
@@ -41,8 +46,10 @@ func loadConfig(path string) (fileConfig, error) {
 		}
 		return fileConfig{}, err
 	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
 	var cfg fileConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) { // EOF is an empty file, which is a valid config
 		return fileConfig{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return cfg, nil
@@ -61,8 +68,11 @@ func applyOverride(s *bytesScenario, cfg fileConfig) error {
 		}
 		s.CacheSize = *o.Size
 	}
-	if o.RedisAddress != nil {
-		s.RedisAddress = redisSeeds(*o.RedisAddress)
+	if o.Address != nil {
+		s.Address = seeds(*o.Address)
+	}
+	if o.L2ClientType != nil {
+		s.L2ClientType = load_generator.ServerType(*o.L2ClientType)
 	}
 	if o.Goroutines != nil {
 		s.Goroutines = *o.Goroutines
@@ -95,8 +105,8 @@ func applyOverride(s *bytesScenario, cfg fileConfig) error {
 	return nil
 }
 
-// redisSeeds splits a comma-separated address list into L2 seed nodes; blank means no L2.
-func redisSeeds(addr string) []string {
+// seeds splits a comma-separated address list into L2 seed nodes; blank means no L2.
+func seeds(addr string) []string {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return nil

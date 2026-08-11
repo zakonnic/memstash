@@ -235,7 +235,7 @@ func (a *App[K, V]) PrintScenarios(w io.Writer) error {
 		if _, err := fmt.Fprintf(&buf, "  cache size:      %d\n", r.CacheSize); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(&buf, "  redis (L2):      %s\n", redisDisplay(r.RedisAddress)); err != nil {
+		if _, err := fmt.Fprintf(&buf, "  L2:              %s\n", l2Display(r.Scenario)); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(&buf, "  goroutines:      %d\n", r.Goroutines); err != nil {
@@ -275,9 +275,9 @@ func randomDisplay[K comparable, V any](s Scenario[K, V]) string {
 		s.RandomPercent, s.randomPeriod().Round(time.Second), s.randomCover().Round(time.Minute))
 }
 
-func redisDisplay(seeds []string) string {
-	if len(seeds) == 0 {
+func l2Display[K comparable, V any](s Scenario[K, V]) string {
+	if len(s.Address) == 0 {
 		return "none (L1 only)"
 	}
-	return strings.Join(seeds, ",")
+	return fmt.Sprintf("%s at %s", s.L2ClientType, strings.Join(s.Address, ","))
 }

@@ -70,3 +70,48 @@ func TestNoVerificationLeavesGetsUnchecked(t *testing.T) {
 	assert.Empty(t, sink.messages())
 	assert.Zero(t, s.errs.Load())
 }
+
+// baseScenario is a scenario that validates, so a case only has to set what it is about.
+func baseScenario() Scenario[string, []byte] {
+	return Scenario[string, []byte]{
+		Name: "scenario-test", CacheSize: 64, WriteKeySpace: 100,
+		Goroutines: 1, RPS: []float64{1}, ZipfS: 1.01, Value: SessionValue,
+	}
+}
+
+// TestServerTypeValidation: the server type is checked before anything is dialed, and only where it will be.
+func TestServerTypeValidation(t *testing.T) {
+	t.Run("defaults to rueidis", func(t *testing.T) {
+		s := baseScenario()
+		s.Address = []string{"127.0.0.1:6379"}
+		s = s.withDefaults()
+		assert.Equal(t, Rueidis, s.L2ClientType)
+		assert.NoError(t, s.validate())
+	})
+
+	t.Run("every listed type is accepted", func(t *testing.T) {
+		for _, server := range ServerTypes() {
+			s := baseScenario()
+			s.Address, s.L2ClientType = []string{"127.0.0.1:6379"}, server
+			assert.NoError(t, s.withDefaults().validate(), "%s", server)
+		}
+	})
+
+	t.Run("unknown type", func(t *testing.T) {
+		s := baseScenario()
+		s.Address, s.L2ClientType = []string{"127.0.0.1:6379"}, "postgres"
+		assert.ErrorContains(t, s.withDefaults().validate(), `unknown L2ClientType "postgres"`)
+	})
+
+	t.Run("unknown type without an address", func(t *testing.T) {
+		s := baseScenario()
+		s.L2ClientType = "postgres"
+		assert.NoError(t, s.withDefaults().validate(), "nothing is dialed, so nothing to reject")
+	})
+
+	t.Run("single-node client given a cluster", func(t *testing.T) {
+		s := baseScenario()
+		s.Address, s.L2ClientType = []string{"127.0.0.1:1", "127.0.0.1:2"}, Redigo
+		assert.ErrorContains(t, s.withDefaults().validate(), "takes one address, got 2")
+	})
+}

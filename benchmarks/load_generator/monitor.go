@@ -24,9 +24,8 @@ func (r *runner[K, V]) monitor(ctx context.Context) {
 		"key_space", r.KeySpace,
 		"write_key_space", r.WriteKeySpace,
 		"random_percent", r.RandomPercent,
-		"random_key_sec", r.randomPeriod().Seconds(),
-		"random_cover_sec", r.randomCover().Seconds(),
-		"redis_address", r.RedisAddress, // empty when the scenario runs L1-only
+		"address", r.Address, // empty when the scenario runs L1-only
+		"l2_client", r.L2ClientType,
 		"verification", r.verify,
 	)
 

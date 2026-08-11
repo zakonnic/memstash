@@ -9,41 +9,41 @@
 # Two startup metrics follow from random_percent: how often a given key is touched, and how long until
 # every key has been seen.
 #
-# redis_address: "" = L1 only, "host:port" = one node, comma-separated = cluster.
+# address: "" = L1 only, "host:port" = one node, comma-separated = cluster (where the client has one).
 
 scenarios:
-  # Web sessions: 1.5M live sessions over a 20k-item L1, 1M of them written.
+  # Web sessions: 150M live sessions over a 100k-item L1, 100M of them written.
   scenario-1:
-    size: 20000
-    redis_address: ""
+    size: 100000
+    address: ""
     goroutines: 10
     read_percent: 90
-    key_space: 1500000
-    write_key_space: 1000000
-    zipf_s: 1.01
+    key_space: 150000000
+    write_key_space: 100000000
+    zipf_s: 1.001
     random_percent: 10
     rps:
-      - 1000
-      - 1000
-      - 1000
-      - 1000
-      - 1000
-      - 1000
-      - 1000
-      - 1000
-      - 1000
-      - 1000
+      - 100000
+      - 100000
+      - 100000
+      - 100000
+      - 100000
+      - 100000
+      - 100000
+      - 100000
+      - 100000
+      - 100000
 
-  # CDN / static assets: a 1M-object catalog over a 20k-item L1 - the long tail that makes the L2 earn its keep is
+  # CDN / static assets: a 10M-object catalog over a 20k-item L1 - the long tail that makes the L2 earn its keep is
   # the point of this one. Values are sliced from a shared blob on demand, so the catalog costs the generator nothing.
   scenario-2:
     size: 20000
-    redis_address: "127.0.0.1:43210"
-    workers: 4
+    address: "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"
+    l2_client_type: "rueidis"
     goroutines: 5
     read_percent: 50
-    key_space: 1000000
-    write_key_space: 1000000
+    key_space: 10000000
+    write_key_space: 10000000
     zipf_s: 1.01
     random_percent: 10
     rps:
@@ -54,11 +54,12 @@ scenarios:
       - 20000
 
   # DB rows: a 20M-row table over a byte-weighted L1 (~10 MB holds ~37k rows at ~270 B each).
-  # Redis L2 (cluster). One goroutine drives 10k rps, the remaining 39 share 30k.
+  # Valkey L2. One goroutine drives 10k rps, the remaining 39 share 30k.
   scenario-3:
     size: 10000000
-    redis_address: "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"
-    workers: 4
+    address: "127.0.0.1:43221"
+    l2_client_type: "valkey"
+    workers: 8
     goroutines: 40
     read_percent: 90
     key_space: 20000000

@@ -9,10 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	rueidislib "github.com/redis/rueidis"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
-	rueidis_adapter "github.com/zakonnic/memstash/l2/rueidis_adapter"
 	"github.com/zakonnic/memstash/tests/workload"
 )
 
@@ -21,8 +19,8 @@ import (
 type runner[K comparable, V any] struct {
 	Scenario[K, V]
 
-	cache       *memstash.Cache[K, V]
-	redisClient rueidislib.Client // nil when L1-only
+	cache   *memstash.Cache[K, V]
+	closeL2 func() // releases the dialed client; nil when L1-only
 
 	errLog *errorLog
 
@@ -62,7 +60,7 @@ func (r *runner[K, V]) open() error {
 	r.logFile = f
 
 	opts := append(r.cacheOptions(), r.CacheOptions...)
-	if len(r.RedisAddress) == 0 {
+	if len(r.Address) == 0 {
 		cache, err := memstash.New[K, V](opts...)
 		if err != nil {
 			return fmt.Errorf("%s: %w", r.Name, err)
@@ -71,20 +69,15 @@ func (r *runner[K, V]) open() error {
 		return nil
 	}
 
-	client, err := rueidislib.NewClient(rueidislib.ClientOption{InitAddress: r.RedisAddress})
-	if err != nil {
-		return fmt.Errorf("%s: dial redis %v: %w", r.Name, r.RedisAddress, err)
-	}
 	codec := r.Codec
 	if codec == nil {
 		codec = defaultCodec[V]()
 	}
-	cache, err := rueidis_adapter.NewCache[K, V](client, codec, opts...)
+	cache, closeL2, err := openL2[K, V](r.L2ClientType, r.Address, codec, opts)
 	if err != nil {
-		client.Close()
-		return fmt.Errorf("%s: %w", r.Name, err)
+		return fmt.Errorf("%s: dial %s %v: %w", r.Name, r.L2ClientType, r.Address, err)
 	}
-	r.cache, r.redisClient = cache, client
+	r.cache, r.closeL2 = cache, closeL2
 	return nil
 }
 
@@ -110,8 +103,8 @@ func (r *runner[K, V]) close() {
 	if r.cache != nil {
 		r.cache.Close() // flush write-back to L2 before closing the client
 	}
-	if r.redisClient != nil {
-		r.redisClient.Close()
+	if r.closeL2 != nil {
+		r.closeL2()
 	}
 	if r.logFile != nil {
 		r.logFile.Close()

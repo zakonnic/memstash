@@ -580,7 +580,8 @@ live in [cmd/load-generator](benchmarks/load_generator/cmd/load-generator) and a
 - **Memory/goroutine stability** — flat metrics over hours = no leaks
 - **Load cost** — `process_cpu_cores` at target rps
 - **Throughput ceilings** — `ops_per_sec` below configured rps reveals bottlenecks
-- **Pre-production testing** — point `redis_address` at staging
+- **Adapter comparison** — same scenario, same load, another `l2_client_type`
+- **Pre-production testing** — point `address` at staging
 
 ## Contributing
 
