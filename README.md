@@ -338,26 +338,27 @@ Affects the hit rate — you control which items stay and which get evicted, for
 
 ## Full option list
 
-| Option | Purpose                                                                                                                                       |
-|---|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `WithMemoryCapacity(n)` | L1 capacity in weight units (defaults to 20k).                                                                                                |
-| `WithMemoryBudget(bytes)` | L1 bound in bytes of stored keys and values; derives a size-based cost function automatically (mutually exclusive with `WithMemoryCapacity`). |
-| `WithCostFunc(fn)` | Per-item weight function (e.g. size in bytes).                                                                                                |
-| `WithTTL(d)` | Item lifetime (1-second resolution up to ~36h, proportionally coarser above that); applied to L2 writes too. Required for `SetWithTTL`. |
-| `WithRefreshTTLOnGet()` | Sliding expiration: every L1 hit extends the item by a full `WithTTL` lifetime — including entries written with `SetWithTTL`. |
-| `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`.                                                                  |
-| `WithCustomEvictionPolicy(fn)` | Plug in your own eviction policy: a per-shard factory returning a `memstash.EvictionPolicy` implementation.                                   |
-| `WithPreallocatedSize()` | Allocate every shard's item table up front, at the size filling to capacity would grow it to anyway. Not available with `WithCostFunc` / `WithMemoryBudget`. |
-| `WithShardsCount(n)` | Number of eviction shards (default: auto by GOMAXPROCS).                                                                                      |
-| `WithL2Cache(l2)` | Attach a second level directly.                                                                                                               |
-| `WithWritePolicy(p)` | How writes reach L2, ignored when no L2 is attached: `WriteBack` (default) hands `Set` to the background worker, `WriteThrough` writes on `Set` and returns the L2 error, `WriteDisabled` makes L2 read-only. Deletes follow the same policy as writes. |
-| `WithWriteBackBuffer(n)` | Size of the async write-back buffer.                                                                                                          |
-| `WithBatchingForWriteBack()` / `WithNoBatchingForWriteBack()` / `WithAdaptiveBatchingForWriteBack()` | How the write-back worker drains its buffer to L2: coalesced into `BatchSet` (default), one `Set` per write, or adaptive.                     |
-| `WithGhostSize(n)` | Capacity (in keys) of the S3-FIFO ghost queues and the W-TinyLFU frequency sketch.                                                            |
-| `WithOnL2Error(fn)` | Handler for background L2 errors.                                                                                                             |
-| `WithOnDeletion(fn)` | Handler for every item leaving L1, with the cause (`CauseInvalidation`, `CauseReplacement`, `CauseExpiration`, `CauseEviction`, `CauseOverflow`). |
+| Option | Purpose                                                                                                                                                                                                                                                                 |
+|---|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `WithMemoryCapacity(n)` | L1 capacity in weight units (defaults to 20k).                                                                                                                                                                                                                          |
+| `WithMemoryBudget(bytes)` | L1 bound in bytes of stored keys and values; derives a size-based cost function automatically (mutually exclusive with `WithMemoryCapacity`).                                                                                                                           |
+| `WithCostFunc(fn)` | Per-item weight function (e.g. size in bytes).                                                                                                                                                                                                                          |
+| `WithTTL(d)` | Item lifetime (1-second resolution up to ~36h, proportionally coarser above that); applied to L2 writes too. Required for `SetWithTTL`.                                                                                                                                 |
+| `WithRefreshTTLOnGet()` | Sliding expiration: every L1 hit extends the item by a full `WithTTL` lifetime — including entries written with `SetWithTTL`.                                                                                                                                           |
+| `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`.                                                                                                                                                                                            |
+| `WithCustomEvictionPolicy(fn)` | Plug in your own eviction policy: a per-shard factory returning a `memstash.EvictionPolicy` implementation.                                                                                                                                                             |
+| `WithPreallocatedSize()` | Allocate every shard's item table up front, at the size filling to capacity would grow it to anyway. Not available with `WithCostFunc` / `WithMemoryBudget`.                                                                                                            |
+| `WithShardsCount(n)` | Number of eviction shards (default: auto by GOMAXPROCS).                                                                                                                                                                                                                |
+| `WithL2Cache(l2)` | Attach a second level directly.                                                                                                                                                                                                                                         |
+| `WithWritePolicy(p)` | How writes reach L2, ignored when no L2 is attached: `WriteBack` (default) hands `Set` to the background worker pool, `WriteThrough` writes on `Set` and returns the L2 error, `WriteDisabled` makes L2 read-only. Deletes follow the same policy as writes.            |
+| `WithWriteBackBuffer(n)` | Size of the async write-back buffer for every worker (default: 500).                                                                                                                                                                                                    |
+| `WithWriteBackWorkers(n)` | Number of goroutines draining the write-back buffers (default: 4). Each key belongs to one worker, so its L2 writes keep their order; each worker has its own buffer, and batching happens within it.                                                                   |
+| `WithBatchingForWriteBack()` / `WithNoBatchingForWriteBack()` / `WithAdaptiveBatchingForWriteBack()` | How a write-back worker drains its buffer share to L2: coalesced into `BatchSet` (default), one `Set` per write, or adaptive.                                                                                                                                           |
+| `WithGhostSize(n)` | Capacity (in keys) of the S3-FIFO ghost queues and the W-TinyLFU frequency sketch.                                                                                                                                                                                      |
+| `WithOnL2Error(fn)` | Handler for background L2 errors.                                                                                                                                                                                                                                       |
+| `WithOnDeletion(fn)` | Handler for every item leaving L1, with the cause (`CauseInvalidation`, `CauseReplacement`, `CauseExpiration`, `CauseEviction`, `CauseOverflow`).                                                                                                                       |
 | `WithPanicHandler(fn)` | Handler for the panics the cache recovers on its own goroutines and around a background loader. Receives what `recover()` returned and whether the panic was passed on (to `OnL2Error`, or to waiters as `ErrLoaderPanic`); `false` means the handler is its only trace. |
-| `WithStats()` | Enables the `Stats()` operation counters. Off by default.                                                                                     |
+| `WithStats()` | Enables the `Stats()` operation counters. Off by default.                                                                                                                                                                                                               |
 
 ## L2 Adapters
 
@@ -366,8 +367,8 @@ SDK you don't use. Every adapter offers both an "adapter only" constructor (`New
 `NewBytes`) and an all-in-one two-level constructor (`NewCache`, `NewJSONCache`, `NewBytesCache`),
 plus native batch pipelining where the client supports it.
 
-The write path favors throughput by default: instead of one round trip per key, the background
-write-back worker coalesces the Sets into the adapter's native `BatchSet` (an `MSET` or a pipeline).
+The write path favors throughput by default: instead of one round trip per key, each background
+write-back worker coalesces the Sets into the adapter's native `BatchSet` call (an `MSET` or a pipeline).
 
 | Module | Backend / client | context |
 |---|---|---|

@@ -112,7 +112,8 @@ func (g *gatedL2) deleteCounters() (deletes, batches int, sizes []int) {
 	return g.deleteCalls, g.batchDeleteCalls, append([]int(nil), g.batchDeleteSizes...)
 }
 
-// newWriteBackCache builds a WriteBack cache with an 8-slot buffer over the gated stub.
+// newWriteBackCache builds a WriteBack cache with a single worker over an 8-slot buffer, so the gated stub sees one
+// queue draining in enqueue order.
 func newWriteBackCache(t *testing.T, l2 *gatedL2, opts ...memstash.Option) *memstash.Cache[string, string] {
 	t.Helper()
 	opts = append(opts,
@@ -120,6 +121,7 @@ func newWriteBackCache(t *testing.T, l2 *gatedL2, opts ...memstash.Option) *mems
 		memstash.WithL2Cache[string, string](l2),
 		memstash.WithWritePolicy(memstash.WriteBack),
 		memstash.WithWriteBackBuffer(8),
+		memstash.WithWriteBackWorkers(1),
 	)
 	c, err := memstash.New[string, string](opts...)
 	require.NoError(t, err)

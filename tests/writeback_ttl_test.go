@@ -59,6 +59,7 @@ func newTTLWriteBackCache(t *testing.T, l2 *ttlL2) *memstash.Cache[string, strin
 		memstash.WithL2Cache[string, string](l2),
 		memstash.WithWritePolicy(memstash.WriteBack),
 		memstash.WithWriteBackBuffer(16),
+		memstash.WithWriteBackWorkers(1), // one queue, so the writes below stay in the order the test enqueues them
 	)
 	require.NoError(t, err)
 	t.Cleanup(c.Close)

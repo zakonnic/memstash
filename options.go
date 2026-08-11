@@ -37,6 +37,7 @@ type FieldOverrides struct {
 	writePolicy         *WritePolicy
 	ghostSize           *int
 	writeBackBufferSize *int
+	writeBackWorkers    *int
 	writeBackBatching   *WriteBackBatching
 	onPanic             *PanicHandler
 	statsEnabled        *bool
@@ -89,6 +90,9 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 	}
 	if fields.writeBackBufferSize != nil {
 		cfg.WriteBackBufferSize = *fields.writeBackBufferSize
+	}
+	if fields.writeBackWorkers != nil {
+		cfg.WriteBackWorkers = *fields.writeBackWorkers
 	}
 	if fields.writeBackBatching != nil {
 		cfg.WriteBackBatching = *fields.writeBackBatching
@@ -192,9 +196,14 @@ func WithGhostSize(ghostSize int) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.ghostSize = &ghostSize }}
 }
 
-// WithWriteBackBuffer sets Config.WriteBackBufferSize: the buffer size of the background WriteBack worker.
+// WithWriteBackBuffer sets Config.WriteBackBufferSize: the buffer of the WriteBack worker pool.
 func WithWriteBackBuffer(size int) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.writeBackBufferSize = &size }}
+}
+
+// WithWriteBackWorkers sets Config.WriteBackWorkers: how many goroutines drain the WriteBack buffer.
+func WithWriteBackWorkers(workers int) Option {
+	return Option{ApplyField: func(f *FieldOverrides) { f.writeBackWorkers = &workers }}
 }
 
 // withWriteBackBatching builds the option for one WriteBackBatching mode.
@@ -202,13 +211,14 @@ func withWriteBackBatching(mode WriteBackBatching) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.writeBackBatching = &mode }}
 }
 
-// WithBatchingForWriteBack the WriteBack worker drains it's buffer in BatchSet batches (the default).
+// WithBatchingForWriteBack a WriteBack worker drains it's buffer share in BatchSet batches (the default).
 func WithBatchingForWriteBack() Option { return withWriteBackBatching(BatchingFull) }
 
 // WithNoBatchingForWriteBack one Set per write.
 func WithNoBatchingForWriteBack() Option { return withWriteBackBatching(BatchingNone) }
 
-// WithAdaptiveBatchingForWriteBack per-item Sets while the buffer is at most half full, BatchSet batches above.
+// WithAdaptiveBatchingForWriteBack per-item Sets while the worker's buffer share is at most half full, BatchSet
+// batches above.
 func WithAdaptiveBatchingForWriteBack() Option { return withWriteBackBatching(BatchingAdaptive) }
 
 // WithOnL2Error sets Config.OnL2Error: the handler for L2Cache errors that cannot be returned to the caller.

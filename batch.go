@@ -255,7 +255,7 @@ func (c *Cache[K, V]) enqueueDelete(key K) {
 	c.enqueueL2(l2Write[K, V]{key: key, del: true})
 }
 
-// enqueueL2 hands a task to the write-back worker; on overflow or when the cache is closed the task runs
+// enqueueL2 hands a task to the key's write-back worker; on overflow or when the cache is closed the task runs
 // synchronously so nothing is lost.
 func (c *Cache[K, V]) enqueueL2(write l2Write[K, V]) {
 	sync := func() {
@@ -277,7 +277,7 @@ func (c *Cache[K, V]) enqueueL2(write l2Write[K, V]) {
 	default:
 	}
 	select {
-	case c.writeCh <- write:
+	case c.writeQueueOf(write.key) <- write:
 	default:
 		sync()
 	}

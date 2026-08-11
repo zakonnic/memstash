@@ -23,6 +23,7 @@ var (
 	ErrUnknownPolicy       = fmt.Errorf("%w: unknown eviction policy", Error)
 	ErrNilCustomPolicy     = fmt.Errorf("%w: the custom eviction policy factory returned nil", Error)
 	ErrNilLoader           = fmt.Errorf("%w: loader must not be nil", Error)
+	ErrBadWorkers          = fmt.Errorf("%w: WriteBackWorkers must not be negative", Error)
 	ErrBadTTL              = fmt.Errorf("%w: TTL must not be negative", Error)
 	ErrTTLDisabled         = fmt.Errorf("%w: TTL must be enabled - see WithTTL option", Error)
 	ErrPanic               = fmt.Errorf("%w: panic recovered", Error)
@@ -86,11 +87,16 @@ type Config[K comparable, V any] struct {
 	// 0 means choose automatically: MemoryCapacity (but no more than 1<<20) when CostFunc == nil, otherwise 8192.
 	GhostSize int
 
-	// WriteBackBufferSize is the buffer size of the background WriteBack worker. 0 means 1024.
-	// On buffer overflow the write is performed synchronously.
+	// WriteBackBufferSize is the buffer size of each WriteBack worker. 0 means 500. On buffer overflow write is
+	// performed synchronously.
 	WriteBackBufferSize int
 
-	// WriteBackBatching is how the WriteBack worker drains its buffer. Defaults to BatchingFull.
+	// WriteBackWorkers is the number of goroutines draining the WriteBack buffer. 0 means DefaultWriteBackWorkers.
+	// A key always goes to the same worker, so the L2 writes of one key keep their order; the workers themselves
+	// write to L2 concurrently, and batching happens within a worker's own share of the buffer.
+	WriteBackWorkers int
+
+	// WriteBackBatching is how a WriteBack worker drains its share of the buffer. Defaults to BatchingFull.
 	WriteBackBatching WriteBackBatching
 
 	// OnL2Error is an optional handler for L2Cache errors on paths where the error cannot be returned to the caller
@@ -104,7 +110,7 @@ type Config[K comparable, V any] struct {
 	OnDeletion func(key K, value V, cause DeletionCause)
 
 	// OnPanic is an optional handler for the panics the cache recovers instead of letting them end the process:
-	// on its own goroutines (the TTL clock, the write-back worker) and around a loader running in the background.
+	// on its own goroutines (the TTL clock, the write-back workers) and around a loader running in the background.
 	// A loader that panics under a synchronous GetOrLoad is not recovered at all - that panic reaches the caller.
 	OnPanic PanicHandler
 
@@ -158,5 +164,12 @@ func (c *Config[K, V]) writeBackBuffer() int {
 	if c.WriteBackBufferSize > 0 {
 		return c.WriteBackBufferSize
 	}
-	return 1024
+	return 500
+}
+
+func (c *Config[K, V]) writeBackWorkers() int {
+	if c.WriteBackWorkers > 0 {
+		return c.WriteBackWorkers
+	}
+	return DefaultWriteBackWorkers
 }

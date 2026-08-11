@@ -33,8 +33,8 @@ type Codec[V any] interface {
 type WritePolicy uint8
 
 const (
-	// WriteBack writes to L2 asynchronously via a background worker (the default). Close() waits for the buffer to drain. Errors are
-	// delivered to Config.OnL2Error.
+	// WriteBack writes to L2 asynchronously via a pool of background workers (the default). Close() waits for the buffer
+	// to drain. Errors are delivered to Config.OnL2Error.
 	WriteBack WritePolicy = iota
 	// WriteThrough writes to L2 synchronously on Set.
 	WriteThrough
@@ -42,7 +42,7 @@ const (
 	WriteDisabled
 )
 
-// WriteBackBatching defines how the write-back worker drains its buffer into L2.
+// WriteBackBatching defines how a write-back worker drains its queue into L2.
 type WriteBackBatching uint8
 
 const (
@@ -50,13 +50,13 @@ const (
 	BatchingFull WriteBackBatching = iota
 	// BatchingNone sends every write as its own Set.
 	BatchingNone
-	// BatchingAdaptive sends individual Sets until the buffer is half full, then switches to BatchSet.
+	// BatchingAdaptive sends individual Sets until the worker's queue is half full, then switches to BatchSet.
 	BatchingAdaptive
 )
 
-// l2Write is a task for the background write-back worker. A non-nil flush marks a Wait checkpoint instead of a write:
-// the channel is FIFO, so by the time the worker reaches the marker every write enqueued before it has been handed to
-// L2, and closing flush releases the waiter. del marks a BatchDelete task (value and ttl are unused).
+// l2Write is a task for a background write-back worker. A non-nil flush marks a Wait checkpoint instead of a write:
+// a queue is FIFO, so by the time its worker reaches the marker every write enqueued into that queue before it has
+// been handed to L2, and closing flush releases the waiter. del marks a BatchDelete task (value and ttl are unused).
 type l2Write[K comparable, V any] struct {
 	key   K
 	value V

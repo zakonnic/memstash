@@ -1,4 +1,4 @@
-module memstash-bench
+module github.com/zakonnic/memstash/benchmarks
 
 go 1.25.0
 

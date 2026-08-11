@@ -32,6 +32,9 @@ const (
 	TickInterval          = time.Second
 	DefaultMemoryCapacity = 20_000
 
+	// DefaultWriteBackWorkers is the size of the write-back worker pool when WriteBackWorkers is not set.
+	DefaultWriteBackWorkers = 4
+
 	// minTableSlots is the initial table size of every shard.
 	minTableSlots = 64
 
@@ -81,7 +84,9 @@ type Cache[K comparable, V any] struct {
 	writeBackBatching WriteBackBatching
 	onL2Error         func(key K, err error)
 	onPanic           PanicHandler
-	writeCh           chan l2Write[K, V]
+	// writeQueues is one buffer per write-back worker; a key always lands on the same one, so its L2 writes stay
+	// ordered even though the workers run concurrently.
+	writeQueues []chan l2Write[K, V]
 
 	flights []flightBucket[K, V]
 	stats   Stats
@@ -153,6 +158,9 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.TTL < 0 {
 		return nil, ErrBadTTL
 	}
+	if cfg.WriteBackWorkers < 0 {
+		return nil, ErrBadWorkers
+	}
 
 	numShards := cfg.shardCount()
 	c := &Cache[K, V]{
@@ -220,9 +228,14 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	}
 
 	if c.l2WritePolicy == WriteBack {
-		c.writeCh = make(chan l2Write[K, V], cfg.writeBackBuffer())
-		c.wg.Add(1)
-		go c.writeBackLoop()
+		workers := cfg.writeBackWorkers()
+		c.writeQueues = make([]chan l2Write[K, V], workers)
+		c.wg.Add(workers)
+		for i := range c.writeQueues {
+			// worker pool with separate buffers to bind workers to keys
+			c.writeQueues[i] = make(chan l2Write[K, V], cfg.writeBackBuffer())
+			go c.writeBackLoop(c.writeQueues[i])
+		}
 	}
 	return c, nil
 }
@@ -234,15 +247,11 @@ func (c *Cache[K, V]) Close() {
 	c.closeOnce.Do(func() {
 		close(c.stop)
 		c.wg.Wait()
-		if c.writeCh != nil {
-			// Catch writes that slipped into the buffer while the worker was shutting down.
-			for {
-				select {
-				case write := <-c.writeCh:
-					c.flushWrite(write)
-				default:
-					return
-				}
+		// Catch writes that slipped into a buffer while its worker was shutting down. The workers are gone, so
+		// this goroutine is the only receiver and a non-empty queue can always be received from.
+		for _, queue := range c.writeQueues {
+			for len(queue) > 0 {
+				c.flushWrite(queue, <-queue)
 			}
 		}
 	})
@@ -252,18 +261,25 @@ func (c *Cache[K, V]) Close() {
 // it is a checkpoint, not a shutdown: the cache keeps serving traffic. With WriteThrough or WriteDisabled, or while
 // the cache is closing (Close drains the buffer itself), it returns immediately.
 func (c *Cache[K, V]) Wait() {
-	if c.writeCh == nil {
+	if len(c.writeQueues) == 0 {
 		return
 	}
-	flushed := make(chan struct{})
-	select {
-	case c.writeCh <- l2Write[K, V]{flush: flushed}:
-	case <-c.stop:
-		return
+	// Marker sits behind everything enqueued into that queue before this call.
+	markers := make([]chan struct{}, len(c.writeQueues))
+	for i, queue := range c.writeQueues {
+		markers[i] = make(chan struct{})
+		select {
+		case queue <- l2Write[K, V]{flush: markers[i]}:
+		case <-c.stop:
+			return
+		}
 	}
-	select {
-	case <-flushed:
-	case <-c.stop:
+	for _, marker := range markers {
+		select {
+		case <-marker:
+		case <-c.stop:
+			return
+		}
 	}
 }
 
@@ -276,6 +292,15 @@ func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
 
 func (c *Cache[K, V]) keyHash(key K) uint64 {
 	return maphash.Comparable(c.seed, key)
+}
+
+// writeQueueOf is the queue of the write-back worker that owns the key. Multiply-shift maps the hash onto a worker
+// count that need not be a power of two; it takes the high bits, the low ones already picked the shard.
+func (c *Cache[K, V]) writeQueueOf(key K) chan l2Write[K, V] {
+	if len(c.writeQueues) == 1 {
+		return c.writeQueues[0]
+	}
+	return c.writeQueues[((c.keyHash(key)>>32)*uint64(len(c.writeQueues)))>>32]
 }
 
 // Get returns the value from memory, or - on a miss - from L2 (if configured), promoting the found value into memory. A
@@ -873,8 +898,8 @@ func (c *Cache[K, V]) TotalSize() int64 {
 		sh.mu.Unlock()
 	}
 
-	if c.writeCh != nil {
-		total += int64(cap(c.writeCh)) * int64(unsafe.Sizeof(l2Write[K, V]{}))
+	for _, queue := range c.writeQueues {
+		total += int64(cap(queue)) * int64(unsafe.Sizeof(l2Write[K, V]{}))
 	}
 	return total
 }
@@ -933,7 +958,7 @@ func (c *Cache[K, V]) recoverWorker() {
 	}
 }
 
-// recoverWriteBack is recoverWorker for the write-back worker, where a panic comes from the L2 adapter or from
+// recoverWriteBack is recoverWorker for a write-back worker, where a panic comes from the L2 adapter or from
 // OnL2Error itself: it is reported like any other L2 failure, unless the handler is the one that panicked.
 func (c *Cache[K, V]) recoverWriteBack(key K) {
 	r := recover()
@@ -968,28 +993,28 @@ func (c *Cache[K, V]) clockLoop() {
 // WriteBackBatchMax caps one drain batch: the writes are flushed through the adapter's BatchSet.
 const WriteBackBatchMax = 128
 
-// flushWrite hands one write-back task to L2, coalescing the tasks already queued behind it into one BatchSet;
-// a panicking adapter costs this batch, not the worker.
-func (c *Cache[K, V]) flushWrite(first l2Write[K, V]) {
+// flushWrite hands one write-back task to L2, coalescing the tasks already queued behind it in the same worker's
+// queue into one BatchSet; a panicking adapter costs this batch, not the worker.
+func (c *Cache[K, V]) flushWrite(queue chan l2Write[K, V], first l2Write[K, V]) {
 	defer c.recoverWriteBack(first.key)
 	for more := true; more; {
 		if first.flush != nil {
 			close(first.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
 			return
 		}
-		// len(writeCh) is the buffer fill counter the adaptive mode switches on.
+		// len(queue) is the buffer fill counter the adaptive mode switches on.
 		if !first.del && (c.writeBackBatching == BatchingNone ||
-			(c.writeBackBatching == BatchingAdaptive && len(c.writeCh) <= cap(c.writeCh)/2)) {
+			(c.writeBackBatching == BatchingAdaptive && len(queue) <= cap(queue)/2)) {
 			c.writeBatch(List[K, V]{{Key: first.key, Value: first.value}}, first.ttl)
 			return
 		}
-		first, more = c.flushRun(first)
+		first, more = c.flushRun(queue, first)
 	}
 }
 
 // flushRun coalesces the tasks of first's kind queued behind it and delivers them as one batch.
 // A run ends where the kind changes - a delete after writes, or a write carrying a different ttl.
-func (c *Cache[K, V]) flushRun(first l2Write[K, V]) (next l2Write[K, V], more bool) {
+func (c *Cache[K, V]) flushRun(queue chan l2Write[K, V], first l2Write[K, V]) (next l2Write[K, V], more bool) {
 	var sets List[K, V]
 	var deletes []K
 	if first.del {
@@ -999,7 +1024,7 @@ func (c *Cache[K, V]) flushRun(first l2Write[K, V]) (next l2Write[K, V], more bo
 	}
 	for len(sets)+len(deletes) < WriteBackBatchMax {
 		select {
-		case write := <-c.writeCh:
+		case write := <-queue:
 			switch {
 			case write.flush != nil:
 				defer close(write.flush) // a Wait checkpoint must be released even if the delivery panics
@@ -1062,20 +1087,20 @@ func (c *Cache[K, V]) deleteBatch(keys []K) {
 	}
 }
 
-// writeBackLoop is the background worker for asynchronous L2 writes. On shutdown it flushes everything left in the
-// buffer.
-func (c *Cache[K, V]) writeBackLoop() {
+// writeBackLoop is one worker of the asynchronous L2 write pool, draining the queue it owns. On shutdown it flushes
+// everything left in that queue.
+func (c *Cache[K, V]) writeBackLoop(queue chan l2Write[K, V]) {
 	defer c.wg.Done()
 	defer c.recoverWorker() // flushWrite recovers per batch, so reaching this means the loop itself broke
 	for {
 		select {
-		case write := <-c.writeCh:
-			c.flushWrite(write)
+		case write := <-queue:
+			c.flushWrite(queue, write)
 		case <-c.stop:
 			for {
 				select {
-				case write := <-c.writeCh:
-					c.flushWrite(write)
+				case write := <-queue:
+					c.flushWrite(queue, write)
 				default:
 					return
 				}
