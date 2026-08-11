@@ -37,6 +37,8 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 
 ### Fixed
 
+- The write-back worker of a key is now picked with a remainder instead of a multiply-shift, so any `WriteBackWorkers`
+  count spreads evenly by construction. It still divides the hash bits the shard index did not use.
 - The rueidis and valkey adapters send oversized pipelines on a dedicated connection. Both clients auto-pipeline
   onto shared connections and only split off a pipeline past `ClientOption.BlockingPipeline`, which counts commands -
   a write-back batch of large values stays far below that limit yet holds the connection long enough to stall

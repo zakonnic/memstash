@@ -93,7 +93,7 @@ func (b *blockingL2Stub) BatchDelete(context.Context, []string) error { return n
 // TestWriteBackPoolRunsWorkersInParallel: the write-back pool must have as many workers writing to L2 at once as it
 // was configured for - DefaultWriteBackWorkers when the option is not given.
 func TestWriteBackPoolRunsWorkersInParallel(t *testing.T) {
-	for _, workers := range []int{memstash.DefaultWriteBackWorkers, 1, 2, 7} {
+	for _, workers := range []int{memstash.DefaultWriteBackWorkers, 1, 2, 7, 13} {
 		t.Run(fmt.Sprintf("%d workers", workers), func(t *testing.T) {
 			l2 := newBlockingL2Stub(workers)
 			opts := []memstash.Option{

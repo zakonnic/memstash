@@ -294,13 +294,12 @@ func (c *Cache[K, V]) keyHash(key K) uint64 {
 	return maphash.Comparable(c.seed, key)
 }
 
-// writeQueueOf is the queue of the write-back worker that owns the key. Multiply-shift maps the hash onto a worker
-// count that need not be a power of two; it takes the high bits, the low ones already picked the shard.
+// writeQueueOf returns the write-back worker for the key, to spread across any worker count.
 func (c *Cache[K, V]) writeQueueOf(key K) chan l2Write[K, V] {
 	if len(c.writeQueues) == 1 {
 		return c.writeQueues[0]
 	}
-	return c.writeQueues[((c.keyHash(key)>>32)*uint64(len(c.writeQueues)))>>32]
+	return c.writeQueues[(c.keyHash(key)>>32)%uint64(len(c.writeQueues))]
 }
 
 // Get returns the value from memory, or - on a miss - from L2 (if configured), promoting the found value into memory. A
