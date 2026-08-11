@@ -15,6 +15,7 @@ import (
 	goredislib "github.com/redis/go-redis/v9"
 	rueidislib "github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
+	valkeylib "github.com/valkey-io/valkey-go"
 
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
@@ -22,6 +23,7 @@ import (
 	redigo_adapter "github.com/zakonnic/memstash/l2/redigo_adapter"
 	redispipe_adapter "github.com/zakonnic/memstash/l2/redispipe_adapter"
 	rueidis_adapter "github.com/zakonnic/memstash/l2/rueidis_adapter"
+	valkey_adapter "github.com/zakonnic/memstash/l2/valkey_adapter"
 )
 
 func benchAdapterBatch(b *testing.B, store memstash.L2Cache[string, string]) {
@@ -86,6 +88,16 @@ func BenchmarkAdapterBatchRueidis(b *testing.B) {
 	require.NoError(b, err)
 	b.Cleanup(client.Close)
 	store, err := rueidis_adapter.New[string, string](client, l2.StringCodec())
+	require.NoError(b, err)
+	benchAdapterBatch(b, store)
+}
+
+func BenchmarkAdapterBatchValkey(b *testing.B) {
+	requireServer(b, valkeyAddr())
+	client, err := valkeylib.NewClient(valkeylib.ClientOption{InitAddress: []string{valkeyAddr()}})
+	require.NoError(b, err)
+	b.Cleanup(client.Close)
+	store, err := valkey_adapter.New[string, string](client, l2.StringCodec())
 	require.NoError(b, err)
 	benchAdapterBatch(b, store)
 }

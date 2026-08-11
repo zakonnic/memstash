@@ -7,7 +7,7 @@
 # The tests read the addresses from MEMSTASH_TEST_* environment variables (see tests/integration) and skip
 # themselves when a server is not listening.
 #
-# Published ports live in the 43210-43220 block, not on the servers' default ports: those are usually already taken
+# Published ports live in the 43210-43221 block, not on the servers' default ports: those are usually already taken
 # on a dev machine. Inside the containers the services keep their standard ports.
 # To remap published ports, copy docker-compose.override.example.yml to docker-compose.override.yml (gitignored)
 services:
@@ -51,6 +51,24 @@ services:
       interval: 2s
       timeout: 2s
       retries: 30
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    command:
+      - valkey-server
+      - --maxmemory 768mb
+      - --maxmemory-policy allkeys-lru
+      - --save ''
+      - --appendonly no
+      - --tcp-keepalive 60
+    mem_limit: 1g
+    ports:
+      - "43221:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
 
   memcached:
     image: memcached:1.6-alpine

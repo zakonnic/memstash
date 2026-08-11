@@ -11,11 +11,13 @@ import (
 	goredislib "github.com/redis/go-redis/v9"
 	rueidislib "github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
+	valkeylib "github.com/valkey-io/valkey-go"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
 	goredis_adapter "github.com/zakonnic/memstash/l2/goredis_adapter"
 	redispipe_adapter "github.com/zakonnic/memstash/l2/redispipe_adapter"
 	rueidis_adapter "github.com/zakonnic/memstash/l2/rueidis_adapter"
+	valkey_adapter "github.com/zakonnic/memstash/l2/valkey_adapter"
 )
 
 func TestRueidisAdapterCluster(t *testing.T) {
@@ -28,6 +30,24 @@ func TestRueidisAdapterCluster(t *testing.T) {
 	runSuite(t, func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string] {
 		opts = append(opts, l2.WithKeyFunc(l2.PrefixedString(prefix)))
 		c, err := rueidis_adapter.NewCache[string, string](client, l2.StringCodec(), opts...)
+		require.NoError(t, err, "NewCache")
+		t.Cleanup(c.Close)
+		return c
+	})
+}
+
+// There is no separate valkey cluster in docker-compose: valkey-go speaks the same wire protocol, so the redis
+// cluster is enough to cover the adapter's slot-splitting MGET/MSET/DEL paths.
+func TestValkeyAdapterCluster(t *testing.T) {
+	addrs := redisClusterAddrs()
+	requireServer(t, addrs[0])
+	client, err := valkeylib.NewClient(valkeylib.ClientOption{InitAddress: addrs})
+	require.NoError(t, err, "valkey.NewClient")
+	t.Cleanup(client.Close)
+
+	runSuite(t, func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string] {
+		opts = append(opts, l2.WithKeyFunc(l2.PrefixedString(prefix)))
+		c, err := valkey_adapter.NewCache[string, string](client, l2.StringCodec(), opts...)
 		require.NoError(t, err, "NewCache")
 		t.Cleanup(c.Close)
 		return c

@@ -69,7 +69,7 @@ jobs:
           - rueidis_adapter
           - sql_adapter
           - tarantool_adapter
-          - valyala_adapter
+          - valkey_adapter
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -98,7 +98,6 @@ jobs:
     runs-on: ubuntu-latest
     # The suite skips any backend that is not listening, so a service that fails to come up degrades to a skip.
     env:
-      CGO_ENABLED: 0
       MEMSTASH_TEST_REDIS_ADDR: 127.0.0.1:43210
       MEMSTASH_TEST_REDIS_CLUSTER_ADDRS: 127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213
       MEMSTASH_TEST_MEMCACHED_ADDR: 127.0.0.1:43214
@@ -108,6 +107,7 @@ jobs:
       MEMSTASH_TEST_DYNAMO_ADDR: 127.0.0.1:43218
       MEMSTASH_TEST_AEROSPIKE_ADDR: 127.0.0.1:43219
       MEMSTASH_TEST_TARANTOOL_ADDR: 127.0.0.1:43220
+      MEMSTASH_TEST_VALKEY_ADDR: 127.0.0.1:43221
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

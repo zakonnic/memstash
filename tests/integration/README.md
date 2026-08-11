@@ -16,21 +16,14 @@ make down
 ```
 
 Server addresses come from `MEMSTASH_TEST_<SERVER>_ADDR` environment variables (REDIS, REDIS_CLUSTER_ADDRS -
-comma-separated seeds, MEMCACHED, POSTGRES, MYSQL, MONGO, DYNAMO, AEROSPIKE, TARANTOOL), with defaults matching
-docker/docker-compose.yml, which publishes everything in the 43210-43220 block instead of the servers' default ports:
+comma-separated seeds, MEMCACHED, POSTGRES, MYSQL, MONGO, DYNAMO, AEROSPIKE, TARANTOOL, VALKEY), with defaults matching
+docker/docker-compose.yml, which publishes everything in the 43210-43221 block instead of the servers' default ports:
 `127.0.0.1:43210` (redis), `43211-43213` (cluster), `43214` (memcached), `43215` (postgres), `43216` (mysql), `43217`
-(mongo), `43218` (dynamo), `43219` (aerospike), `43220` (tarantool).
+(mongo), `43218` (dynamo), `43219` (aerospike), `43220` (tarantool), `43221` (valkey).
 Set them when remapping ports through docker-compose.override.yml (see the .example next to the compose file). If a
 server isn't listening, the corresponding tests are **skipped**, not failed: a partial environment is useful on its
-own. The redis cluster suite runs the cluster-capable adapters (rueidis, go-redis, redispipe) against the 3-master
-cluster; redigo is single-node only.
-
-`valyala_test.go` only builds with cgo enabled (the ybc client needs a C compiler). If there's no C compiler on the
-system, run with `CGO_ENABLED=0` — the valyala file is excluded from the build and the other adapters are unaffected:
-
-```bash
-CGO_ENABLED=0 go -C tests/integration test ./... -v
-```
+own. The redis cluster suite runs the cluster-capable adapters (rueidis, valkey-go, go-redis, redispipe) against the
+3-master cluster; redigo is single-node only.
 
 ## Scenario suite (runSuite, for each adapter)
 

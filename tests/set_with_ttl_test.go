@@ -83,7 +83,7 @@ func TestSetWithTTLOutlivesTheCacheTTL(t *testing.T) {
 	assert.True(t, ok, "the hour-long entry must still be there")
 }
 
-// TestSetWithTTLRefreshOnGetUsesCacheTTL: documented behaviour - a read under WithRefreshTTLOnGet extends the entry
+// TestSetWithTTLRefreshOnGetUsesCacheTTL: documented behavior - a read under WithRefreshTTLOnGet extends the entry
 // by the cache's TTL, so the custom lifetime holds only until the first refresh.
 func TestSetWithTTLRefreshOnGetUsesCacheTTL(t *testing.T) {
 	ctx := context.Background()

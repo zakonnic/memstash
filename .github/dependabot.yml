@@ -202,12 +202,12 @@ updates:
         patterns: ['*']
 
   - package-ecosystem: gomod
-    directory: /l2/valyala_adapter
+    directory: /l2/valkey_adapter
     schedule:
       interval: weekly
     groups:
-      valyala:
+      valkey:
         patterns: ['*']
-      valyala-security:
+      valkey-security:
         applies-to: security-updates
         patterns: ['*']

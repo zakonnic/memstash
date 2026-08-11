@@ -37,6 +37,7 @@ func mongoAddr() string     { return envAddr("MEMSTASH_TEST_MONGO_ADDR", "127.0.
 func dynamoAddr() string    { return envAddr("MEMSTASH_TEST_DYNAMO_ADDR", "127.0.0.1:43218") }
 func aerospikeAddr() string { return envAddr("MEMSTASH_TEST_AEROSPIKE_ADDR", "127.0.0.1:43219") }
 func tarantoolAddr() string { return envAddr("MEMSTASH_TEST_TARANTOOL_ADDR", "127.0.0.1:43220") }
+func valkeyAddr() string    { return envAddr("MEMSTASH_TEST_VALKEY_ADDR", "127.0.0.1:43221") }
 
 // redisClusterAddrs returns the seed addresses of the 3-node cluster (comma-separated in the environment).
 func redisClusterAddrs() []string {

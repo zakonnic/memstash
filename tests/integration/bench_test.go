@@ -37,6 +37,7 @@ import (
 	goredislib "github.com/redis/go-redis/v9"
 	rueidislib "github.com/redis/rueidis"
 	tarantoollib "github.com/tarantool/go-tarantool/v2"
+	valkeylib "github.com/valkey-io/valkey-go"
 	"github.com/zakonnic/memstash"
 	"github.com/zakonnic/memstash/l2"
 	aerospike_adapter "github.com/zakonnic/memstash/l2/aerospike_adapter"
@@ -52,6 +53,7 @@ import (
 	rueidis_adapter "github.com/zakonnic/memstash/l2/rueidis_adapter"
 	sql_adapter "github.com/zakonnic/memstash/l2/sql_adapter"
 	tarantool_adapter "github.com/zakonnic/memstash/l2/tarantool_adapter"
+	valkey_adapter "github.com/zakonnic/memstash/l2/valkey_adapter"
 	"github.com/zakonnic/memstash/tests/workload"
 	"go.mongodb.org/mongo-driver/mongo"
 	mongooptions "go.mongodb.org/mongo-driver/mongo/options"
@@ -79,7 +81,7 @@ type benchScenario struct {
 var (
 	// web session store: Zipf over 20k session tokens, ~350-650 byte JSON documents.
 	benchSessions = workload.SessionScenario{Catalog: 20_000, TraceLen: benchTraceLen}
-	// CDN / static assets: 75% Zipf over an 8k catalogue + 25% one-hit wonders, bimodal 0.6-32 KB values.
+	// CDN / static assets: 75% Zipf over an 8k catalog + 25% one-hit wonders, bimodal 0.6-32 KB values.
 	benchCDN = workload.CDNScenario{Catalog: 8_000, TraceLen: benchTraceLen, LargeSpan: 24 * 1024}
 	// DB row cache: Zipf point lookups over 20k rows with a recurring 2k-row sequential scan.
 	benchDBRows = workload.DBScenario{Rows: 20_000, ScanRows: 2_000, ChunkSize: 10_000, TraceLen: benchTraceLen}
@@ -153,22 +155,22 @@ func adapterCache(b *testing.B, store memstash.L2Cache[string, []byte], err erro
 }
 
 var (
-	lazyGoredis       lazyClient[*goredislib.Client]
-	lazyRueidis       lazyClient[rueidislib.Client]
-	lazyRedigo        lazyClient[*redigolib.Pool]
-	lazyRedispipe     lazyClient[*redisconn.Connection]
-	lazyRueidisCl     lazyClient[rueidislib.Client]
-	lazyGomemcache    lazyClient[*memcache.Client]
-	lazyMc            lazyClient[*mclib.Client]
-	lazyRainycape     lazyClient[*rainycape.Client]
-	lazyPgxPool       lazyClient[*pgxpool.Pool]
-	lazySQLPg         lazyClient[*sql.DB]
-	lazySQLMy         lazyClient[*sql.DB]
-	lazyMongo         lazyClient[*mongo.Collection]
-	lazyDynamo        lazyClient[*dynamodb.Client]
-	lazyAerospike     lazyClient[*as.Client]
-	lazyTarantool     lazyClient[*tarantoollib.Connection]
-	extraBenchBackend []benchBackend // cgo-only backends (valyala) register themselves here from init()
+	lazyGoredis    lazyClient[*goredislib.Client]
+	lazyRueidis    lazyClient[rueidislib.Client]
+	lazyRedigo     lazyClient[*redigolib.Pool]
+	lazyRedispipe  lazyClient[*redisconn.Connection]
+	lazyRueidisCl  lazyClient[rueidislib.Client]
+	lazyValkey     lazyClient[valkeylib.Client]
+	lazyGomemcache lazyClient[*memcache.Client]
+	lazyMc         lazyClient[*mclib.Client]
+	lazyRainycape  lazyClient[*rainycape.Client]
+	lazyPgxPool    lazyClient[*pgxpool.Pool]
+	lazySQLPg      lazyClient[*sql.DB]
+	lazySQLMy      lazyClient[*sql.DB]
+	lazyMongo      lazyClient[*mongo.Collection]
+	lazyDynamo     lazyClient[*dynamodb.Client]
+	lazyAerospike  lazyClient[*as.Client]
+	lazyTarantool  lazyClient[*tarantoollib.Connection]
 )
 
 func benchBackends(b *testing.B) []benchBackend {
@@ -225,6 +227,16 @@ func benchBackends(b *testing.B) []benchBackend {
 				b.Fatal(err)
 			}
 			store, aerr := rueidis_adapter.New[string, []byte](client, l2.BytesCodec(), l2.WithKeyFunc(l2.PrefixedString(prefix)))
+			return adapterCache(b, store, aerr, opts)
+		}},
+		{name: "valkey/valkey-go", addr: valkeyAddr(), factory: func(b *testing.B, prefix string, opts ...memstash.Option) *memstash.Cache[string, []byte] {
+			client, err := lazyValkey.get(func() (valkeylib.Client, error) {
+				return valkeylib.NewClient(valkeylib.ClientOption{InitAddress: []string{valkeyAddr()}})
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			store, aerr := valkey_adapter.New[string, []byte](client, l2.BytesCodec(), l2.WithKeyFunc(l2.PrefixedString(prefix)))
 			return adapterCache(b, store, aerr, opts)
 		}},
 		{name: "memcached/gomemcache", addr: memcachedAddr(), factory: func(b *testing.B, prefix string, opts ...memstash.Option) *memstash.Cache[string, []byte] {
@@ -407,7 +419,7 @@ func benchBackends(b *testing.B) []benchBackend {
 			return adapterCache(b, store, aerr, opts)
 		}},
 	}
-	return append(backends, extraBenchBackend...)
+	return backends
 }
 
 // benchRunPrefix isolates one process run inside the shared backends.

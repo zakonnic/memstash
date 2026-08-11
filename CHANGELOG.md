@@ -14,6 +14,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   goes to L2 as well. `WithRefreshTTLOnGet` still extends by the cache's own TTL, so a custom lifetime holds until the
   first read that refreshes it.
 - **`ErrTTLDisabled`** - `SetWithTTL` on a cache without a TTL.
+- **`l2/valkey_adapter`** - Valkey backend on [valkey-io/valkey-go](https://github.com/valkey-io/valkey-go), with the
+  same batching as the rueidis adapter: MGET/MSET/DEL multi-key commands while a batch stays under the wire budget, a
+  pipeline of per-key commands above it. Works against a standalone node or a cluster.
 
 ### Changed
 
@@ -23,6 +26,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - The write-back worker carries a lifetime per queued write instead of always using the cache's TTL: batches now end
   where the lifetime changes, since `BatchSet` takes one per call. A restored snapshot's remaining lifetime reaches L2
   through the write-back path too, which it previously lost.
+
+### Removed
+
+- **`l2/valyala_adapter`** - the memcached backend on [valyala/ybc](https://github.com/valyala/ybc). The client needs
+  cgo and hasn't been touched upstream since 2018; the three pure-Go memcached adapters cover the same backend.
 
 ## [0.9.6] - 2026-07-31
 

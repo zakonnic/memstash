@@ -18,7 +18,7 @@ ADAPTERS = \
 	l2/rueidis_adapter \
 	l2/sql_adapter \
 	l2/tarantool_adapter \
-	l2/valyala_adapter
+	l2/valkey_adapter
 TAGS = v$(V) $(addsuffix /v$(V), $(ADAPTERS))
 MODULES = . benchmarks benchmarks/load_generator tests/integration $(ADAPTERS)
 
@@ -91,10 +91,10 @@ bench:
 	go -C benchmarks test -run=xxx -bench='^Benchmark$(NAME)$$' ./...
 endif
 
-integration-tests: ## Run integration tests against live redis/memcached (make up first); CGO off so the cgo-only valyala adapter is skipped
-	CGO_ENABLED=0 go -C tests/integration test ./... -v
+integration-tests: up ## Run integration tests against live L2 servers (make up first)
+	go -C tests/integration test ./... -v
 integration-bench: up ## Run L1+L2 load-profile benchmarks against the live servers (make up first)
-	CGO_ENABLED=0 go -C tests/integration test -run xxx -bench . -benchtime 1s ./...
+	go -C tests/integration test -run xxx -bench . -benchtime 1s ./...
 
 .PHONY: load-generator
 load-generator: ## Build the long-running load generator (+ config.yaml) into benchmarks/bin
