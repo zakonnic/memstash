@@ -14,7 +14,7 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   `BatchGet`, so a key several callers want is read once. The caller blocks as in `Get`, and a full queue makes it
   wait rather than drop anything. Worth it where the adapter has no pipelining of its own (go-redis, `database/sql`)
   and callers outnumber its connection pool; with an auto-pipelining client plain `Get` stays ahead. Sized by
-  **`WithGetAsyncBuffer`** (1024) and **`WithGetAsyncWorkers`** (4), started by the first call that reaches it.
+  **`WithGetBatchedBuffer`** (1024) and **`WithGetBatchedWorkers`** (4), started by the first call that reaches it.
 - **`SetWithTTL`** - a lifetime for one entry. Needs a cache built with `WithTTL` (the expiry scale is fixed at
   construction), rounds the lifetime up to that scale's unit and caps it at the scale's range; the resulting lifetime
   goes to L2 as well. `WithRefreshTTLOnGet` still extends by the cache's own TTL, so a custom lifetime holds until the
