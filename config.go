@@ -18,16 +18,17 @@ var (
 	ErrBadBudget        = fmt.Errorf("%w: MemoryBudget must be positive", Error)
 	ErrPreallocWeighted = fmt.Errorf("%w: PreallocateMap needs an item capacity - a weighted MemoryCapacity "+
 		"(CostFunc, MemoryBudget) does not say how many items fit", Error)
-	ErrBudgetAndCapacity   = fmt.Errorf("%w: MemoryBudget and MemoryCapacity are mutually exclusive", Error)
-	ErrBudgetNeedsCostFunc = fmt.Errorf("%w: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly", Error)
-	ErrUnknownPolicy       = fmt.Errorf("%w: unknown eviction policy", Error)
-	ErrNilCustomPolicy     = fmt.Errorf("%w: the custom eviction policy factory returned nil", Error)
-	ErrNilLoader           = fmt.Errorf("%w: loader must not be nil", Error)
-	ErrBadWorkers          = fmt.Errorf("%w: WriteBackWorkers must not be negative", Error)
-	ErrBadTTL              = fmt.Errorf("%w: TTL must not be negative", Error)
-	ErrTTLDisabled         = fmt.Errorf("%w: TTL must be enabled - see WithTTL option", Error)
-	ErrPanic               = fmt.Errorf("%w: panic recovered", Error)
-	ErrLoaderPanic         = fmt.Errorf("%w: loader panicked", ErrPanic)
+	ErrBudgetAndCapacity    = fmt.Errorf("%w: MemoryBudget and MemoryCapacity are mutually exclusive", Error)
+	ErrBudgetNeedsCostFunc  = fmt.Errorf("%w: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly", Error)
+	ErrUnknownPolicy        = fmt.Errorf("%w: unknown eviction policy", Error)
+	ErrNilCustomPolicy      = fmt.Errorf("%w: the custom eviction policy factory returned nil", Error)
+	ErrNilLoader            = fmt.Errorf("%w: loader must not be nil", Error)
+	ErrBadWorkers           = fmt.Errorf("%w: WriteBackWorkers must not be negative", Error)
+	ErrBadGetBatchedWorkers = fmt.Errorf("%w: GetBatchedWorkers must not be negative", Error)
+	ErrBadTTL               = fmt.Errorf("%w: TTL must not be negative", Error)
+	ErrTTLDisabled          = fmt.Errorf("%w: TTL must be enabled - see WithTTL option", Error)
+	ErrPanic                = fmt.Errorf("%w: panic recovered", Error)
+	ErrLoaderPanic          = fmt.Errorf("%w: loader panicked", ErrPanic)
 )
 
 // PanicHandler is called with whatever recover() returned when the cache swallows a panic. Runs on the goroutine that
@@ -98,6 +99,15 @@ type Config[K comparable, V any] struct {
 
 	// WriteBackBatching is how a WriteBack worker drains its share of the buffer. Defaults to BatchingFull.
 	WriteBackBatching WriteBackBatching
+
+	// GetBatchedBufferSize is the buffer of the queue GetBatched coalesces reads through. 0 means
+	// DefaultGetBatchedBuffer. Nothing is dropped when it fills up - the call waits for room.
+	GetBatchedBufferSize int
+
+	// GetBatchedWorkers is the number of goroutines resolving the coalesced reads, and with that the number of
+	// BatchGet calls that can be in flight at once. 0 means DefaultGetBatchedWorkers. The pool is started by the
+	// first GetBatched that misses memory, so a cache that never calls it runs no extra goroutines.
+	GetBatchedWorkers int
 
 	// OnL2Error is an optional handler for L2Cache errors on paths where the error cannot be returned to the caller
 	// (write-back, the write after a load in GetOrLoad, the L2Cache read inside GetOrLoad before the loader runs).
@@ -172,4 +182,18 @@ func (c *Config[K, V]) writeBackWorkers() int {
 		return c.WriteBackWorkers
 	}
 	return DefaultWriteBackWorkers
+}
+
+func (c *Config[K, V]) getBatchedBuffer() int {
+	if c.GetBatchedBufferSize > 0 {
+		return c.GetBatchedBufferSize
+	}
+	return DefaultGetBatchedBuffer
+}
+
+func (c *Config[K, V]) getBatchedWorkers() int {
+	if c.GetBatchedWorkers > 0 {
+		return c.GetBatchedWorkers
+	}
+	return DefaultGetBatchedWorkers
 }

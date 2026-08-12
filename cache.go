@@ -35,6 +35,12 @@ const (
 	// DefaultWriteBackWorkers is the size of the write-back worker pool when WriteBackWorkers is not set.
 	DefaultWriteBackWorkers = 4
 
+	// DefaultGetBatchedWorkers is the size of the coalescing read pool when GetBatchedWorkers is not set.
+	DefaultGetBatchedWorkers = 4
+
+	// DefaultGetBatchedBuffer is the queue GetBatched coalesces reads through when GetBatchedBufferSize is not set.
+	DefaultGetBatchedBuffer = 1024
+
 	// minTableSlots is the initial table size of every shard.
 	minTableSlots = 64
 
@@ -87,6 +93,9 @@ type Cache[K comparable, V any] struct {
 	// writeQueues is one buffer per write-back worker; a key always lands on the same one, so its L2 writes stay
 	// ordered even though the workers run concurrently.
 	writeQueues []chan l2Write[K, V]
+
+	// batchedGets is the read pool GetBatched coalesces through; it stays dormant until the first call reaches it.
+	batchedGets getWorkerPool[K, V]
 
 	flights []flightBucket[K, V]
 	stats   Stats
@@ -161,6 +170,9 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.WriteBackWorkers < 0 {
 		return nil, ErrBadWorkers
 	}
+	if cfg.GetBatchedWorkers < 0 {
+		return nil, ErrBadGetBatchedWorkers
+	}
 
 	numShards := cfg.shardCount()
 	c := &Cache[K, V]{
@@ -179,6 +191,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		onDeletion:        cfg.OnDeletion,
 		stats:             newStats(cfg.StatsEnabled),
 		stop:              make(chan struct{}),
+		batchedGets:       getWorkerPool[K, V]{size: cfg.getBatchedBuffer(), workers: cfg.getBatchedWorkers()},
 	}
 	if c.l2Cache == nil {
 		c.l2WritePolicy = WriteDisabled
@@ -242,10 +255,11 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 
 // Close stops the background goroutines and waits for the write-back buffer to drain. Repeated calls are safe.
 // A Set that starts strictly after Close returns still reaches L2 (synchronously); a Set racing with Close may
-// lose its asynchronous write.
+// lose its asynchronous write. A GetBatched waiting on the read pool loses nothing: it reads L2 itself.
 func (c *Cache[K, V]) Close() {
 	c.closeOnce.Do(func() {
 		close(c.stop)
+		c.batchedGets.close() // before the wait below: see getPool.close
 		c.wg.Wait()
 		// Catch writes that slipped into a buffer while its worker was shutting down. The workers are gone, so
 		// this goroutine is the only receiver and a non-empty queue can always be received from.
@@ -314,6 +328,11 @@ func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 		var zero V
 		return zero, false, nil
 	}
+	return c.getFromL2(ctx, key)
+}
+
+// getFromL2 is the second-level half of Get: the read itself, its counters and the promotion into memory.
+func (c *Cache[K, V]) getFromL2(ctx context.Context, key K) (V, bool, error) {
 	value, ok, err := c.l2Cache.Get(ctx, key)
 	if err != nil || !ok {
 		c.stats.addL2Misses(1)
@@ -881,7 +900,7 @@ func (c *Cache[K, V]) Weight() int64 {
 
 // TotalSize estimates the total memory footprint of the cache's first-level structures: item tables (items carry
 // their Entry inline), eviction bookkeeping and the fixed parts (the Cache struct, shards, flights buckets,
-// write-back buffer).
+// write-back buffer, read queue).
 //
 // An Entry is counted at its inline size, so heap data referenced by K or V is not included. When CostFunc measures
 // those bytes, TotalSize() + Weight() gives the full footprint.
@@ -900,6 +919,7 @@ func (c *Cache[K, V]) TotalSize() int64 {
 	for _, queue := range c.writeQueues {
 		total += int64(cap(queue)) * int64(unsafe.Sizeof(l2Write[K, V]{}))
 	}
+	total += c.batchedGets.queueBytes()
 	return total
 }
 

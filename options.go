@@ -27,20 +27,22 @@ type Option struct {
 // FieldOverrides accumulates the plain-value per-field options; a nil pointer means "keep the base value". It exists
 // so those options do not have to be generic: they cannot write into Config[K, V] directly without knowing K and V.
 type FieldOverrides struct {
-	memoryCapacity      *int64
-	memoryBudget        *int64
-	ttl                 *time.Duration
-	refreshTTLOnGet     *bool
-	policy              *Policy
-	preallocateTable    *bool
-	shards              *int
-	writePolicy         *WritePolicy
-	ghostSize           *int
-	writeBackBufferSize *int
-	writeBackWorkers    *int
-	writeBackBatching   *WriteBackBatching
-	onPanic             *PanicHandler
-	statsEnabled        *bool
+	memoryCapacity       *int64
+	memoryBudget         *int64
+	ttl                  *time.Duration
+	refreshTTLOnGet      *bool
+	policy               *Policy
+	preallocateTable     *bool
+	shards               *int
+	writePolicy          *WritePolicy
+	ghostSize            *int
+	writeBackBufferSize  *int
+	writeBackWorkers     *int
+	writeBackBatching    *WriteBackBatching
+	getBatchedBufferSize *int
+	getBatchedWorkers    *int
+	onPanic              *PanicHandler
+	statsEnabled         *bool
 }
 
 // configTarget is the marker implemented by every Config instantiation: it lets a typed option distinguish "a Config
@@ -96,6 +98,12 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 	}
 	if fields.writeBackBatching != nil {
 		cfg.WriteBackBatching = *fields.writeBackBatching
+	}
+	if fields.getBatchedBufferSize != nil {
+		cfg.GetBatchedBufferSize = *fields.getBatchedBufferSize
+	}
+	if fields.getBatchedWorkers != nil {
+		cfg.GetBatchedWorkers = *fields.getBatchedWorkers
 	}
 	if fields.onPanic != nil {
 		cfg.OnPanic = *fields.onPanic
@@ -220,6 +228,16 @@ func WithNoBatchingForWriteBack() Option { return withWriteBackBatching(Batching
 // WithAdaptiveBatchingForWriteBack per-item Sets while the worker's buffer share is at most half full, BatchSet
 // batches above.
 func WithAdaptiveBatchingForWriteBack() Option { return withWriteBackBatching(BatchingAdaptive) }
+
+// WithGetBatchedBuffer sets Config.GetBatchedBufferSize: the queue GetBatched coalesces reads through.
+func WithGetBatchedBuffer(size int) Option {
+	return Option{ApplyField: func(f *FieldOverrides) { f.getBatchedBufferSize = &size }}
+}
+
+// WithGetBatchedWorkers sets Config.GetBatchedWorkers: how many goroutines resolve the reads GetBatched coalesces.
+func WithGetBatchedWorkers(workers int) Option {
+	return Option{ApplyField: func(f *FieldOverrides) { f.getBatchedWorkers = &workers }}
+}
 
 // WithOnL2Error sets Config.OnL2Error: the handler for L2Cache errors that cannot be returned to the caller.
 func WithOnL2Error[K comparable, V any](handler func(key K, err error)) Option {

@@ -1,6 +1,6 @@
 module github.com/zakonnic/memstash/l2/goredis_adapter
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/redis/go-redis/v9 v9.22.0
