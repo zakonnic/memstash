@@ -37,7 +37,7 @@ until you touch an adapter:
 
 ```sh
 make up                 # docker compose, ports 43210-43220
-make integration-tests
+make test-integration
 make down
 ```
 

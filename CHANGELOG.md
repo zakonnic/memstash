@@ -5,10 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 Every module - the root and each `l2/*_adapter` - is tagged with the same version.
 
-## [Unreleased]
+## [0.9.7] - 2026-08-12
 
 ### Added
 
+- **`GetBatched`** - `Get` that coalesces its L2 read with the ones other goroutines are making right then: a memory
+  hit is unchanged, a miss joins one shared queue, and a worker pool fetches everything waiting there in a single
+  `BatchGet`, so a key several callers want is read once. The caller blocks as in `Get`, and a full queue makes it
+  wait rather than drop anything. Worth it where the adapter has no pipelining of its own (go-redis, `database/sql`)
+  and callers outnumber its connection pool; with an auto-pipelining client plain `Get` stays ahead. Sized by
+  **`WithGetAsyncBuffer`** (1024) and **`WithGetAsyncWorkers`** (4), started by the first call that reaches it.
 - **`SetWithTTL`** - a lifetime for one entry. Needs a cache built with `WithTTL` (the expiry scale is fixed at
   construction), rounds the lifetime up to that scale's unit and caps it at the scale's range; the resulting lifetime
   goes to L2 as well. `WithRefreshTTLOnGet` still extends by the cache's own TTL, so a custom lifetime holds until the
@@ -17,10 +23,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **`l2/valkey_adapter`** - Valkey backend on [valkey-io/valkey-go](https://github.com/valkey-io/valkey-go), with the
   same batching as the rueidis adapter: MGET/MSET/DEL multi-key commands while a batch stays under the wire budget, a
   pipeline of per-key commands above it. Works against a standalone node or a cluster.
-- **`memstash.DetectMode`** (`AutoDetect`/`Disabled`/`Enabled`) and **`l2.WithOrderedMget`** - let the Redis-family
+- **`l2.WithOrderedMget`** and **`memstash.DetectMode`** (`AutoDetect`/`Disabled`/`Enabled`) - let the Redis-family
   adapters read an MGET reply array by position instead of going through the key-to-reply map their client's
   multi-get helper builds. Valid only while every key of a batch reaches one server; adapters probe for that
-  themselves through their new `IsOrderedMgetAvailable`, so the default needs no configuration.
+  themselves through their new `IsOrderedMgetAvailable` method, so the default needs no configuration.
 
 ### Changed
 
@@ -178,6 +184,8 @@ Rearchitected core, pluggable eviction, faster L2 adapters.
 
 First tagged release.
 
+[0.9.7]: https://github.com/zakonnic/memstash/compare/v0.9.6...v0.9.7
+[0.9.6]: https://github.com/zakonnic/memstash/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/zakonnic/memstash/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/zakonnic/memstash/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/zakonnic/memstash/compare/v0.9.2...v0.9.3

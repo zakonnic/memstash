@@ -34,11 +34,11 @@ var hitrateCDN = workload.CDNScenario{Catalog: 1_000_000, TraceLen: 1_500_000}
 // injected every 500k requests; ~2M requests total. Values are ~250-380 byte serialized rows.
 var hitrateDBRows = workload.DBScenario{Rows: 2_000_000, ScanRows: 200_000, ChunkSize: 500_000, TraceLen: 2_000_000}
 
-// TestHitRateRealistic prints a hit-rate table per scenario at an equal byte budget per cache.
-func TestHitRateRealistic(t *testing.T) {
-	if testing.Short() {
-		t.Skip("long comparative run")
-	}
+// BenchmarkHitRateRealistic prints a hit-rate table per scenario at an equal byte budget per cache. Like
+// BenchmarkHitRate it only replays and reports, so `go test` leaves it alone (see the bench-real target).
+func BenchmarkHitRateRealistic(b *testing.B) {
+	requireSinglePass(b)
+
 	scenarios := []struct {
 		name string
 		// budget is the byte budget every cache gets; avgEntry is the estimated key+value+overhead bytes per entry
@@ -76,13 +76,13 @@ func TestHitRateRealistic(t *testing.T) {
 			func() benchCacheBytes { return newFreecacheBytes(sc.budget) },
 			func() benchCacheBytes { return newLRUBytes(sc.budget, sc.avgEntry) },
 		}
-		t.Logf("---- %s: budget %s, %s requests ----", sc.name, humanize.IBytes(uint64(sc.budget)), humanize.Comma(int64(len(trace))))
-		t.Logf("%-18s %8s %12s", "cache", "hit rate", "size estimate")
+		b.Logf("---- %s: budget %s, %s requests ----", sc.name, humanize.IBytes(uint64(sc.budget)), humanize.Comma(int64(len(trace))))
+		b.Logf("%-18s %8s %12s", "cache", "hit rate", "size estimate")
 		for _, build := range builders {
 			cache := build()
 			hitRate := runTraceBytes(cache, trace, sc.value)
 			sizeBytes := cache.GetSize()
-			t.Logf("%-18s %7.2f%% %12s", cache.Name(), hitRate, humanize.Bytes(sizeBytes))
+			b.Logf("%-18s %7.2f%% %12s", cache.Name(), hitRate, humanize.Bytes(sizeBytes))
 			cache.Close()
 		}
 	}

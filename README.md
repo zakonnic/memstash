@@ -432,17 +432,17 @@ Configuration for all of them lives in [benchmarks/adapters.go](benchmarks/adapt
 
 | Cache | GetHit | Get (50% hit rate) | Set | 90 Get / 10 Set | Set alloc |
 |---|--:|------------------:|--:|----------------:|--:|
-| **memstash-s3fifo** | **0.73** |          **1.15** | 26.2 |            3.59 | 1 B / 0 |
-| **memstash-clock** | **0.73** |          **1.12** | 23.9 |            3.51 | 1 B / 0 |
-| **memstash-wtinylfu** | **0.74** |          **1.17** | 24.8 |            3.48 | 1 B / 0 |
-| **memstash-sieve** | **0.74** |          **1.19** | 23.3 |            3.52 | 0 B / 0 |
-| otter-wtinylfu | 2.05 |              3.32 | 288.9 |           49.30 | 48 B / 1 |
-| theine-wtinylfu | 3.30 |              3.31 | 315.0 |           50.51 | 38 B / 0 |
-| ristretto | 5.64 |              6.19 | 142.2 |           31.26 | 85 B / 1 |
-| bigcache | 8.86 |              7.17 | 37.9 |           20.85 | 24 B / 2 |
-| freecache | 13.73 |             11.70 | 20.8 |           14.13 |  0 B / 0 |
-| hashicorp-lru | 93.43 |             86.53 | 127.6 |           97.35 | 58 B / 0 |
-| sync.Map\* | 1.62 |              1.68 | 11.6 |            4.11 | 63 B / 2 |
+| **memstash-s3fifo** | **0.72** |          **0.96** | 23.9 |            3.61 | 0 B / 0 |
+| **memstash-clock** | **0.72** |          **0.96** | 23.5 |            3.47 | 1 B / 0 |
+| **memstash-wtinylfu** | **0.73** |          **0.93** | 26.4 |            3.47 | 1 B / 0 |
+| **memstash-sieve** | **0.72** |          **0.96** | 24.5 |            3.59 | 0 B / 0 |
+| otter-wtinylfu | 2.05 |              3.35 | 434.8 |           49.86 | 48 B / 1 |
+| theine-wtinylfu | 3.29 |              3.34 | 293.6 |           48.73 | 35 B / 0 |
+| ristretto | 6.06 |              6.22 | 118.9 |           21.23 | 85 B / 1 |
+| bigcache | 8.86 |              7.25 | 37.7 |           21.00 | 24 B / 2 |
+| freecache | 13.96 |             11.36 | 20.5 |           14.28 |  0 B / 0 |
+| hashicorp-lru | 90.10 |             84.29 | 137.6 |           92.86 | 65 B / 0 |
+| sync.Map\* | 1.61 |              1.69 | 11.6 |            4.10 | 63 B / 2 |
 
 \* `sync.Map` performs no eviction — a lower-bound baseline, not a comparable cache.
 
@@ -450,17 +450,17 @@ Configuration for all of them lives in [benchmarks/adapters.go](benchmarks/adapt
 
 | Cache | 100% reads | 75% reads | 50% reads | 25% reads | 0% (writes only) |
 |---|--:|--:|--:|--:|-----------------:|
-| **memstash-s3fifo** | **1256** | **155** | **103** | **76** |           **63** |
-| **memstash-clock** | **1253** | **160** | **100** | **66** |           **63** |
-| **memstash-wtinylfu** | **1251** | **146** | **103** | **66** |           **63** |
-| **memstash-sieve** | **1251** | **156** | **90** | **59** |           **44** |
-| theine-wtinylfu | 294 | 10 | 5.8 | 4.4 |              3.6 |
-| otter-wtinylfu | 184 | 9.7 | 5.3 | 3.6 |              2.8 |
-| ristretto | 163 | 19 | 9.4 | 6.2 |              4.7 |
-| bigcache | 111 | 34 | 27 | 25 |               28 |
-| freecache | 72 | 69 | 68 | 68 |               68 |
-| hashicorp-lru | 10 | 10 | 9.8 | 9.5 |              9.5 |
-| sync.Map\* | 575 | 155 | 110 | 86 |               77 |
+| **memstash-s3fifo** | **1280** | **155** | **97** | **74** |           **51** |
+| **memstash-clock** | **1264** | **149** | **84** | **72** |           **53** |
+| **memstash-wtinylfu** | **1266** | **151** | **101** | **80** |           **58** |
+| **memstash-sieve** | **1268** | **149** | **99** | **75** |           **61** |
+| theine-wtinylfu | 290 | 11 | 6.3 | 4.5 |              5.0 |
+| ristretto | 172 | 19 | 10 | 6.2 |              6.1 |
+| otter-wtinylfu | 167 | 9.7 | 5.3 | 3.7 |              2.9 |
+| bigcache | 112 | 34 | 27 | 25 |               27 |
+| freecache | 73 | 69 | 68 | 67 |               67 |
+| hashicorp-lru | 11 | 10 | 10 | 9.6 |              9.9 |
+| sync.Map\* | 592 | 157 | 111 | 88 |               76 |
 
 Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) slow
 down by more than an order of magnitude, while memstash stays within reach of the eviction-free
@@ -476,45 +476,45 @@ measured resident bytes see [heap footprint](#heap-footprint-lower-is-better).
 
 | Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
 |---|--:|--:|--:|----------:|
-| ristretto | 58.30% | 35.35% | 37.02% | 68 MB |
-| **memstash-s3fifo** | **58.13%** | **34.66%** | **36.39%** | 34 MB |
-| memstash-wtinylfu | 57.96% | 34.74% | 36.53% | 34 MB |
+| ristretto | 58.29% | 35.37% | 37.02% | 69 MB |
+| **memstash-s3fifo** | **58.12%** | **34.66%** | **36.39%** | 34 MB |
+| memstash-wtinylfu | 57.96% | 34.78% | 36.45% | 34 MB |
 | memstash-sieve | 57.73% | 34.07% | 35.86% | 35 MB |
-| theine-wtinylfu | 57.54% | 34.63% | 35.66% | 54 MB |
+| theine-wtinylfu | 57.41% | 34.50% | 35.56% | 54 MB |
 | memstash-clock | 57.04% | 33.01% | 34.63% | 30 MB |
-| otter-wtinylfu | 56.06% | 33.17% | 34.41% | 41 MB |
+| otter-wtinylfu | 55.99% | 32.94% | 34.54% | 41 MB |
 | hashicorp-lru | 55.64% | 31.61% | 32.99% | 45 MB |
+| freecache | 52.11% | 27.99% | 29.03% | 54 MB |
 | bigcache | 51.29% | 27.95% | 29.23% | 25 MB |
-| freecache | 51.01% | 28.32% | 29.64% | 54 MB |
 
 **Capacity = 100k items (~7% of the working set):**
 
 | Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
 |---|--:|--:|--:|--:|
-| memstash-wtinylfu | 41.81% | 26.30% | 27.07% | 8.4 MB |
-| **memstash-s3fifo** | **41.11%** | **26.33%** | **27.18%** | 8.4 MB |
-| theine-wtinylfu | 40.95% | 25.98% | 26.50% | 12 MB |
-| memstash-sieve | 39.63% | 25.20% | 25.14% | 8.3 MB |
-| ristretto | 39.10% | 23.55% | 24.85% | 14 MB |
-| otter-wtinylfu | 37.77% | 23.55% | 23.77% | 7.3 MB |
-| memstash-clock | 33.12% | 18.22% | 18.93% | 7.3 MB |
+| memstash-wtinylfu | 41.80% | 26.29% | 27.04% | 8.4 MB |
+| theine-wtinylfu | 41.14% | 25.94% | 26.55% | 12 MB |
+| **memstash-s3fifo** | **41.11%** | **26.32%** | **27.19%** | 8.4 MB |
+| memstash-sieve | 39.62% | 25.21% | 25.14% | 8.3 MB |
+| ristretto | 39.10% | 23.55% | 24.87% | 14 MB |
+| otter-wtinylfu | 37.80% | 23.63% | 23.77% | 7.3 MB |
+| memstash-clock | 33.11% | 18.22% | 18.94% | 7.3 MB |
 | hashicorp-lru | 30.03% | 15.62% | 16.53% | 9.6 MB |
 | bigcache | 28.26% | 15.71% | 15.48% | 6.1 MB |
-| freecache | 25.65% | 14.48% | 14.00% | 19 MB |
+| freecache | 25.65% | 14.48% | 13.95% | 19 MB |
 
 **Capacity = 10k items (~1% of the working set):**
 
 | Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
 |---|--:|--:|--:|--:|
-| theine-wtinylfu | 15.36% | 9.24% | 10.24% | 1.5 MB |
+| theine-wtinylfu | 15.34% | 9.24% | 10.25% | 1.5 MB |
 | **memstash-s3fifo** | **14.78%** | **9.89%** | **10.28%** | 1.1 MB |
-| memstash-wtinylfu | 14.47% | 8.31% | 8.63% | 1.1 MB |
-| otter-wtinylfu | 13.83% | 8.47% | 7.48% | 805 kB |
-| memstash-sieve | 13.50% | 8.86% | 8.83% | 1.1 MB |
+| memstash-wtinylfu | 14.48% | 8.34% | 8.66% | 1.1 MB |
+| memstash-sieve | 13.52% | 8.85% | 8.84% | 1.1 MB |
+| otter-wtinylfu | 12.92% | 8.59% | 8.98% | 803 kB |
 | bigcache | 11.75% | 7.46% | 6.09% | 1.5 MB |
-| ristretto | 10.15% | 5.58% | 5.39% | 1.9 MB |
+| ristretto | 10.14% | 5.56% | 5.40% | 1.9 MB |
 | freecache | 6.00% | 3.93% | 3.03% | 7.1 MB |
-| memstash-clock | 5.33% | 3.50% | 2.62% | 926 kB |
+| memstash-clock | 5.34% | 3.50% | 2.62% | 930 kB |
 | hashicorp-lru | 5.01% | 3.30% | 2.49% | 1.0 MB |
 
 ### Heap footprint, lower is better
@@ -527,16 +527,16 @@ string keys were given the same values converted to `[8]byte`.
 
 | Cache | Heap | B/entry |  Get hot | Get full | Set hot | Set full |
 |---|--:|--:|---------:|--:|--:|--:|
-| xsync.MapOf\* | 3.7 GiB | 39.24 |    1.53 ns | 9.16 ns | 5.79 ns | 13.25 ns |
-| **memstash-s3fifo** | **3.9 GiB** | **42.05** | **2.49 ns** | **7.48 ns** | **17.64 ns** | **23.04 ns** |
-| freecache | 5.7 GiB | 61.53 |    37.10 ns | 48.48 ns | 38.80 ns | 50.25 ns |
-| otter-wtinylfu | 7.6 GiB | 81.98 |     3.64 ns | 13.71 ns | 422.8 ns | 525.2 ns |
-| bigcache | 7.7 GiB | 84.84 |    10.38 ns | 19.86 ns | 40.74 ns | 46.83 ns |
-| hashicorp-lru | 9.7 GiB | 104.2 |    133.8 ns | 502.4 ns | 145.8 ns | 485.2 ns |
-| theine-wtinylfu | 11 GiB | 115.0 |     6.97 ns | 20.29 ns | 339.2 ns | 463.4 ns |
-| ristretto | 14 GiB | 153.1 |    18.48 ns | 22.74 ns | 263.3 ns | 281.9 ns |
+| xsync.MapOf\* | 3.7 GiB | 39.24 |    1.71 ns | 9.17 ns | 5.52 ns | 13.49 ns |
+| **memstash-s3fifo** | **3.9 GiB** | **42.05** | **2.69 ns** | **8.94 ns** | **17.26 ns** | **24.27 ns** |
+| freecache | 5.7 GiB | 61.53 |    38.52 ns | 49.16 ns | 40.03 ns | 52.00 ns |
+| otter-wtinylfu | 7.6 GiB | 81.98 |     4.90 ns | 13.74 ns | 440.2 ns | 525.0 ns |
+| bigcache | 7.7 GiB | 84.84 |    11.16 ns | 20.48 ns | 55.27 ns | 64.02 ns |
+| hashicorp-lru | 9.7 GiB | 104.2 |    215.3 ns | 577.4 ns | 227.4 ns | 518.0 ns |
+| theine-wtinylfu | 11 GiB | 115.0 |    10.08 ns | 20.17 ns | 345.4 ns | 476.6 ns |
+| ristretto | 14 GiB | 153.1 |    21.46 ns | 25.30 ns | 230.6 ns | 249.9 ns |
 
-\* `xsync.MapOf` performs no eviction — a lower-bound baseline, not a comparable cache.
+\* `xsync.MapOf` performs no eviction — a lower-bound baseline, not a comparable cache. Switched from sync.Map: it uses too much memory.
 
 The four latency columns are measured on that same filled cache, so they show what a read and a
 write cost at 100M entries rather than at a benchmark-sized capacity. **hot** replays a 64k-key
@@ -555,14 +555,14 @@ sustained pressure.
 
 Three parallel scenarios, each with its own cache, goroutines, and key space:
 
-| | Values | Capacity               | L2 | Mix | Load                                         |
-|---|---|------------------------|---|---|----------------------------------------------|
-| `scenario-1` | web sessions, ~170–490 B | 20k items              | none | 90% Get | 10 goroutines, 10k rps total                 |
-| `scenario-2` | CDN assets, 0.6–64 KiB | 20k items              | Redis cluster | 50/50 | 5 goroutines, 100k rps total                 |
-| `scenario-3` | DB rows, ~250 B | ~10 MB (cost-weighted) | Redis cluster | 90% Get | 40 goroutines, 1 hot (10k rps) + 30k rps shared |
+| | Values | Capacity               | Key space              | L2 | Mix | Load                                         |
+|---|---|------------------------|------------------------|---|---|----------------------------------------------|
+| `scenario-1` | web sessions, ~170–490 B | 100k items             | 150M read / 100M written | none | 90% Get | 10 goroutines, 1M rps total                  |
+| `scenario-2` | CDN assets, 0.6–64 KiB | 20k items              | 10M                    | Redis cluster, 3 nodes (rueidis) | 50/50 | 5 goroutines, 100k rps total                 |
+| `scenario-3` | DB rows, ~250 B | ~10 MB (cost-weighted), ~37k rows | 20M                    | Valkey, 1 node (valkey-go) | 90% Get | 40 goroutines, 1 hot (10k rps) + 30k rps shared |
 
-Keys follow Zipf distribution over a key space several times larger than L1 capacity, plus a `random_percent` share drawn uniformly
-instead.
+Keys follow a Zipf distribution (`zipf_s` 1.001–1.05) over a key space orders of magnitude larger than L1 capacity,
+plus a 10% `random_percent` share drawn uniformly instead.
 
 **Every Get is verified** against what the scenario's `Value` function returns for that key — `load_generator.WithNoVerification()`
 turns that off when you want the load without the check. Everything that can go wrong lands in `errors.log`.
@@ -574,7 +574,7 @@ live in [cmd/load-generator](benchmarks/load_generator/cmd/load-generator) and a
 `[]Scenario[K, V]`. You can use it as an example and create the app with `load_generator.New`. 
 
 **What you can check:**
-- **Correctness** — empty `errors.log` after hours of 150k+ rps
+- **Correctness** — empty `errors.log` after hours of 1M+ rps
 - **Real hit rates** — configure `size`, `key_space`, `zipf_s` to match your service
 - **L1 vs L2 split** — traffic reaching Redis, L2 hit rate under working set rotation
 - **Memory/goroutine stability** — flat metrics over hours = no leaks

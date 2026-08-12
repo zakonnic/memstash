@@ -182,6 +182,8 @@ func fullRange(fillSize int) keySource {
 //
 // It drives the workers itself because RunParallel takes its op count from b.N, and this family runs at -benchtime=1x.
 func runLatencyOps(b *testing.B, src keySource, op func(key uint64) bool) (ops int, hits int64) {
+	requireSinglePass(b)
+
 	workers := runtime.GOMAXPROCS(0)
 	perWorker := latencyIters / workers
 	ops = perWorker * workers
@@ -286,6 +288,8 @@ func runFootprint(b *testing.B, tc footprintCase) {
 }
 
 func fillAndMeasure(b *testing.B, tc footprintCase) benchCache {
+	requireSinglePass(b)
+
 	resident := heapBaseline()
 
 	c := tc.build()

@@ -41,6 +41,8 @@ func BenchmarkMemoryFootprintMemstash(b *testing.B) {
 }
 
 func measureFootprint(b *testing.B, capacity int64) *memstash.Cache[uint64, uint64] {
+	requireSinglePass(b)
+
 	ctx := context.Background()
 
 	// Quiescent baseline: HeapAlloc reflects only the live set, no floating garbage.
@@ -84,6 +86,8 @@ func measureFootprint(b *testing.B, capacity int64) *memstash.Cache[uint64, uint
 // runBatchRead is runRead over BatchGetFromMemory: the same key stream drained in reused fixed-size batches. Its gap
 // against GetFromMemory/full is what pipelining the dependent misses buys.
 func runBatchRead(b *testing.B, src keySource, c *memstash.Cache[uint64, uint64]) {
+	requireSinglePass(b)
+
 	const batchLen = 256
 	workers := runtime.GOMAXPROCS(0)
 	perWorker := latencyIters / workers / batchLen * batchLen

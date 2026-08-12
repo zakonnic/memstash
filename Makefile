@@ -44,7 +44,7 @@ lint: ## Run linter with settings from .golangci.yml (needs golangci-lint v2)
 lint-fix: ## Linter tries to fix issues automatically
 	golangci-lint run -v --fix
 
-.PHONY: test
+.PHONY: test test-all test-all-race
 test: ## Run local tests
 	go test -v -race ./...
 test-load-generator: ## Run the load generator's own tests
@@ -54,7 +54,12 @@ test-integration: up ## Run integration tests against live L2 servers (make up f
 test-all: ## Run all tests
 	@for m in $(MODULES); do \
 		echo "==> $$m"; \
-		go -C $$m test -race ./... \
+		go -C $$m test ./... || exit 1; \
+	done
+test-all-race: ## Run all tests under the race detector
+	@for m in $(MODULES); do \
+		echo "==> $$m"; \
+		go -C $$m test -race ./... || exit 1; \
 	done
 
 cover-gen: ## Generate merged test coverage across all packages (tests/ and l2/ exercise the root and internal packages)
@@ -74,16 +79,16 @@ bench-speed: ## Run the speed_test.go benchmarks (Zipf hot-set micro-benchmarks)
 bench-speed-random: ## Run the speed_random_test.go benchmarks (realistic random load)
 	go -C benchmarks test -run=xxx -bench='^BenchmarkRandom' ./...
 bench-hitrate: ## Run hitrate benchmarks
-	go -C benchmarks test -run='^TestHitRate$$' -v
+	go -C benchmarks test -run=xxx -bench='^BenchmarkHitRate$$' -benchtime=1x -v
 bench-real: ## Run realistic and non-standard pattern benchmarks
 	go -C benchmarks test -run=xxx -bench='^Benchmark(MemstashGetHitSerial)$$' -v
-	go -C benchmarks test -run='^TestHitRateRealistic$$' -v
+	go -C benchmarks test -run=xxx -bench='^BenchmarkHitRateRealistic$$' -benchtime=1x -v
 bench-flight: ## Run hitrate benchmarks for singleflight
 	go -C benchmarks test -run=xxx -bench='^BenchmarkFlight' ./...
 bench-100kk: ## Run memstash benchmarks for 100M items cache
-	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprintMemstash -tags=long
+	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprintMemstash -tags=long -benchtime=1x
 bench-100kk-others: ## Run benchmarks for 100M items other caches
-	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprint -tags=others
+	go -C benchmarks test -run xxx -bench BenchmarkMemoryFootprint -tags=others -benchtime=1x
 bench-integration: up ## Run L1+L2 load-profile benchmarks against the live servers (make up first)
 	go -C tests/integration test -run xxx -bench . -benchtime 1s ./...
 

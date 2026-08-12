@@ -94,10 +94,18 @@ func distinctKeys(trace []uint64) int {
 	return len(seen)
 }
 
-func runHitRateSuite(t *testing.T) {
-	if testing.Short() {
-		t.Skip("long comparative run")
+// requireSinglePass guards the benchmark bodies that fix their own workload and ignore b.N.
+func requireSinglePass(b *testing.B) {
+	b.Helper()
+	if b.N != 1 {
+		b.Fatalf("ignores b.N, run with -benchtime=1x (got b.N=%d)", b.N)
 	}
+}
+
+// BenchmarkHitRate prints a comparative hit-rate table at equal nominal capacity (item count) per cache.
+func BenchmarkHitRate(b *testing.B) {
+	requireSinglePass(b)
+
 	traces := []struct {
 		name  string
 		trace []uint64
@@ -107,12 +115,12 @@ func runHitRateSuite(t *testing.T) {
 		{"one-hit-30%", oneHitTrace()},
 	}
 	working := distinctKeys(traces[0].trace)
-	t.Logf("zipf trace: %d requests over %d distinct keys", requests, working)
+	b.Logf("zipf trace: %d requests over %d distinct keys", requests, working)
 	capacities := []int64{10_000, 100_000, 500_000} // ~1%, ~9% and ~44% of the zipf working set
 
 	for _, capacity := range capacities {
-		t.Logf("---- capacity %d items (~%.0f%% of working set) ----", capacity, 100*float64(capacity)/float64(working))
-		t.Logf("%-18s %12s %12s %12s %12s", "cache", traces[0].name, traces[1].name, traces[2].name, "size estimate")
+		b.Logf("---- capacity %d items (~%.0f%% of working set) ----", capacity, 100*float64(capacity)/float64(working))
+		b.Logf("%-18s %12s %12s %12s %12s", "cache", traces[0].name, traces[1].name, traces[2].name, "size estimate")
 		builders := []func() benchCache{
 			func() benchCache { return newMemstash(capacity, memstash.PolicyS3FIFO, "memstash-s3fifo") },
 			func() benchCache { return newMemstash(capacity, memstash.PolicyClock, "memstash-clock") },
@@ -139,12 +147,7 @@ func runHitRateSuite(t *testing.T) {
 				cache.Close()
 			}
 
-			t.Logf("%-18s %11.2f%% %11.2f%% %11.2f%% %12s", name, row[0], row[1], row[2], humanize.Bytes(sizeBytes))
+			b.Logf("%-18s %11.2f%% %11.2f%% %11.2f%% %12s", name, row[0], row[1], row[2], humanize.Bytes(sizeBytes))
 		}
 	}
-}
-
-// TestHitRate prints a comparative hit-rate table at equal nominal capacity (item count) per cache.
-func TestHitRate(t *testing.T) {
-	runHitRateSuite(t)
 }

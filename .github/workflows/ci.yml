@@ -117,7 +117,7 @@ jobs:
       - name: start backing services
         run: make up
         timeout-minutes: 10
-      - run: make integration-tests
+      - run: make test-integration
         timeout-minutes: 15
       - name: stop backing services
         if: always()

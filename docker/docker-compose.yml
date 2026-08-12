@@ -1,7 +1,7 @@
 # Backing services for the integration tests and benchmarks in tests/integration.
 #
 #   make up      # docker compose -f docker/docker-compose.yml [-f docker/docker-compose.override.yml] up -d
-#   make integration-tests
+#   make test-integration
 #   make down
 #
 # The tests read the addresses from MEMSTASH_TEST_* environment variables (see tests/integration) and skip
