@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/redis/go-redis/v9 v9.22.0
-	github.com/zakonnic/memstash v0.9.6
+	github.com/zakonnic/memstash v0.9.7
 )
 
 require (
@@ -13,5 +13,3 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
-
-replace github.com/zakonnic/memstash => ../..

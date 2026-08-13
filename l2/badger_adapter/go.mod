@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/dgraph-io/badger/v4 v4.9.6
-	github.com/zakonnic/memstash v0.9.6
+	github.com/zakonnic/memstash v0.9.7
 )
 
 require (
@@ -21,7 +21,5 @@ require (
 	go.opentelemetry.io/otel/metric v1.45.0 // indirect
 	go.opentelemetry.io/otel/trace v1.45.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 )
-
-replace github.com/zakonnic/memstash => ../..

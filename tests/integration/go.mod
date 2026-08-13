@@ -20,15 +20,15 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/tarantool/go-tarantool/v2 v2.4.2
 	github.com/valkey-io/valkey-go v1.0.76
-	github.com/zakonnic/memstash v0.9.6
-	github.com/zakonnic/memstash/l2/gomemcache_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/goredis_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/mc_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/rainycape_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/redigo_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/redispipe_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/rueidis_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/valkey_adapter v0.9.0
+	github.com/zakonnic/memstash v0.9.7
+	github.com/zakonnic/memstash/l2/gomemcache_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/goredis_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/mc_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/rainycape_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/redigo_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/redispipe_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/rueidis_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/valkey_adapter v0.9.7
 	go.mongodb.org/mongo-driver v1.17.9
 )
 
@@ -78,37 +78,13 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
-	github.com/zakonnic/memstash/l2/aerospike_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/dynamo_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/mongo_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/pgx_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/sql_adapter v0.9.0
-	github.com/zakonnic/memstash/l2/tarantool_adapter v0.9.0
+	github.com/zakonnic/memstash/l2/aerospike_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/dynamo_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/mongo_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/pgx_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/sql_adapter v0.9.7
+	github.com/zakonnic/memstash/l2/tarantool_adapter v0.9.7
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace (
-	github.com/zakonnic/memstash => ../..
-	github.com/zakonnic/memstash/l2/gomemcache_adapter => ../../l2/gomemcache_adapter
-	github.com/zakonnic/memstash/l2/goredis_adapter => ../../l2/goredis_adapter
-	github.com/zakonnic/memstash/l2/mc_adapter => ../../l2/mc_adapter
-	github.com/zakonnic/memstash/l2/rainycape_adapter => ../../l2/rainycape_adapter
-	github.com/zakonnic/memstash/l2/redigo_adapter => ../../l2/redigo_adapter
-	github.com/zakonnic/memstash/l2/redispipe_adapter => ../../l2/redispipe_adapter
-	github.com/zakonnic/memstash/l2/rueidis_adapter => ../../l2/rueidis_adapter
-	github.com/zakonnic/memstash/l2/valkey_adapter => ../../l2/valkey_adapter
-)
-
-replace github.com/zakonnic/memstash/l2/pgx_adapter => ../../l2/pgx_adapter
-
-replace github.com/zakonnic/memstash/l2/sql_adapter => ../../l2/sql_adapter
-
-replace github.com/zakonnic/memstash/l2/mongo_adapter => ../../l2/mongo_adapter
-
-replace github.com/zakonnic/memstash/l2/dynamo_adapter => ../../l2/dynamo_adapter
-
-replace github.com/zakonnic/memstash/l2/aerospike_adapter => ../../l2/aerospike_adapter
-
-replace github.com/zakonnic/memstash/l2/tarantool_adapter => ../../l2/tarantool_adapter

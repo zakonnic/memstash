@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 
 Every module - the root and each `l2/*_adapter` - is tagged with the same version.
 
+## [0.9.8] - 2026-08-13
+
+### Fixed
+
+- Every `l2/*_adapter` module required core `v0.9.6` while its code used APIs added in `v0.9.7` (`l2.ExtractKeyFunc`,
+  `l2.ExtractOrderedMget`, `l2.ResolveOrderedMget`), so `go get` of any adapter at v0.9.7 resolved the core one
+  version back and failed to compile. Adapters now require the core version they actually need.
+
 ## [0.9.7] - 2026-08-12
 
 ### Added

@@ -16,7 +16,8 @@
 *.sublime-workspace
 
 # --- Other ---
-go.work
+# go.work is committed: with no replace directives left, the adapters resolve the core through the workspace.
+# go.work.sum is not - every module's own go.sum already covers a workspace build.
 go.work.sum
 *.test
 *.out

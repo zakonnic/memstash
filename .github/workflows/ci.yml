@@ -18,6 +18,8 @@ jobs:
   test:
     name: test (go ${{ matrix.go }})
     runs-on: ubuntu-latest
+    env:
+      GOWORK: off
     strategy:
       fail-fast: false
       matrix:
@@ -76,9 +78,19 @@ jobs:
         with:
           go-version: '1.26'
           check-latest: true
-      # Each adapter is its own module, so a broken client SDK bump only shows up here.
-      - run: go -C l2/${{ matrix.adapter }} build ./...
-      - run: go -C l2/${{ matrix.adapter }} vet ./...
+      # Each adapter is its own module, so a broken client SDK bump only shows up here. The workspace resolves the
+      # core from this checkout, so these two catch a core change breaking an adapter.
+      - name: build (core from this checkout)
+        run: go -C l2/${{ matrix.adapter }} build ./...
+      - name: vet (core from this checkout)
+        run: go -C l2/${{ matrix.adapter }} vet ./...
+      # Catches an adapter calling a core API newer than the version it requires: broken for consumers, green in-repo.
+      # -mod=mod: a release commit may need the go.sum entry for a core tag pushed alongside it.
+      - name: build (core from the version go.mod requires)
+        run: go -C l2/${{ matrix.adapter }} build ./...
+        env:
+          GOWORK: off
+          GOFLAGS: -mod=mod
 
   load-generator:
     runs-on: ubuntu-latest
@@ -125,6 +137,8 @@ jobs:
 
   vuln:
     runs-on: ubuntu-latest
+    # In the workspace: the scan is about third-party dependency versions, which are the same either way, and the
+    # benchmark and integration modules must resolve the tree rather than a published version of it.
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

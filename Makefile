@@ -139,3 +139,56 @@ untag: ## Delete the root module and every l2 adapter module tag with the given 
 
 push:
 	git push origin main --tags
+
+.PHONY: release release-check release-verify
+release: ## Full release: check, tag every module, push, verify from the proxy (make release V=1.2.3)
+	@test -n "$(V)" || { echo "V is required, e.g. make release V=1.2.3"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { \
+		echo "Error: the working tree is dirty. Tags would point at the last commit, not at what you see."; \
+		exit 1; \
+	}
+	@echo "==> release v$(V)"
+	"$(MAKE)" release-check
+	"$(MAKE)" tag V=$(V)
+	"$(MAKE)" push
+	"$(MAKE)" release-verify V=$(V)
+
+release-check: ## Build every published module the way a consumer resolves it - no workspace, no replace (run before 'make tag')
+	@status=0; \
+	for m in $(ADAPTERS); do \
+		if grep -q '^replace' $$m/go.mod; then \
+			echo "$$m: a replace directive must not ship in a published module"; status=1; \
+		fi; \
+	done; \
+	core=$$(grep -m1 -h 'zakonnic/memstash v' $(firstword $(ADAPTERS))/go.mod | grep -o 'v[0-9][^ ]*'); \
+	for m in $(ADAPTERS); do \
+		got=$$(grep -m1 -h 'zakonnic/memstash v' $$m/go.mod | grep -o 'v[0-9][^ ]*'); \
+		if [ "$$got" != "$$core" ]; then echo "$$m: requires core $$got, expected $$core"; status=1; fi; \
+	done; \
+	if git ls-remote --exit-code --tags origin "$$core" >/dev/null 2>&1; then \
+		echo "adapters require core $$core (published)"; \
+		for m in . $(ADAPTERS); do \
+			echo "==> $$m"; \
+			GOWORK=off GOFLAGS=-mod=mod go -C $$m build ./... || status=1; \
+			GOWORK=off GOFLAGS=-mod=mod go -C $$m vet ./... || status=1; \
+		done; \
+	else \
+		echo "adapters require core $$core, which is not pushed yet - this is the release commit."; \
+		echo "Nothing to resolve against until the tag lands: run 'make release-verify V=$${core#v}' after 'make push'."; \
+		GOWORK=off go build ./... || status=1; \
+	fi; \
+	exit $$status
+
+release-verify: ## Install every published module at V from the proxy into a throwaway module and build it (run after 'make push')
+	@test -n "$(V)" || { echo "V is required, e.g. make release-verify V=1.2.3"; exit 1; }
+	@dir=$$(mktemp -d); status=0; \
+	(cd $$dir && go mod init release-verify >/dev/null 2>&1); \
+	for m in $(ADAPTERS); do \
+		pkg=github.com/zakonnic/memstash/$$m; \
+		echo "==> $$pkg@v$(V)"; \
+		(cd $$dir && GOWORK=off go get $$pkg@v$(V) >/dev/null 2>&1 && GOWORK=off go build $$pkg) \
+			|| { echo "FAILED: $$pkg@v$(V) does not build as published"; status=1; }; \
+	done; \
+	rm -rf $$dir; \
+	if [ $$status -eq 0 ]; then echo "every adapter builds from the proxy at v$(V)"; fi; \
+	exit $$status

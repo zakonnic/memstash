@@ -4,7 +4,7 @@ go 1.24
 
 require (
 	github.com/tarantool/go-tarantool/v2 v2.4.2
-	github.com/zakonnic/memstash v0.9.6
+	github.com/zakonnic/memstash v0.9.7
 )
 
 require (
@@ -13,5 +13,3 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 )
-
-replace github.com/zakonnic/memstash => ../..

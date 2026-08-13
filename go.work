@@ -1,0 +1,23 @@
+go 1.25.0
+
+use (
+	.
+	./benchmarks
+	./benchmarks/load_generator
+	./l2/aerospike_adapter
+	./l2/badger_adapter
+	./l2/dynamo_adapter
+	./l2/gomemcache_adapter
+	./l2/goredis_adapter
+	./l2/mc_adapter
+	./l2/mongo_adapter
+	./l2/pgx_adapter
+	./l2/rainycape_adapter
+	./l2/redigo_adapter
+	./l2/redispipe_adapter
+	./l2/rueidis_adapter
+	./l2/sql_adapter
+	./l2/tarantool_adapter
+	./l2/valkey_adapter
+	./tests/integration
+)

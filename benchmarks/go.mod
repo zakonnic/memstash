@@ -12,7 +12,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/maypok86/otter/v2 v2.3.0
 	github.com/puzpuzpuz/xsync/v3 v3.5.1
-	github.com/zakonnic/memstash v0.9.6
+	github.com/zakonnic/memstash v0.9.7
 )
 
 require (
@@ -27,5 +27,3 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/zakonnic/memstash => ../
