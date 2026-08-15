@@ -10,7 +10,8 @@
 Simple by default, deep when you need it.**
 
 Memstash can serve as a pure in-memory cache. It keeps the keys you touch most in your process,
-where a read can cost less than a nanosecond (with memstash, anyway). But your whole dataset is
+where a read can cost less than a nanosecond (with memstash, anyway). That number comes from a flat,
+inline hash table and a read path that takes no locks. But your whole dataset is
 usually far larger — that's when you add a second tier (backed by Redis or any storage you want),
 and the same cache will serve millions of entries, shared by every node and still warm after a
 restart. Reads fall back to L2 only on memory misses; writes land in memory immediately and reach
@@ -219,19 +220,16 @@ err = c.BatchSet(ctx, memstash.List[string, User]{{Key: "a", Value: a}, {Key: "b
 err = c.BatchDelete(ctx, []string{"a", "b"})                      // follows the write policy, like BatchSet
 ```
 
-**Coalesced reads** — `GetBatched` is the same batching, for keys that arrive one at a time. It reads
-L1 exactly like `Get`; a miss joins a queue shared by every caller, and a worker pool fetches
-everything waiting there in a single `BatchGet` — so a key several goroutines want right then is read
-once. The caller blocks just as it would in `Get`, and a full queue makes it wait rather than drop
-anything:
+**Coalesced reads** — `GetBatched` can be used instead of `Get`; it works the same, but adds batching like `Set`'s:
+an L1 miss that should go to L2 joins a queue shared by all callers, and a worker pool fetches everything waiting
+there in a single `BatchGet` — so a key several goroutines want right then is read once. The caller waits longer,
+but total throughput goes up. Worth it where the client has no pipelining of its own (go-redis, `database/sql`).
+With an auto-pipelining client (rueidis, valkey), plain `Get` stays ahead — it already packs concurrent commands
+onto one connection. The worker pool starts lazily on first call.
 
 ```go
 u, ok, err := c.GetBatched(ctx, "user:42") // L1 hit → instant; a miss rides one BatchGet with other misses
 ```
-
-Worth enabling where the client has no pipelining of its own (go-redis, `database/sql`) and your
-goroutines outnumber its connection pool. With an auto-pipelining client (rueidis, valkey) plain `Get` stays
-ahead: it already packs concurrent commands onto one connection. Worker pool starts lazily on first call.
 
 **Observability and iteration** — `Stats()` returns operation counters (collected with striped
 counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via
