@@ -26,10 +26,11 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 ## Why memstash?
 
 - **Very fast.** More than 7× the parallel read throughput of
-  [Ristretto](https://github.com/dgraph-io/ristretto) and 6×
-  [Otter](https://github.com/maypok86/otter)'s; once writes enter the mix the gap widens even more —
-  see [benchmarks](#benchmarks).
-- **Top-tier hit ratio.** The S3-FIFO policy sits with the best of them — Otter,
+  [Ristretto](https://github.com/dgraph-io/ristretto), and at least 4× every other cache in the
+  [benchmarks](#benchmarks); once writes enter the mix the gap widens even more. With a
+  pointer-free key, a hit usually touches a single 64-byte cache line. Even a plain Go map needs
+  at least two.
+- **Top-tier hit ratio.** The S3-FIFO policy sits with the best of them — [Otter](https://github.com/maypok86/otter),
   [Theine](https://github.com/Yiling-J/theine-go), Ristretto — and takes the lead at the small and
   mid capacities where a cache actually has to choose, especially under scans and one-hit wonders.
 - **Lowest memory overhead.** ~2× smaller footprint than Otter or
