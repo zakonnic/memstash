@@ -4,6 +4,8 @@ go 1.25.0
 
 require github.com/zakonnic/memstash v0.9.7
 
+require github.com/google/go-cmp v0.7.0 // indirect
+
 require (
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
