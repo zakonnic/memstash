@@ -9,5 +9,6 @@ require (
 
 require (
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
