@@ -2,7 +2,7 @@ module github.com/zakonnic/memstash/l2/mongo_adapter
 
 go 1.25.0
 
-require github.com/zakonnic/memstash v0.9.7
+require github.com/zakonnic/memstash v0.9.8
 
 require (
 	github.com/golang/snappy v1.0.0 // indirect
