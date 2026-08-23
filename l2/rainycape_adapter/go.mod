@@ -1,8 +1,10 @@
 module github.com/zakonnic/memstash/l2/rainycape_adapter
 
-go 1.24
+go 1.25.0
 
 require github.com/zakonnic/memstash v0.9.7
+
+require github.com/stretchr/testify v1.12.1 // indirect
 
 require (
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
