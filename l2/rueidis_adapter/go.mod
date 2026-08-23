@@ -3,8 +3,8 @@ module github.com/zakonnic/memstash/l2/rueidis_adapter
 go 1.25.0
 
 require (
-	github.com/redis/rueidis v1.0.76
-	github.com/zakonnic/memstash v0.9.7
+	github.com/redis/rueidis v1.0.77
+	github.com/zakonnic/memstash v0.9.8
 )
 
 require (
