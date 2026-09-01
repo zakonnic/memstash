@@ -126,7 +126,7 @@ func (c *Cache[K, V]) peekMemory(key K) (V, bool) {
 	var entry itemstore.Entry[K, V]
 	var zero V
 	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.Overflowed(home) {
+		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
 			return zero, false
 		}
 		item := storage.At(pos)

@@ -371,7 +371,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 	var entry itemstore.Entry[K, V]
 	var zero V
 	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.Overflowed(home) {
+		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
 			return zero, false // nothing homed in this group lives past it: definitely absent
 		}
 		item := storage.At(pos)
@@ -490,7 +490,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 				sh.dirty--
 			}
 			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff)
-			storage.NoteDisplaced(home, pos)
+			storage.NoteDisplaced(keyHash, pos)
 			sh.live++
 			sh.policy.Add(itemstore.QNode{Idx: storage.Wrap(pos), Cost: uint32(weight)})
 			c.maybeRebuild(sh, storage)
@@ -502,7 +502,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 				// The queue node still references this slot, so re-insert resurrects the entry instead of extending
 				// the probe chain with a dead record, which hurts hash probing.
 				item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff)
-				storage.NoteDisplaced(home, pos)
+				storage.NoteDisplaced(keyHash, pos)
 				sh.live++
 				sh.dirty--
 				if sh.deadCount > 0 {
@@ -588,7 +588,7 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 		if item.Kill() {
 			entry := item.Entry()
 			sh.weight.Add(-c.rawCost(entry.Key, entry.Value))
-			storage.ForgetDisplaced(storage.Home(maphash.Comparable(c.seed, entry.Key)), victimIdx)
+			storage.ForgetDisplaced(maphash.Comparable(c.seed, entry.Key), victimIdx)
 			sh.live--
 			sh.dirty++
 			if c.onDeletion != nil {
@@ -630,7 +630,7 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 	groupEnd := (home | 7) + 1
 	var entry itemstore.Entry[K, V]
 	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.Overflowed(home) {
+		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
 			return false
 		}
 		item := storage.At(pos)
@@ -664,7 +664,7 @@ func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *
 	}
 	item.Kill()
 	storage := sh.items.GetStorage()
-	storage.ForgetDisplaced(storage.Home(keyHash), idx)
+	storage.ForgetDisplaced(keyHash, idx)
 	sh.live--
 	sh.dirty++
 	c.noteDead(sh)
@@ -678,7 +678,7 @@ func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, 
 	home := storage.Home(keyHash)
 	groupEnd := (home | 7) + 1
 	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.Overflowed(home) {
+		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
 			return 0, nil, false
 		}
 		item := storage.At(pos)
