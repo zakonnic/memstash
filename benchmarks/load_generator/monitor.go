@@ -83,6 +83,8 @@ func (r *runner[K, V]) logStats(logger *slog.Logger, start time.Time, prev meter
 		cpuPercent = cpuCores / float64(runtime.NumCPU()) * 100
 	}
 
+	getMemNs, getNs, setNs := r.runProbe(context.Background())
+
 	// Field order matters: the console wraps this line across the terminal, so the live numbers come first and the
 	// running totals after.
 	logger.Info("stats",
@@ -92,6 +94,9 @@ func (r *runner[K, V]) logStats(logger *slog.Logger, start time.Time, prev meter
 		"hit_rate_pct", hitRate,
 		"mem_hit_rate_pct", memHitRate,
 		"l2_hit_rate_pct", l2HitRate,
+		"get_mem_ns", getMemNs,
+		"get_ns", getNs,
+		"set_ns", setNs,
 		"cache_len", r.cache.Len(),
 		"cache_weight", r.cache.Weight(),
 		"cache_total_size", r.cache.TotalSize(),

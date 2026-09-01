@@ -32,6 +32,8 @@ type runner[K comparable, V any] struct {
 	statsInterval time.Duration
 	verify        bool
 
+	probe *probe[K, V] // built on the first stats line; only the monitor goroutine touches it
+
 	ops, errs atomic.Int64
 }
 
