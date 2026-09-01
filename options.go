@@ -172,8 +172,9 @@ func WithCustomEvictionPolicy[K comparable, V any](factory EvictionPolicyFactory
 }
 
 // WithPreallocatedSize sets Config.PreallocateMap: every shard allocates the item table its share of the capacity
-// ends up needing, so filling the cache rebuilds nothing. Rejected together with WithCostFunc or WithMemoryBudget -
-// the table is sized in items, and a weighted capacity does not count items.
+// ends up needing under churn, so neither filling the cache nor evicting from it ever grows the table. Rejected
+// together with WithCostFunc or WithMemoryBudget - the table is sized in items, and a weighted capacity does not
+// count items.
 func WithPreallocatedSize() Option {
 	return Option{ApplyField: func(f *FieldOverrides) {
 		on := true

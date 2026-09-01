@@ -11,6 +11,9 @@ type Stats struct {
 	l2Misses  xsync.Counter
 	sets      xsync.Counter
 	deletes   xsync.Counter
+	// Item-table rebuilds, split by what they did: a purge only drops tombstones, a growth also doubles the table.
+	tableGrowths xsync.Counter
+	tablePurges  xsync.Counter
 }
 
 func newStats(enabled bool) Stats {
@@ -25,6 +28,9 @@ func newStats(enabled bool) Stats {
 		l2Misses:  *xsync.NewCounter(),
 		sets:      *xsync.NewCounter(),
 		deletes:   *xsync.NewCounter(),
+
+		tableGrowths: *xsync.NewCounter(),
+		tablePurges:  *xsync.NewCounter(),
 	}
 }
 
@@ -64,6 +70,18 @@ func (s *Stats) addDeletes(n int64) {
 	}
 }
 
+func (s *Stats) addTableGrowths(n int64) {
+	if s.enabled {
+		s.tableGrowths.Add(n)
+	}
+}
+
+func (s *Stats) addTablePurges(n int64) {
+	if s.enabled {
+		s.tablePurges.Add(n)
+	}
+}
+
 // MemoryHits is the number of read keys served from memory.
 func (s *Stats) MemoryHits() int64 { return s.memHits.Value() }
 
@@ -93,6 +111,14 @@ func (s *Stats) Sets() int64 { return s.sets.Value() }
 
 // Deletes is the number of keys removed by Delete and BatchDelete.
 func (s *Stats) Deletes() int64 { return s.deletes.Value() }
+
+// TableGrowths is the number of shard item tables rebuilt into a larger table. With WithPreallocatedSize this must
+// stay 0: a non-zero value means the cache outgrew what was preallocated for it and its memory footprint doubled.
+func (s *Stats) TableGrowths() int64 { return s.tableGrowths.Value() }
+
+// TablePurges is the number of shard item tables rebuilt at the same size to reclaim tombstones. Expected to grow
+// steadily on any cache that evicts or deletes; it costs CPU, not memory.
+func (s *Stats) TablePurges() int64 { return s.tablePurges.Value() }
 
 // Gets returns the total number of read keys: Hits() + Misses().
 func (s *Stats) Gets() int64 { return s.Hits() + s.Misses() }

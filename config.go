@@ -66,8 +66,8 @@ type Config[K comparable, V any] struct {
 	CustomPolicy EvictionPolicyFactory[K, V]
 
 	// PreallocateMap sizes every shard's FlatHashMap for its whole share of MemoryCapacity at construction: the
-	// smallest table a fill to capacity never rebuilds, which is the size growth-on-demand settles at anyway.
-	// Tombstones (deletes, evictions) can still trip a purge rebuild later, and that one doubles the table as usual.
+	// table a cache under churn settles at, so neither the fill nor the eviction that follows it ever grows the
+	// table. Tombstones still trip same-size purge rebuilds; those reclaim, they do not enlarge.
 	// Requires CostFunc == nil: weight is not an item count.
 	PreallocateMap bool
 
@@ -153,11 +153,18 @@ func pow2Ceil[T int | int64](n T) T {
 	return 1 << bits.Len64(uint64(n-1))
 }
 
-// preallocSlots is the smallest table a shard can fill to its capacity without a rebuild: maybeRebuild fires at 3/4
-// occupancy, and live peaks at cap+1 - the insert that trips eviction is counted before its victim leaves. This is
-// also where growth-on-demand settles, so preallocating costs no extra memory over a cache that filled itself up.
+// preallocSlots is the table a shard settles at under churn. Sizing it for the fill alone would take 4/3 of the
+// capacity - live peaks at cap+1, the insert that trips eviction being counted before its victim leaves - but every
+// eviction after that leaves a tombstone, and live+dirty counts the slots ever touched, not the live ones. So the 3/4
+// rebuild line falls within a percent of a full cache, and that rebuild doubles whenever live sits above half the
+// table. Handing out the doubled size up front costs nothing the cache would not take anyway, and it is what keeps
+// WithPreallocatedSize a promise rather than a delay.
 func preallocSlots(shardCap int64) int {
-	return int(min(max(pow2Ceil(4*(shardCap+1)/3+1), minTableSlots), maxTableSlots))
+	slots := max(pow2Ceil(4*(shardCap+1)/3+1), minTableSlots)
+	if 2*(shardCap+1) >= slots {
+		slots *= 2
+	}
+	return int(min(slots, maxTableSlots))
 }
 
 func (c *Config[K, V]) ghostSize() int {

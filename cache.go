@@ -553,8 +553,11 @@ func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *itemstore.FlatHashMap[K, 
 		return
 	}
 	newSize := t.Len()
-	if sh.live*2 >= newSize {
+	if sh.live*2 >= newSize && int64(newSize) < maxTableSlots {
 		newSize *= 2
+		c.stats.addTableGrowths(1)
+	} else {
+		c.stats.addTablePurges(1)
 	}
 	fresh := itemstore.NewFlatHashMap[K, V](newSize)
 	live := 0
