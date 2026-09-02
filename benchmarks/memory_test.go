@@ -5,6 +5,7 @@ package benchmarks
 
 import (
 	"context"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,15 @@ import (
 // are pointer-free and keys come from a counter, so the growth between snapshots is the cache and nothing else.
 
 const memstashCapacity = 100_000_000
+
+// preallocated turns on WithPreallocatedSize when MEMSTASH_PREALLOC is set - make bench-100kk PREALLOC=1 - so the
+// same benchmark measures a cache sized for its capacity up front against one that grows into it.
+func preallocated() []memstash.Option {
+	if os.Getenv("MEMSTASH_PREALLOC") == "" {
+		return nil
+	}
+	return []memstash.Option{memstash.WithPreallocatedSize()}
+}
 
 func BenchmarkMemoryFootprintMemstash(b *testing.B) {
 	ctx := context.Background()
@@ -51,9 +61,10 @@ func measureFootprint(b *testing.B, capacity int64) *memstash.Cache[uint64, uint
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 
-	c, err := memstash.New[uint64, uint64](
-		memstash.WithMemoryCapacity(capacity),
-	)
+	c, err := memstash.New[uint64, uint64](append(
+		[]memstash.Option{memstash.WithMemoryCapacity(capacity)},
+		preallocated()...,
+	)...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -77,8 +88,12 @@ func measureFootprint(b *testing.B, capacity int64) *memstash.Cache[uint64, uint
 	b.ReportMetric(float64(estimate)/float64(live), "B/entry-estimate")
 	b.ReportMetric(perEntryHeap/16.0, "x-payload") // overhead relative to the 16-byte raw key+value
 	b.ReportMetric(float64(heapBytes)/(1<<20), "MiB-heap-total")
-	b.Logf("capacity=%d live=%d heap=%s size-estimate=%s",
-		capacity, live, humanize.IBytes(heapBytes), humanize.IBytes(uint64(estimate)))
+	sizing := "grown"
+	if len(preallocated()) > 0 {
+		sizing = "preallocated"
+	}
+	b.Logf("capacity=%d live=%d sizing=%s heap=%s size-estimate=%s",
+		capacity, live, sizing, humanize.IBytes(heapBytes), humanize.IBytes(uint64(estimate)))
 
 	return c
 }

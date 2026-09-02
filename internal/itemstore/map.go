@@ -33,13 +33,13 @@ type FlatHashMap[K comparable, V any] struct {
 	short     []Item[K, V]              // the whole table while it fits one chunk - most tables do
 	chunks    []*[chunkSlots]Item[K, V] // past that: the slot's high bits pick the chunk, the low ones the slot in it
 	overflows *atomic.Uint32            // per group: how many keys homed in it live past its edge (SwissTable/f14)
-	mask      uint32                    // slot count minus one; the count is a power of two
+	size      uint32                    // slot count, as TableSlots and GrowSlots size it
 }
 
-// NewFlatHashMap allocates a table of itemCount slots, a power of two. Below chunkSlots the table is one flat run of
-// exactly that many slots, so a small shard costs no more than it used to.
+// NewFlatHashMap allocates a table of itemCount slots: a whole number of chunks, or a power of two below one chunk,
+// where the table is one flat run of exactly that many slots and a small shard costs no more than it used to.
 func NewFlatHashMap[K comparable, V any](itemCount int) *FlatHashMap[K, V] {
-	t := &FlatHashMap[K, V]{mask: uint32(itemCount - 1)}
+	t := &FlatHashMap[K, V]{size: uint32(itemCount)}
 	if itemCount <= chunkSlots {
 		t.short = make([]Item[K, V], itemCount)
 	} else {
@@ -53,21 +53,44 @@ func NewFlatHashMap[K comparable, V any](itemCount int) *FlatHashMap[K, V] {
 	return t
 }
 
-// At resolves a probe position (any uint32; wrapped by the mask) into its item.
-func (t *FlatHashMap[K, V]) At(idx uint32) *Item[K, V] {
-	idx &= t.mask
-	if t.mask < chunkSlots { // the mask already says which of the two layouts is in use
-		return &t.short[idx]
+// At resolves a probe position into its item. A probe walks forward from a slot index, so pos stays below twice the
+// slot count and one subtraction brings it back in range.
+func (t *FlatHashMap[K, V]) At(pos uint32) *Item[K, V] {
+	if pos >= t.size {
+		pos -= t.size
 	}
-	return &t.chunks[idx>>chunkShift][idx&chunkMask]
+	if t.size <= chunkSlots { // the slot count says which of the two layouts is in use
+		return &t.short[pos]
+	}
+	return &t.chunks[pos>>chunkShift][pos&chunkMask]
 }
 
-// Home is the probe start for a key hash: the high hash bits, so the slot position stays uncorrelated with the tag
-// and the lowest bits picking the shard.
-func (t *FlatHashMap[K, V]) Home(hash uint64) uint32 { return uint32(hash>>32) & t.mask }
+// Home returns a key hash's home slot: the high 32 hash bits scaled into the slot range, so it stays independent of
+// the tag and of the shard bits. Multiply-shift rather than a mask, because the slot count is not a power of two.
+func (t *FlatHashMap[K, V]) Home(hash uint64) uint32 {
+	return uint32((hash >> 32) * uint64(t.size) >> 32)
+}
 
 // Wrap normalizes a probe position into a slot index.
-func (t *FlatHashMap[K, V]) Wrap(pos uint32) uint32 { return pos & t.mask }
+func (t *FlatHashMap[K, V]) Wrap(pos uint32) uint32 {
+	if pos >= t.size {
+		pos -= t.size
+	}
+	return pos
+}
+
+// Dist is the number of steps a probe takes from one slot to another, the wrap included.
+func (t *FlatHashMap[K, V]) Dist(from, to uint32) uint32 {
+	if to >= from {
+		return to - from
+	}
+	return to + t.size - from
+}
+
+// Covers reports whether the probe chain of a key homed at home, living at pos, runs through slot q.
+func (t *FlatHashMap[K, V]) Covers(home, pos, q uint32) bool {
+	return t.Dist(home, q) < t.Dist(home, pos)
+}
 
 // A group's overflow word is 8 counters of 4 bits, picked by the key's tag, so a probe asks whether a key with ITS
 // tag left the group rather than whether any key did. Same word, same 4 bytes, but it turns 43% of misses that must
@@ -91,7 +114,7 @@ func (t *FlatHashMap[K, V]) OverflowedTag(home, bucket uint32) bool {
 // NoteDisplaced counts a key that settled outside its home group, under the counter its tag picks.
 func (t *FlatHashMap[K, V]) NoteDisplaced(keyHash uint64, pos uint32) {
 	home := t.Home(keyHash)
-	if home>>groupShift == (pos&t.mask)>>groupShift {
+	if home>>groupShift == t.Wrap(pos)>>groupShift {
 		return
 	}
 	word, shift := t.overflowAt(home), OverflowBucket(keyHash)*overflowWidth
@@ -103,7 +126,7 @@ func (t *FlatHashMap[K, V]) NoteDisplaced(keyHash uint64, pos uint32) {
 // ForgetDisplaced undoes NoteDisplaced when the key at pos dies.
 func (t *FlatHashMap[K, V]) ForgetDisplaced(keyHash uint64, pos uint32) {
 	home := t.Home(keyHash)
-	if home>>groupShift == (pos&t.mask)>>groupShift {
+	if home>>groupShift == t.Wrap(pos)>>groupShift {
 		return
 	}
 	word, shift := t.overflowAt(home), OverflowBucket(keyHash)*overflowWidth
@@ -112,18 +135,88 @@ func (t *FlatHashMap[K, V]) ForgetDisplaced(keyHash uint64, pos uint32) {
 	}
 }
 
+// overflowAt takes a home that Home already reduced into range.
 func (t *FlatHashMap[K, V]) overflowAt(home uint32) *atomic.Uint32 {
-	return (*atomic.Uint32)(unsafe.Add(unsafe.Pointer(t.overflows), uintptr((home&t.mask)>>groupShift)*4))
+	return (*atomic.Uint32)(unsafe.Add(unsafe.Pointer(t.overflows), uintptr(home>>groupShift)*4))
 }
 
 // MarkChain sets HasNext on every slot between a new key's home and the slot it landed in. Most of those already
 // carry the bit, so it reads first and writes only where the bit is missing.
 func (t *FlatHashMap[K, V]) MarkChain(home, placed uint32) {
-	for d, steps := uint32(0), (placed-home)&t.mask; d < steps; d++ {
+	for d, steps := uint32(0), t.Dist(home, placed); d < steps; d++ {
 		if item := t.At(home + d); item.Metadata()&HasNext == 0 {
 			item.MarkHasNext()
 		}
 	}
+}
+
+// cascadeLimit caps the walk left of a freed slot. The walk stops on its own within a slot or two; the cap only
+// keeps a table that is almost entirely tombstones from turning one free into a long scan.
+const cascadeLimit = 64
+
+// TableSlots rounds a wanted slot count up to a size a table can take: whole chunks once it needs more than one,
+// and whole overflow groups below that, since every group owns a counter.
+func TableSlots(want int) int {
+	const groupRound = 1<<groupShift - 1
+	if want <= chunkSlots {
+		return (want + groupRound) &^ groupRound
+	}
+	return (want + chunkMask) &^ chunkMask
+}
+
+// GrowSlots is the next size up for a table that ran out of room: a quarter more, rounded down to whole chunks and
+// then one chunk further, so the ladder past the first chunk runs 1, 2, 3, 4, 6, 8, 11... Below three quarters of a
+// chunk the table is small enough that doubling costs nothing worth saving.
+func GrowSlots(size int) int {
+	switch {
+	case size < chunkSlots*3/4:
+		return size * 2
+	case size < chunkSlots:
+		return chunkSlots
+	default:
+		return (size*5/4/chunkSlots + 1) * chunkSlots
+	}
+}
+
+// Release hands a dead slot back once its queue node is gone. When no live key's probe chain runs through it the slot
+// goes back to a zero meta word instead of staying a tombstone, and so do the slots to its left that can no longer be
+// covered. Returns how many slots it reclaimed, so the shard can drop them from its tombstone count.
+//
+// uncovered says the caller has established that nothing homed at or before idx lives past it. Everything from there
+// needs no further test: if a slot is uncovered and holds no live key, its neighbour to the left is uncovered too,
+// because the only key that could have covered the neighbour is the one that lived in the slot itself. So the walk
+// stops at the first live item - whose stale bit it still clears - and at the first slot that is already empty.
+// Called under the shard mutex.
+func (t *FlatHashMap[K, V]) Release(idx uint32, uncovered bool) int {
+	item := t.At(idx)
+	if !uncovered {
+		item.MakeFree()
+		return 0
+	}
+	item.Clear()
+	freed, pos := 1, idx
+	for back := 0; back < cascadeLimit; back++ {
+		if pos == 0 {
+			pos = t.size
+		}
+		pos--
+		item = t.At(pos)
+		metaWord := item.Metadata()
+		if metaWord == 0 {
+			break // already empty and its bit is clear: nothing left of here can be stale through it
+		}
+		if metaWord&HasNext != 0 {
+			item.ClearHasNext()
+		}
+		if metaWord&Dead == 0 {
+			break // a live key: its bit is fixed, but it may still cover what lies further left
+		}
+		if Reusable(metaWord) {
+			item.Clear()
+			freed++
+		}
+	}
+	return freed
 }
 
 // InsertFresh copies a live item into a table nobody reads yet (rebuilds) and returns its slot index.
@@ -136,13 +229,13 @@ func (t *FlatHashMap[K, V]) InsertFresh(keyHash uint64, src *Item[K, V]) uint32 
 			// The chains are the old table's; this one gets its own from MarkChain.
 			dst.meta.Store(src.meta.Load() &^ HasNext)
 			t.NoteDisplaced(keyHash, pos)
-			t.MarkChain(home, pos&t.mask)
-			return pos & t.mask
+			t.MarkChain(home, t.Wrap(pos))
+			return t.Wrap(pos)
 		}
 	}
 }
 
-func (t *FlatHashMap[K, V]) Len() int { return int(t.mask) + 1 }
+func (t *FlatHashMap[K, V]) Len() int { return int(t.size) }
 
 func (t *FlatHashMap[K, V]) Bytes() int64 {
 	length := int64(t.Len())

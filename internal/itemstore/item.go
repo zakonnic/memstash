@@ -138,6 +138,18 @@ func (s *Item[K, V]) MakeFree() {
 // it appears behaves like a Get racing the Set.
 func (s *Item[K, V]) MarkHasNext() { s.meta.Or(HasNext) }
 
+// Clear returns a slot to never-occupied: no pair, no chain bit, no generation. Called under the shard mutex on a
+// slot no live key's probe chain runs through, so a probe that stops here stops correctly. The pair goes first, as in
+// MakeFree: a reader cannot be mid-snapshot on a slot whose meta word already says Dead.
+func (s *Item[K, V]) Clear() {
+	s.entry = Entry[K, V]{}
+	s.meta.Store(0)
+}
+
+// ClearHasNext retires a chain bit whose key is gone, on a slot proven uncovered. A reader that still sees the bit
+// walks one slot too far, nothing worse.
+func (s *Item[K, V]) ClearHasNext() { s.meta.And(^HasNext) }
+
 // Reusable reports whether an insert may claim this slot: dead and released by its queue.
 func Reusable(metaWord uint64) bool { return metaWord&(Dead|Free) == Dead|Free }
 

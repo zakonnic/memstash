@@ -6,6 +6,8 @@ import (
 	"math/bits"
 	"runtime"
 	"time"
+
+	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
 // Errors reported by New and NewWithConfig for a configuration that cannot produce a working cache.
@@ -65,9 +67,9 @@ type Config[K comparable, V any] struct {
 	// takes precedence over Policy. The factory must not return nil.
 	CustomPolicy EvictionPolicyFactory[K, V]
 
-	// PreallocateMap sizes every shard's FlatHashMap for its whole share of MemoryCapacity at construction: the
-	// table a cache under churn settles at, so neither the fill nor the eviction that follows it ever grows the
-	// table. Tombstones still trip same-size purge rebuilds; those reclaim, they do not enlarge.
+	// PreallocateMap sizes every shard's FlatHashMap for its whole share of MemoryCapacity at construction, packed to
+	// preallocLoad, so the fill itself never rebuilds. Tombstones are released in place as they die, which normally
+	// keeps the table off the rebuild line entirely; a churning cache may still take one growth step and then hold.
 	// Requires CostFunc == nil: weight is not an item count.
 	PreallocateMap bool
 
@@ -153,17 +155,16 @@ func pow2Ceil[T int | int64](n T) T {
 	return 1 << bits.Len64(uint64(n-1))
 }
 
-// preallocSlots is the table a shard settles at under churn. Sizing it for the fill alone would take 4/3 of the
-// capacity - live peaks at cap+1, the insert that trips eviction being counted before its victim leaves - but every
-// eviction after that leaves a tombstone, and live+dirty counts the slots ever touched, not the live ones. So the 3/4
-// rebuild line falls within a percent of a full cache, and that rebuild doubles whenever live sits above half the
-// table. Handing out the doubled size up front costs nothing the cache would not take anyway, and it is what keeps
-// WithPreallocatedSize a promise rather than a delay.
+// preallocLoad is the share of its table a preallocated shard fills, as den/num - 5/3 is a load of 0.6. Since the
+// table can be any whole number of chunks, this one fraction is the whole memory-for-latency dial: linear probing
+// packs denser but walks further, and the walk grows faster than the saving.
+const preallocLoadNum, preallocLoadDen = 3, 5
+
+// preallocSlots sizes a shard's table for its share of the capacity. live peaks at cap+1 - the insert that trips
+// eviction is counted before its victim leaves - and the table is rounded up to a whole chunk from there.
 func preallocSlots(shardCap int64) int {
-	slots := max(pow2Ceil(4*(shardCap+1)/3+1), minTableSlots)
-	if 2*(shardCap+1) >= slots {
-		slots *= 2
-	}
+	want := ((shardCap+1)*preallocLoadDen + preallocLoadNum - 1) / preallocLoadNum
+	slots := int64(itemstore.TableSlots(int(max(want, minTableSlots))))
 	return int(min(slots, maxTableSlots))
 }
 

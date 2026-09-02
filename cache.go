@@ -556,7 +556,7 @@ func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *itemstore.FlatHashMap[K, 
 	}
 	newSize := t.Len()
 	if sh.live*2 >= newSize && int64(newSize) < maxTableSlots {
-		newSize *= 2
+		newSize = min(itemstore.GrowSlots(newSize), int(maxTableSlots))
 		c.stats.addTableGrowths(1)
 	} else {
 		c.stats.addTablePurges(1)
@@ -602,7 +602,7 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 				c.addDeletion(deletions, entry.Key, entry.Value, cause)
 			}
 		}
-		item.MakeFree() // the queue node is gone: the slot may serve a new key
+		sh.dirty -= c.releaseSlot(storage, victimIdx) // the queue node is gone: the slot may serve a new key
 	}
 }
 
@@ -673,6 +673,40 @@ func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *
 	c.noteDead(sh)
 }
 
+// coverScanLimit caps the walk that tests whether a chain bit is still earned. The walk stops on its own within a
+// couple of slots; the cap only bounds a table whose bits have gone stale in bulk, and stopping early just leaves a
+// tombstone where a zero would have done.
+const coverScanLimit = 64
+
+// releaseSlot hands a dead slot back once its queue node is gone. A slot no live key's probe chain runs through is
+// zeroed outright rather than left as a tombstone, which is what keeps a churning cache off the rebuild line without
+// ever moving an item. Returns how many slots it reclaimed. Called under the shard mutex.
+func (c *Cache[K, V]) releaseSlot(storage *itemstore.FlatHashMap[K, V], idx uint32) int {
+	// A clear chain bit is proof on its own: nothing homed at or before this slot lives past it. A set one only
+	// means some key did once, so it is worth asking whether that key is still there.
+	uncovered := storage.At(idx).Metadata()&itemstore.HasNext == 0 || !c.covered(storage, idx)
+	return storage.Release(idx, uncovered)
+}
+
+// covered reports whether some live key's probe chain still runs through the slot at q. It walks forward only while
+// the chain bits say a chain might continue, so it stops where the run provably ends. Called under the shard mutex.
+func (c *Cache[K, V]) covered(storage *itemstore.FlatHashMap[K, V], q uint32) bool {
+	for step, pos := 0, q+1; step < coverScanLimit; step, pos = step+1, pos+1 {
+		item := storage.At(pos)
+		metaWord := item.Metadata()
+		if metaWord&itemstore.Dead == 0 && metaWord != 0 {
+			home := storage.Home(maphash.Comparable(c.seed, item.Entry().Key))
+			if storage.Covers(home, storage.Wrap(pos), q) {
+				return true
+			}
+		}
+		if metaWord&itemstore.HasNext == 0 {
+			return false // the chain provably ends here, so nothing past it can reach back over q
+		}
+	}
+	return true // out of budget: leave the tombstone rather than risk cutting a chain
+}
+
 // findSlot probes the shard's current table for the key's live slot: (slot index, item, true) when found. Called
 // under the shard mutex.
 func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, *itemstore.Item[K, V], bool) {
@@ -707,7 +741,7 @@ func (c *Cache[K, V]) noteDead(sh *shard[K, V]) {
 	sh.deadCount++
 	if sh.deadCount >= sweepMinDead && sh.deadCount*2 >= sh.policy.Len() {
 		storage := sh.items.GetStorage()
-		sh.policy.Sweep(func(idx uint32) { storage.At(idx).MakeFree() })
+		sh.policy.Sweep(func(idx uint32) { sh.dirty -= c.releaseSlot(storage, idx) })
 		sh.deadCount = 0
 	}
 }
