@@ -116,6 +116,16 @@ func (t *FlatHashMap[K, V]) overflowAt(home uint32) *atomic.Uint32 {
 	return (*atomic.Uint32)(unsafe.Add(unsafe.Pointer(t.overflows), uintptr((home&t.mask)>>groupShift)*4))
 }
 
+// MarkChain sets HasNext on every slot between a new key's home and the slot it landed in. Most of those already
+// carry the bit, so it reads first and writes only where the bit is missing.
+func (t *FlatHashMap[K, V]) MarkChain(home, placed uint32) {
+	for d, steps := uint32(0), (placed-home)&t.mask; d < steps; d++ {
+		if item := t.At(home + d); item.Metadata()&HasNext == 0 {
+			item.MarkHasNext()
+		}
+	}
+}
+
 // InsertFresh copies a live item into a table nobody reads yet (rebuilds) and returns its slot index.
 func (t *FlatHashMap[K, V]) InsertFresh(keyHash uint64, src *Item[K, V]) uint32 {
 	home := t.Home(keyHash)
@@ -123,8 +133,10 @@ func (t *FlatHashMap[K, V]) InsertFresh(keyHash uint64, src *Item[K, V]) uint32 
 		dst := t.At(pos)
 		if dst.meta.Load() == 0 {
 			dst.entry = src.entry
-			dst.meta.Store(src.meta.Load())
+			// The chains are the old table's; this one gets its own from MarkChain.
+			dst.meta.Store(src.meta.Load() &^ HasNext)
 			t.NoteDisplaced(keyHash, pos)
+			t.MarkChain(home, pos&t.mask)
 			return pos & t.mask
 		}
 	}

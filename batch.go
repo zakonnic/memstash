@@ -148,7 +148,7 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 		groupEnd := (home | 7) + 1
 		metaWord, pos := g.meta[i], home
 		for {
-			if metaWord == 0 || (pos == groupEnd && !t.OverflowedTag(home, itemstore.OverflowBucket(g.keyHash[i]))) {
+			if pos == groupEnd && !t.OverflowedTag(home, itemstore.OverflowBucket(g.keyHash[i])) {
 				g.item[i] = nil // end of the probe chain: a definite miss
 				break
 			}
@@ -156,6 +156,10 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 				g.item[i] = t.At(pos)
 				g.meta[i] = metaWord
 				g.pos[i] = t.Wrap(pos)
+				break
+			}
+			if metaWord&itemstore.HasNext == 0 {
+				g.item[i] = nil // no key homed at or before this slot lives past it
 				break
 			}
 			pos++

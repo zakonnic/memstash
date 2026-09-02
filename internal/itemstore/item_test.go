@@ -1,10 +1,12 @@
 package itemstore
 
 import (
+	"math/rand"
 	"testing"
 	"unsafe"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestItemSize pins the item footprints: the meta word plus the Entry and nothing else.
@@ -67,4 +69,29 @@ func TestGenWrapNeverLooksEmpty(t *testing.T) {
 	item.SetValue("wrapped")
 	assert.NotZero(t, item.Metadata(), "a wrapped in-place write must not leave an empty-slot meta word")
 	assert.Zero(t, item.Metadata()&1, "endWrite must settle the generation even")
+}
+
+// TestTagNeverMatchesEmptySlot pins what lets probes drop their meta == 0 test: a never-occupied slot must never
+// look like a candidate. Its meta word is 0, so the candidate compare metaWord&DeadOrTag == tag can only hold if
+// some hash yields tag 0 - and then a probe for the zero-valued key would snapshot the slot's zeroed Entry, match
+// it, and report a hit on a key the cache never held.
+func TestTagNeverMatchesEmptySlot(t *testing.T) {
+	var empty Item[uint64, uint64]
+	require.Zero(t, empty.Metadata(), "a fresh slot must read as a zero meta word")
+
+	check := func(hash uint64) {
+		t.Helper()
+		tag := TagOf(hash)
+		require.NotZero(t, tag, "hash %#016x yields a zero tag", hash)
+		require.Zero(t, tag&^TagMask, "hash %#016x puts bits outside the tag field", hash)
+		require.NotEqual(t, empty.Metadata()&DeadOrTag, tag, "hash %#016x matches an empty slot", hash)
+	}
+	check(0)
+	for shift := range 64 { // every single-bit hash, including those with no bits in the tag field at all
+		check(1 << uint(shift))
+	}
+	rng := rand.New(rand.NewSource(1))
+	for range 200_000 {
+		check(rng.Uint64())
+	}
 }

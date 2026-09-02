@@ -375,15 +375,13 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 			return zero, false // nothing homed in this group lives past it: definitely absent
 		}
 		item := storage.At(pos)
+		metaWord := item.Metadata()
 		for {
-			metaWord := item.Metadata()
-			if metaWord == 0 {
-				return zero, false // a never-occupied slot ends the probe chain
-			}
 			if metaWord&itemstore.DeadOrTag != tagged {
 				break // dead, or a foreign tag
 			}
 			if !item.SnapshotInto(&entry, metaWord) {
+				metaWord = item.Metadata()
 				continue // the copy raced a recycle or an overwrite: retry against the fresh meta word
 			}
 			if entry.Key != key {
@@ -403,6 +401,9 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 			// TTL has elapsed - drop the item lazily instead of waiting for the eviction queue to reach it.
 			c.dropExpired(sh, keyHash, key, storage.Wrap(pos))
 			return zero, false
+		}
+		if metaWord&itemstore.HasNext == 0 {
+			return zero, false // no key homed at or before this slot lives past it
 		}
 	}
 }
@@ -491,6 +492,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 			}
 			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff)
 			storage.NoteDisplaced(keyHash, pos)
+			storage.MarkChain(home, storage.Wrap(pos))
 			sh.live++
 			sh.policy.Add(itemstore.QNode{Idx: storage.Wrap(pos), Cost: uint32(weight)})
 			c.maybeRebuild(sh, storage)
@@ -634,21 +636,22 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 			return false
 		}
 		item := storage.At(pos)
+		metaWord := item.Metadata()
 		for {
-			metaWord := item.Metadata()
-			if metaWord == 0 {
-				return false
-			}
 			if metaWord&itemstore.DeadOrTag != tagged {
 				break
 			}
 			if !item.SnapshotInto(&entry, metaWord) {
+				metaWord = item.Metadata()
 				continue
 			}
 			if entry.Key == key {
 				return true
 			}
 			break
+		}
+		if metaWord&itemstore.HasNext == 0 {
+			return false
 		}
 	}
 }
@@ -683,14 +686,11 @@ func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, 
 		}
 		item := storage.At(pos)
 		metaWord := item.Metadata()
-		if metaWord == 0 {
-			return 0, nil, false
-		}
-		if metaWord&itemstore.DeadOrTag != tagged {
-			continue
-		}
-		if item.Entry().Key == key {
+		if metaWord&itemstore.DeadOrTag == tagged && item.Entry().Key == key {
 			return storage.Wrap(pos), item, true
+		}
+		if metaWord&itemstore.HasNext == 0 {
+			return 0, nil, false
 		}
 	}
 }

@@ -9,14 +9,17 @@ import (
 
 // Layout of an item's 64-bit meta word:
 //
-//	[dead:1][secondChance:1][thirdChance:1][free:1][expireOff:18][tag:14][gen:28]
+//	[dead:1][secondChance:1][thirdChance:1][free:1][expireOff:18][hasNext:1][tag:13][gen:28]
 //
 // dead marks a tombstone the eviction queue skips; free marks a dead slot whose queue node is already gone, so inserts
 // may reuse it; the two chance bits form a unary reference counter; expireOff is the expiration time in expireUnit
-// steps on a wrapping scale (0 = no TTL); tag prefilters candidates without touching the key - only items sharing a
-// home slot are compared against it, so 14 bits stay ample; gen counts the item's occupancies and in-place value
-// writes, and lock-free readers validate their Entry snapshot against it (see Snapshot).
-// A meta word of 0 is a never-occupied slot and terminates probes: gen 0 is reserved, so no live item reads as one.
+// steps on a wrapping scale (0 = no TTL); hasNext says a key homed at or before this slot lives past it, so a probe
+// must keep walking; tag prefilters candidates without touching the key - only items sharing a home slot are compared
+// against it, so 13 bits stay ample (12 of them carrying hash, see TagOf); gen counts the item's occupancies and
+// in-place value writes, and lock-free
+// readers validate their Entry snapshot against it (see Snapshot).
+// A meta word of 0 is a never-occupied slot: gen 0 is reserved, so no live item reads as one, and TagOf never
+// yields 0, so no probe mistakes one for a candidate.
 //
 // The unary counter is deliberate: increment is an idempotent OR and decrement an AND, and a saturated counter
 // performs no writes at all, so hot keys never bounce the cache line between cores.
@@ -39,8 +42,14 @@ const (
 	// ExpireMax is the maximum TTL in offset units: half the wrapping scale, so "behind now" stays unambiguous.
 	ExpireMax = 1<<17 - 1
 
+	// HasNext is the probe terminator, and it is only ever set on a live table - never cleared, exactly like the
+	// never-occupied slots it supersedes. Clear means no key homed at or before this slot lives past it, so a probe
+	// that got here without a match may stop. It runs out more slowly than meta == 0 does: an insert consumes a
+	// never-occupied slot every time, but marks only the slots the key actually flew over.
+	HasNext uint64 = 1 << 41
+
 	TagShift        = 28
-	TagMask  uint64 = (1<<14 - 1) << TagShift
+	TagMask  uint64 = (1<<13 - 1) << TagShift
 	// DeadOrTag matches a probe candidate in one compare: alive and carrying the probed tag.
 	DeadOrTag = Dead | TagMask
 
@@ -50,9 +59,14 @@ const (
 	AliveGenMask = Dead | GenMask
 )
 
-// TagOf extracts a key hash's slot tag, positioned for direct meta-word compares. Hash bits 14..27: disjoint from the
+// TagOf extracts a key hash's slot tag, positioned for direct meta-word compares. Hash bits 14..26: disjoint from the
 // low bits picking the shard and the high bits picking the home slot.
-func TagOf(hash uint64) uint64 { return hash >> 14 << TagShift & TagMask }
+//
+// The low bit is forced, so a tag is never 0. That is what lets probes drop the meta == 0 test: a never-occupied
+// slot's zero meta word can no longer pass the candidate compare, and the probe falls through to HasNext, which a
+// never-occupied slot has clear. It costs the low bit's entropy - 12 distinct tags rather than 13 bits' worth, so a
+// false candidate every 4096 instead of every 8192, and a false candidate is one key compare on a line already read.
+func TagOf(hash uint64) uint64 { return hash>>14<<TagShift&TagMask | 1<<TagShift }
 
 // Entry is the key/value pair of one cached item.
 type Entry[K comparable, V any] struct {
@@ -95,9 +109,11 @@ func (s *Item[K, V]) Snapshot(metaWord uint64) (Entry[K, V], bool) {
 
 // Publish fills an empty or free slot with a fresh occupancy: the Entry lands strictly before the meta word goes
 // live, so a reader that sees the item alive always finds the pair in place. Called under the shard mutex.
+// HasNext survives: the slot may sit in some other key's probe chain, and clearing it would cut that chain.
 func (s *Item[K, V]) Publish(entry Entry[K, V], tag uint64, expireOff uint32) {
 	s.entry = entry
-	s.meta.Store(uint64(expireOff)<<ExpireShift | tag | liveGen((s.meta.Load()+2)&^1))
+	prev := s.meta.Load()
+	s.meta.Store(prev&HasNext | uint64(expireOff)<<ExpireShift | tag | liveGen((prev+2)&^1))
 }
 
 // liveGen fits a generation into its field, skipping 0: that value marks a never-occupied slot, and an item with no
@@ -117,6 +133,10 @@ func (s *Item[K, V]) MakeFree() {
 	s.entry = Entry[K, V]{}
 	s.meta.Or(Free)
 }
+
+// MarkHasNext records that a key homed at or before this slot lives past it. A probe that reads the bit just before
+// it appears behaves like a Get racing the Set.
+func (s *Item[K, V]) MarkHasNext() { s.meta.Or(HasNext) }
 
 // Reusable reports whether an insert may claim this slot: dead and released by its queue.
 func Reusable(metaWord uint64) bool { return metaWord&(Dead|Free) == Dead|Free }
