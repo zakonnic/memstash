@@ -20,6 +20,7 @@ func TestModelAgainstMap(t *testing.T) {
 	for _, tc := range policies {
 		for _, shards := range []int{0, 1} { // default sharding and the single-shard deterministic layout
 			t.Run(fmt.Sprintf("%s/shards=%d", tc.name, shards), func(t *testing.T) {
+				t.Parallel() // own cache, own model, own RNG
 				ctx := context.Background()
 				c, err := memstash.NewWithConfig(&memstash.Config[string, int]{
 					MemoryCapacity: 10_000,

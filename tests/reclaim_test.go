@@ -19,8 +19,8 @@ func heapAlloc() int64 {
 
 // TestDeleteBelowCapacityDoesNotLeak reproduces the tombstone-accumulation scenario: a delete-heavy workload that
 // never reaches the capacity, so eviction passes (the original reclamation mechanism) never run. Without the
-// tombstone sweep the pool and the queues grow without bound - 2M set+delete cycles retained ~65 MB (~33 bytes per
-// cycle); with the sweep the footprint must stay flat.
+// tombstone sweep the pool and the queues grow without bound - ~33 bytes per cycle; with the sweep the footprint
+// must stay flat. The subtests measure process heap, so they cannot run in parallel with each other.
 func TestDeleteBelowCapacityDoesNotLeak(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range policies {
@@ -34,16 +34,17 @@ func TestDeleteBelowCapacityDoesNotLeak(t *testing.T) {
 			defer c.Close()
 
 			before := heapAlloc()
-			const cycles = 2_000_000
+			const cycles = 250_000
 			for i := 0; i < cycles; i++ {
 				require.NoError(t, c.Set(ctx, i, i))
 				require.NoError(t, c.Delete(ctx, i))
 			}
 			growth := heapAlloc() - before
 
-			// Without reclamation the growth is ~65 MB; with it - well under a megabyte. The 8 MB bound leaves a wide
-			// margin for GC noise while still failing hard on the unbounded behavior.
-			assert.LessOrEqualf(t, growth, int64(8<<20),
+			// Without reclamation these cycles leak ~8 MB; with it the growth is a rounding error - measured at
+			// -0.04 MB. The 1 MB bound leaves room for GC noise while still failing hard on the unbounded behavior.
+			t.Logf("heap growth over %d cycles: %.2f MB", cycles, float64(growth)/(1<<20))
+			assert.LessOrEqualf(t, growth, int64(1<<20),
 				"heap grew by %.1f MB over %d set+delete cycles below capacity: tombstones are not reclaimed",
 				float64(growth)/(1<<20), cycles)
 

@@ -83,6 +83,7 @@ func TestIteratorNothingLive(t *testing.T) {
 }
 
 func TestIteratorSkipsExpired(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 1000, TTL: time.Second})
 	for i := range 50 {

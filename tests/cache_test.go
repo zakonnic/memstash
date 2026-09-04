@@ -175,6 +175,7 @@ func TestCostFunctionAccounting(t *testing.T) {
 }
 
 func TestTTLExpiry(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("slow TTL test")
 	}
@@ -198,6 +199,7 @@ func TestTTLExpiry(t *testing.T) {
 }
 
 func TestOverwriteRefreshesTTL(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("slow TTL test")
 	}
@@ -218,6 +220,7 @@ func TestOverwriteRefreshesTTL(t *testing.T) {
 }
 
 func TestRefreshTTLOnGet(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("slow TTL test")
 	}
@@ -365,6 +368,7 @@ func TestConcurrentReadsDuringGrowth(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range policies {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel() // own cache and own goroutines
 			c, err := memstash.New[int, int](memstash.WithMemoryCapacity(200_000), memstash.WithPolicy(tc.policy))
 			require.NoError(t, err)
 			defer c.Close()

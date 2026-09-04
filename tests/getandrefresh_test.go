@@ -35,6 +35,7 @@ func TestGetAndRefreshServesCurrentAndReloads(t *testing.T) {
 }
 
 func TestGetAndRefreshServesExpiredValue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100, TTL: time.Second})
 	require.NoError(t, c.Set(ctx, "k", "old"))

@@ -229,6 +229,7 @@ func TestSnapshotJSONValues(t *testing.T) {
 // TestSnapshotLoadWithTTLKeepsSchedule pins LoadWithTTL: an item keeps the moment it was going to expire at, so the
 // wait before loading eats into its remaining life.
 func TestSnapshotLoadWithTTLKeepsSchedule(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	src := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100, TTL: 4 * time.Second})
 	require.NoError(t, src.Set(ctx, "k", "v"))
@@ -250,6 +251,7 @@ func TestSnapshotLoadWithTTLKeepsSchedule(t *testing.T) {
 // TestSnapshotLoadWithTTLSkipsExpired pins that an item whose deadline passed while the snapshot sat around is
 // dropped instead of being resurrected.
 func TestSnapshotLoadWithTTLSkipsExpired(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	src := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100, TTL: time.Second})
 	require.NoError(t, src.Set(ctx, "k", "v"))
@@ -265,6 +267,7 @@ func TestSnapshotLoadWithTTLSkipsExpired(t *testing.T) {
 
 // TestSnapshotLoadWithCurrentTTL pins the default: the same stale snapshot loads fine and gets a full lifetime.
 func TestSnapshotLoadWithCurrentTTL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	src := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100, TTL: time.Second})
 	require.NoError(t, src.Set(ctx, "k", "v"))

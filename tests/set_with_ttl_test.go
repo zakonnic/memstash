@@ -43,6 +43,7 @@ func TestSetWithTTLRejectsNonPositive(t *testing.T) {
 // TestSetWithTTLExpiresOnItsOwnSchedule: the entry outlives neither its own lifetime nor, in the other direction,
 // the cache's - the point of the method is that the two are independent.
 func TestSetWithTTLExpiresOnItsOwnSchedule(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	c, err := memstash.New[string, string](memstash.WithTTL(time.Hour))
 	require.NoError(t, err)
@@ -66,6 +67,7 @@ func TestSetWithTTLExpiresOnItsOwnSchedule(t *testing.T) {
 // TestSetWithTTLOutlivesTheCacheTTL: a per-entry lifetime longer than the configured one is allowed - the scale, not
 // the cache's TTL, is the ceiling.
 func TestSetWithTTLOutlivesTheCacheTTL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	c, err := memstash.New[string, string](memstash.WithTTL(time.Second))
 	require.NoError(t, err)
@@ -86,6 +88,7 @@ func TestSetWithTTLOutlivesTheCacheTTL(t *testing.T) {
 // TestSetWithTTLRefreshOnGetUsesCacheTTL: documented behavior - a read under WithRefreshTTLOnGet extends the entry
 // by the cache's TTL, so the custom lifetime holds only until the first refresh.
 func TestSetWithTTLRefreshOnGetUsesCacheTTL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	c, err := memstash.New[string, string](
 		memstash.WithTTL(time.Hour),

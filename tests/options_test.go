@@ -7,13 +7,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
 	"github.com/zakonnic/memstash"
 )
 
 // TestFunctionalOptions exercises the With* option constructors that no other test happens to call directly - most
 // tests configure Config fields directly via NewWithConfig instead of going through New(opts...).
 func TestFunctionalOptions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("WithTTL", func(t *testing.T) {

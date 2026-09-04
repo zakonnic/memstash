@@ -116,6 +116,7 @@ func TestDeletionCauseOverflow(t *testing.T) {
 }
 
 func TestDeletionCauseExpiration(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	c, rec := newWatchedCache(t, memstash.Config[string, string]{MemoryCapacity: 100, TTL: time.Second})
 	require.NoError(t, c.Set(ctx, "k", "v"))

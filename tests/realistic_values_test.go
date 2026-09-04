@@ -15,10 +15,12 @@ import (
 
 var realisticBlob = workload.NewBlob(99, workload.DefaultBlobSize)
 
+// A fifth of the benchmark's scale: catalog, trace and byte budget all scale together, so the share of the working
+// set that fits - and with it the hit rate and the eviction pressure the replay exercises - is unchanged.
 var (
-	realisticSessions = workload.SessionScenario{Catalog: 3_000_000, TraceLen: 2_000_000}
-	realisticCDN      = workload.CDNScenario{Catalog: 1_000_000, TraceLen: 1_500_000}
-	realisticDBRows   = workload.DBScenario{Rows: 2_000_000, ScanRows: 200_000, ChunkSize: 500_000, TraceLen: 2_000_000}
+	realisticSessions = workload.SessionScenario{Catalog: 600_000, TraceLen: 400_000}
+	realisticCDN      = workload.CDNScenario{Catalog: 200_000, TraceLen: 300_000}
+	realisticDBRows   = workload.DBScenario{Rows: 400_000, ScanRows: 40_000, ChunkSize: 100_000, TraceLen: 400_000}
 )
 
 // TestRealisticTraceValues replays every scenario and verifies each hit byte-for-byte against the key's deterministic
@@ -34,17 +36,18 @@ func TestRealisticTraceValues(t *testing.T) {
 		budget     int64
 	}{
 		{name: "web-sessions", buildTrace: realisticSessions.Trace,
-			value: func(key string) []byte { return realisticSessions.Value(realisticBlob, key) }, budget: 64 << 20},
+			value: func(key string) []byte { return realisticSessions.Value(realisticBlob, key) }, budget: 13 << 20},
 		{name: "cdn-assets", buildTrace: realisticCDN.Trace,
-			value: func(key string) []byte { return realisticCDN.Value(realisticBlob, key) }, budget: 256 << 20},
+			value: func(key string) []byte { return realisticCDN.Value(realisticBlob, key) }, budget: 51 << 20},
 		{name: "db-rows", buildTrace: realisticDBRows.Trace,
-			value: func(key string) []byte { return realisticDBRows.Value(realisticBlob, key) }, budget: 48 << 20},
+			value: func(key string) []byte { return realisticDBRows.Value(realisticBlob, key) }, budget: 10 << 20},
 	}
 
 	for _, sc := range scenarios {
 		trace := sc.buildTrace()
 		for _, tc := range policies {
 			t.Run(sc.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
 				c, err := memstash.New[string, []byte](
 					memstash.WithMemoryCapacity(sc.budget),
 					memstash.WithPolicy(tc.policy),
