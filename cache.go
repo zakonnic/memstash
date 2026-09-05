@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/maphash"
 	"iter"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,6 +71,8 @@ type Cache[K comparable, V any] struct {
 
 	shards    []shard[K, V]
 	shardMask uint32
+	// preallocated pins the table size: the whole capacity is already there, so a rebuild may only purge.
+	preallocated bool
 	// onDeletion sits with the fields the write path already touches: every removal site tests it, so a cache without
 	// a handler pays one predicted branch off a hot cache line.
 	onDeletion func(key K, value V, cause DeletionCause)
@@ -154,6 +157,12 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.CostFunc == nil && cfg.MemoryCapacity > itemstore.MaxItems {
 		return nil, ErrCapacityTooLarge
 	}
+	if cfg.PreallocationRatio != 0 {
+		if math.IsNaN(cfg.PreallocationRatio) || cfg.PreallocationRatio <= 0 || cfg.PreallocationRatio >= 1 {
+			return nil, ErrBadPreallocationRatio
+		}
+		cfg.PreallocateMap = true // sizing the fill is asking for a preallocated table
+	}
 	if cfg.PreallocateMap && cfg.CostFunc != nil {
 		return nil, ErrPreallocWeighted
 	}
@@ -180,6 +189,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		shards:            make([]shard[K, V], numShards),
 		flights:           make([]flightBucket[K, V], numShards),
 		shardMask:         uint32(numShards - 1),
+		preallocated:      cfg.PreallocateMap,
 		seed:              maphash.MakeSeed(),
 		epoch:             time.Now(),
 		ttl:               cfg.TTL,
@@ -207,7 +217,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		}
 		slots := minTableSlots
 		if cfg.PreallocateMap {
-			slots = preallocSlots(sh.cap)
+			slots = preallocSlots(sh.cap, cfg.preallocRatio())
 		}
 		sh.items.Store(itemstore.NewFlatHashMap[K, V](slots))
 		if cfg.CustomPolicy != nil {
@@ -553,12 +563,16 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 //
 // Growth is off the same line: a purge leaves the table holding live items and nothing else, so it buys room only
 // while live itself sits below 5/6 of the table. Past that a purge would land right back on the line.
+//
+// A preallocated cache never takes that branch: its table already holds the whole capacity below the line, so a live
+// count past it would mean the capacity itself was exceeded. Growing there would silently double a footprint the
+// caller asked for up front, so the purge stands.
 func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *itemstore.FlatHashMap[K, V]) {
 	if (sh.live+sh.dirty)*6 < t.Len()*5 {
 		return
 	}
 	newSize := t.Len()
-	if sh.live*6 > newSize*5 && int64(newSize) < maxTableSlots {
+	if !c.preallocated && sh.live*6 > newSize*5 && int64(newSize) < maxTableSlots {
 		newSize = min(itemstore.GrowSlots(newSize), int(maxTableSlots))
 		c.stats.addTableGrowths(1)
 	} else {

@@ -30,7 +30,8 @@ func TestPreallocatedTableFillsWithoutRebuild(t *testing.T) {
 
 	initial := slotCounts(c)
 	for i := range c.shards {
-		require.Equal(t, preallocSlots(c.shards[i].cap), initial[i], "shard %d was not sized for its capacity", i)
+		require.Equal(t, preallocSlots(c.shards[i].cap, defaultPreallocRatio), initial[i],
+			"shard %d was not sized for its capacity", i)
 	}
 	for i := range capacity {
 		require.NoError(t, c.Set(ctx, i, i))
@@ -68,7 +69,7 @@ func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 		t.Cleanup(func() { c.Close() })
 
 		prealloc := slotCounts(c)[0]
-		require.Equal(t, preallocSlots(c.shards[0].cap), prealloc)
+		require.Equal(t, preallocSlots(c.shards[0].cap, defaultPreallocRatio), prealloc)
 		return c, prealloc
 	}
 
@@ -114,23 +115,114 @@ func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 	})
 }
 
+// TestPreallocatedTableNeverGrows drives the rebuild decision with a live count no eviction path would leave behind:
+// a preallocated table has to purge exactly where a grown one doubles.
+func TestPreallocatedTableNeverGrows(t *testing.T) {
+	const capacity = 4096
+
+	rebuildAtFullLive := func(t *testing.T, opts ...Option) (before, after int, growths, purges int64) {
+		t.Helper()
+		ctx := context.Background()
+		c, err := New[int, int](append(
+			[]Option{WithMemoryCapacity(capacity), WithShardsCount(1), WithStats()}, opts...)...)
+		require.NoError(t, err)
+		t.Cleanup(func() { c.Close() })
+		for i := range capacity {
+			require.NoError(t, c.Set(ctx, i, i))
+		}
+
+		// Stats counters share their storage with the snapshot they came from, so the numbers have to be read out
+		// on the spot rather than kept as two snapshots to diff.
+		counts := func() (int64, int64) {
+			s := c.Stats()
+			return s.TableGrowths(), s.TablePurges()
+		}
+		grownBefore, purgedBefore := counts()
+
+		sh := &c.shards[0]
+		sh.mu.Lock()
+		storage := sh.items.GetStorage()
+		before = storage.Len()
+		sh.live = before // over the line, so the rebuild has to choose between growing and purging
+		c.maybeRebuild(sh, storage)
+		after = sh.items.GetStorage().Len()
+		sh.mu.Unlock()
+
+		grownAfter, purgedAfter := counts()
+		return before, after, grownAfter - grownBefore, purgedAfter - purgedBefore
+	}
+
+	t.Run("preallocated", func(t *testing.T) {
+		before, after, growths, purges := rebuildAtFullLive(t, WithPreallocatedSize())
+		assert.Equal(t, before, after, "a preallocated table must be purged in place, never grown")
+		assert.Zero(t, growths)
+		assert.Equal(t, int64(1), purges)
+	})
+
+	t.Run("grown", func(t *testing.T) {
+		before, after, growths, purges := rebuildAtFullLive(t)
+		assert.Greater(t, after, before, "without preallocation the same live count takes the table up a step")
+		assert.Equal(t, int64(1), growths)
+		assert.Zero(t, purges)
+	})
+}
+
+// TestPreallocationRatioSizesTheTable pins what the ratio dial does: it preallocates on its own, and the shard gets
+// the table that ratio names.
+func TestPreallocationRatioSizesTheTable(t *testing.T) {
+	const capacity = 4096
+
+	for _, tc := range []struct {
+		name  string
+		ratio float64
+	}{
+		{"quarter", 0.25},
+		{"half", 0.5},
+		{"nine tenths", 0.9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New[int, int](WithMemoryCapacity(capacity), WithShardsCount(1), WithPreallocationRatio(tc.ratio))
+			require.NoError(t, err)
+			defer c.Close()
+			assert.Equal(t, preallocSlots(capacity, tc.ratio), slotCounts(c)[0],
+				"the ratio must preallocate on its own, at the size it names")
+		})
+	}
+
+	t.Run("the default ratio is what WithPreallocatedSize gives", func(t *testing.T) {
+		tuned, err := New[int, int](WithMemoryCapacity(capacity), WithShardsCount(1), WithPreallocationRatio(0.75))
+		require.NoError(t, err)
+		defer tuned.Close()
+		plain, err := New[int, int](WithMemoryCapacity(capacity), WithShardsCount(1), WithPreallocatedSize())
+		require.NoError(t, err)
+		defer plain.Close()
+		assert.Equal(t, slotCounts(plain), slotCounts(tuned))
+	})
+}
+
 // TestPreallocSlots pins the sizing rule: whole chunks, enough that a full shard stays under the rebuild line and
 // packs no denser than the target load, and never below the initial table.
 func TestPreallocSlots(t *testing.T) {
-	assert.Equal(t, minTableSlots, preallocSlots(1))
-	assert.Equal(t, 64, preallocSlots(40))
-	assert.Equal(t, 88, preallocSlots(60))
-	assert.Equal(t, 1336, preallocSlots(1000))
-	assert.Equal(t, 1368, preallocSlots(1024))
+	assert.Equal(t, minTableSlots, preallocSlots(1, defaultPreallocRatio))
+	assert.Equal(t, 64, preallocSlots(40, defaultPreallocRatio))
+	assert.Equal(t, 88, preallocSlots(60, defaultPreallocRatio))
+	assert.Equal(t, 1336, preallocSlots(1000, defaultPreallocRatio))
+	assert.Equal(t, 1368, preallocSlots(1024, defaultPreallocRatio))
 	// One shard of the 100M-entry memory benchmark: 32 shards of 64 chunks, ~3.1 GiB of tables, and it stays there -
 	// the target load sits below the growth line, so churn can only purge this table, never grow it.
-	assert.Equal(t, 64<<16, preallocSlots(100_000_000/32))
-	assert.Equal(t, int(maxTableSlots), preallocSlots(3<<30), "the table is capped by the uint32 index space")
+	assert.Equal(t, 64<<16, preallocSlots(100_000_000/32, defaultPreallocRatio))
+	assert.Equal(t, int(maxTableSlots), preallocSlots(3<<30, defaultPreallocRatio),
+		"the table is capped by the uint32 index space")
+
+	// The ratio is the dial: the same shard packs into whatever share of its table the caller asked for.
+	assert.Equal(t, 2056, preallocSlots(1024, 0.5))
+	assert.Equal(t, 1144, preallocSlots(1024, 0.9))
+	assert.Equal(t, 10256, preallocSlots(1024, 0.1))
 
 	for _, shardCap := range []int64{100, 1000, 1024, 65_536, 3_125_000} {
-		slots := int64(preallocSlots(shardCap))
+		slots := int64(preallocSlots(shardCap, defaultPreallocRatio))
 		assert.Less(t, (shardCap+1)*6, slots*5, "cap %d: a full shard must not trip the rebuild line", shardCap)
-		assert.LessOrEqual(t, (shardCap+1)*preallocLoadDen, slots*preallocLoadNum,
+		assert.LessOrEqual(t, float64(shardCap+1), float64(slots)*defaultPreallocRatio,
 			"cap %d: the table is packed past the target load", shardCap)
 	}
 }

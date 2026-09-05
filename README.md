@@ -374,7 +374,8 @@ Affects the hit rate — you control which items stay and which get evicted, for
 | `WithRefreshTTLOnGet()` | Sliding expiration: every L1 hit extends the item by a full `WithTTL` lifetime — including entries written with `SetWithTTL`. |
 | `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`. |
 | `WithCustomEvictionPolicy(fn)` | Plug in your own eviction policy: a per-shard factory returning a `memstash.EvictionPolicy` implementation. |
-| `WithPreallocatedSize()` | Allocate every shard's item table up front, at the size filling to capacity would grow it to anyway. Not available with `WithCostFunc` / `WithMemoryBudget`. |
+| `WithPreallocatedSize()` | Allocate every shard's item table up front, at the size filling to capacity would grow it to anyway. Such a table never grows afterwards. Not available with `WithCostFunc` / `WithMemoryBudget`. |
+| `WithPreallocationRatio(r)` | How full a preallocated table sits at capacity, `0 < r < 1` (default `0.75`). Preallocates on its own. Denser packs tighter and walks further. |
 | `WithShardsCount(n)` | Number of eviction shards (default: auto by GOMAXPROCS). |
 | `WithL2Cache(l2)` | Attach a second level directly. |
 | `WithWritePolicy(p)` | How writes reach L2, ignored when no L2 is attached: `WriteBack` (default) hands `Set` to the background worker pool, `WriteThrough` writes on `Set` and returns the L2 error, `WriteDisabled` makes L2 read-only. Deletes follow the same policy as writes. |

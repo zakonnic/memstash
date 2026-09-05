@@ -112,8 +112,8 @@ func (s *Stats) Sets() int64 { return s.sets.Value() }
 // Deletes is the number of keys removed by Delete and BatchDelete.
 func (s *Stats) Deletes() int64 { return s.deletes.Value() }
 
-// TableGrowths is the number of shard item tables rebuilt into a larger table. With WithPreallocatedSize this must
-// stay 0: a non-zero value means the cache outgrew what was preallocated for it and its memory footprint doubled.
+// TableGrowths is the number of shard item tables rebuilt into a larger table. Always 0 with WithPreallocatedSize:
+// a preallocated table is never grown, only purged.
 func (s *Stats) TableGrowths() int64 { return s.tableGrowths.Value() }
 
 // TablePurges is the number of shard item tables rebuilt at the same size to reclaim tombstones. Expected to grow

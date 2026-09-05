@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"testing"
@@ -294,6 +295,30 @@ func TestNewValidation(t *testing.T) {
 			name:    "capacity beyond the 32-bit pool index space",
 			opts:    []memstash.Option{memstash.WithMemoryCapacity(itemstore.MaxItems + 1)},
 			wantErr: memstash.ErrCapacityTooLarge,
+		},
+		{
+			name:    "preallocation ratio at the top of its range",
+			opts:    []memstash.Option{memstash.WithMemoryCapacity(1), memstash.WithPreallocationRatio(1)},
+			wantErr: memstash.ErrBadPreallocationRatio,
+		},
+		{
+			name:    "negative preallocation ratio",
+			opts:    []memstash.Option{memstash.WithMemoryCapacity(1), memstash.WithPreallocationRatio(-0.5)},
+			wantErr: memstash.ErrBadPreallocationRatio,
+		},
+		{
+			name:    "preallocation ratio that is not a number",
+			opts:    []memstash.Option{memstash.WithMemoryCapacity(1), memstash.WithPreallocationRatio(math.NaN())},
+			wantErr: memstash.ErrBadPreallocationRatio,
+		},
+		{
+			name: "preallocation ratio asks for a preallocated table, so a weighted capacity is rejected too",
+			opts: []memstash.Option{
+				memstash.WithMemoryCapacity(1),
+				memstash.WithPreallocationRatio(0.5),
+				memstash.WithCostFunc(func(string, string) uint32 { return 1 }),
+			},
+			wantErr: memstash.ErrPreallocWeighted,
 		},
 		{
 			name: "capacity beyond the 32-bit pool index space is not checked when a cost function is set",

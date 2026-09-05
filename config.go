@@ -3,6 +3,7 @@ package memstash
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/bits"
 	"runtime"
 	"time"
@@ -20,17 +21,18 @@ var (
 	ErrBadBudget        = fmt.Errorf("%w: MemoryBudget must be positive", Error)
 	ErrPreallocWeighted = fmt.Errorf("%w: PreallocateMap needs an item capacity - a weighted MemoryCapacity "+
 		"(CostFunc, MemoryBudget) does not say how many items fit", Error)
-	ErrBudgetAndCapacity    = fmt.Errorf("%w: MemoryBudget and MemoryCapacity are mutually exclusive", Error)
-	ErrBudgetNeedsCostFunc  = fmt.Errorf("%w: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly", Error)
-	ErrUnknownPolicy        = fmt.Errorf("%w: unknown eviction policy", Error)
-	ErrNilCustomPolicy      = fmt.Errorf("%w: the custom eviction policy factory returned nil", Error)
-	ErrNilLoader            = fmt.Errorf("%w: loader must not be nil", Error)
-	ErrBadWorkers           = fmt.Errorf("%w: WriteBackWorkers must not be negative", Error)
-	ErrBadGetBatchedWorkers = fmt.Errorf("%w: GetBatchedWorkers must not be negative", Error)
-	ErrBadTTL               = fmt.Errorf("%w: TTL must not be negative", Error)
-	ErrTTLDisabled          = fmt.Errorf("%w: TTL must be enabled - see WithTTL option", Error)
-	ErrPanic                = fmt.Errorf("%w: panic recovered", Error)
-	ErrLoaderPanic          = fmt.Errorf("%w: loader panicked", ErrPanic)
+	ErrBadPreallocationRatio = fmt.Errorf("%w: PreallocationRatio must be greater than 0 and less than 1", Error)
+	ErrBudgetAndCapacity     = fmt.Errorf("%w: MemoryBudget and MemoryCapacity are mutually exclusive", Error)
+	ErrBudgetNeedsCostFunc   = fmt.Errorf("%w: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly", Error)
+	ErrUnknownPolicy         = fmt.Errorf("%w: unknown eviction policy", Error)
+	ErrNilCustomPolicy       = fmt.Errorf("%w: the custom eviction policy factory returned nil", Error)
+	ErrNilLoader             = fmt.Errorf("%w: loader must not be nil", Error)
+	ErrBadWorkers            = fmt.Errorf("%w: WriteBackWorkers must not be negative", Error)
+	ErrBadGetBatchedWorkers  = fmt.Errorf("%w: GetBatchedWorkers must not be negative", Error)
+	ErrBadTTL                = fmt.Errorf("%w: TTL must not be negative", Error)
+	ErrTTLDisabled           = fmt.Errorf("%w: TTL must be enabled - see WithTTL option", Error)
+	ErrPanic                 = fmt.Errorf("%w: panic recovered", Error)
+	ErrLoaderPanic           = fmt.Errorf("%w: loader panicked", ErrPanic)
 )
 
 // PanicHandler is called with whatever recover() returned when the cache swallows a panic. Runs on the goroutine that
@@ -68,10 +70,18 @@ type Config[K comparable, V any] struct {
 	CustomPolicy EvictionPolicyFactory[K, V]
 
 	// PreallocateMap sizes every shard's FlatHashMap for its whole share of MemoryCapacity at construction, packed to
-	// preallocLoad, so the fill itself never rebuilds. Tombstones are released in place as they die; what churn leaves
-	// on top of that is reclaimed by a same-size purge, since the load stays below the line a rebuild grows at.
+	// PreallocationRatio, so the fill itself never rebuilds. From there the table never grows either: tombstones are
+	// released in place as they die, and what churn leaves on top of that is reclaimed by a same-size purge.
 	// Requires CostFunc == nil: weight is not an item count.
 	PreallocateMap bool
+
+	// PreallocationRatio is how full a preallocated shard sits once the cache holds its whole capacity, in (0, 1).
+	// 0 means the default, 0.75. Setting it turns preallocation on, so it needs no separate PreallocateMap.
+	//
+	// This one number is the memory-for-latency dial: linear probing packs denser but walks further, and the walk
+	// grows faster than the saving. Past the 5/6 rebuild line a full cache is over the line by itself and every
+	// insert triggers a purge, so keep well below it.
+	PreallocationRatio float64
 
 	// ShardsCount is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to
 	// a power of two and capped at 128; shards are also halved until each holds at least 64 weight units. 0 means
@@ -155,17 +165,23 @@ func pow2Ceil[T int | int64](n T) T {
 	return 1 << bits.Len64(uint64(n-1))
 }
 
-// preallocLoad is the share of its table a preallocated shard fills, as den/num - 4/3 is a load of 0.75. Since the
-// table can be any whole number of chunks, this one fraction is the whole memory-for-latency dial: linear probing
-// packs denser but walks further, and the walk grows faster than the saving.
-const preallocLoadNum, preallocLoadDen = 3, 4
+// defaultPreallocRatio is Config.PreallocationRatio when the caller leaves it at 0.
+const defaultPreallocRatio = 0.75
 
-// preallocSlots sizes a shard's table for its share of the capacity. live peaks at cap+1 - the insert that trips
-// eviction is counted before its victim leaves - and the table is rounded up to a whole chunk from there.
-func preallocSlots(shardCap int64) int {
-	want := ((shardCap+1)*preallocLoadDen + preallocLoadNum - 1) / preallocLoadNum
-	slots := int64(itemstore.TableSlots(int(max(want, minTableSlots))))
+// preallocSlots sizes a shard's table for its share of the capacity, filled to ratio. live peaks at cap+1, because
+// the insert that trips eviction is counted before its victim leaves.
+func preallocSlots(shardCap int64, ratio float64) int {
+	want := min(math.Ceil(float64(shardCap+1)/ratio), float64(maxTableSlots))
+	slots := int64(itemstore.TableSlots(int(max(int64(want), minTableSlots))))
 	return int(min(slots, maxTableSlots))
+}
+
+// preallocRatio is PreallocationRatio with the default filled in. Validated by New, so it is in (0, 1) here.
+func (c *Config[K, V]) preallocRatio() float64 {
+	if c.PreallocationRatio == 0 {
+		return defaultPreallocRatio
+	}
+	return c.PreallocationRatio
 }
 
 func (c *Config[K, V]) ghostSize() int {
