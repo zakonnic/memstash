@@ -22,6 +22,7 @@ var (
 	ErrPreallocWeighted = fmt.Errorf("%w: PreallocateMap needs an item capacity - a weighted MemoryCapacity "+
 		"(CostFunc, MemoryBudget) does not say how many items fit", Error)
 	ErrBadPreallocationRatio = fmt.Errorf("%w: PreallocationRatio must be greater than 0 and less than 1", Error)
+	ErrBadGrowthThreshold    = fmt.Errorf("%w: GrowthThreshold must be greater than 0 and less than 1", Error)
 	ErrBudgetAndCapacity     = fmt.Errorf("%w: MemoryBudget and MemoryCapacity are mutually exclusive", Error)
 	ErrBudgetNeedsCostFunc   = fmt.Errorf("%w: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly", Error)
 	ErrUnknownPolicy         = fmt.Errorf("%w: unknown eviction policy", Error)
@@ -76,12 +77,21 @@ type Config[K comparable, V any] struct {
 	PreallocateMap bool
 
 	// PreallocationRatio is how full a preallocated shard sits once the cache holds its whole capacity, in (0, 1).
-	// 0 means the default, 0.75. Setting it turns preallocation on, so it needs no separate PreallocateMap.
+	// 0 means the default, DefaultPreallocationRatio. Setting it turns preallocation on, so it needs no separate
+	// PreallocateMap.
 	//
 	// This one number is the memory-for-latency dial: linear probing packs denser but walks further, and the walk
-	// grows faster than the saving. Past the 5/6 rebuild line a full cache is over the line by itself and every
-	// insert triggers a purge, so keep well below it.
+	// grows faster than the saving. Past GrowthThreshold a full cache is over the rebuild line by itself and every
+	// insert triggers a rebuild, so keep well below it.
 	PreallocationRatio float64
+
+	// GrowthThreshold is the occupancy a shard table is rebuilt at - live items and tombstones together, as a share
+	// of the slots - in (0, 1). 0 means the default, DefaultGrowthThreshold. It is also the line the rebuild decides
+	// on: a table whose live items alone sit above it is grown, one still below is purged at the same size.
+	//
+	// Higher runs the table fuller: fewer rebuilds and less memory, but longer probe walks and less room for the
+	// tombstones churn leaves behind. It is held to a 1/4096 granularity internally.
+	GrowthThreshold float64
 
 	// ShardsCount is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to
 	// a power of two and capped at 128; shards are also halved until each holds at least 64 weight units. 0 means
@@ -165,9 +175,6 @@ func pow2Ceil[T int | int64](n T) T {
 	return 1 << bits.Len64(uint64(n-1))
 }
 
-// defaultPreallocRatio is Config.PreallocationRatio when the caller leaves it at 0.
-const defaultPreallocRatio = 0.75
-
 // preallocSlots sizes a shard's table for its share of the capacity, filled to ratio. live peaks at cap+1, because
 // the insert that trips eviction is counted before its victim leaves.
 func preallocSlots(shardCap int64, ratio float64) int {
@@ -179,9 +186,17 @@ func preallocSlots(shardCap int64, ratio float64) int {
 // preallocRatio is PreallocationRatio with the default filled in. Validated by New, so it is in (0, 1) here.
 func (c *Config[K, V]) preallocRatio() float64 {
 	if c.PreallocationRatio == 0 {
-		return defaultPreallocRatio
+		return DefaultPreallocationRatio
 	}
 	return c.PreallocationRatio
+}
+
+// growthThreshold is GrowthThreshold with the default filled in. Validated by New, so it is in (0, 1) here.
+func (c *Config[K, V]) growthThreshold() float64 {
+	if c.GrowthThreshold == 0 {
+		return DefaultGrowthThreshold
+	}
+	return c.GrowthThreshold
 }
 
 func (c *Config[K, V]) ghostSize() int {

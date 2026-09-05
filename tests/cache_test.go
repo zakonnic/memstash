@@ -321,6 +321,21 @@ func TestNewValidation(t *testing.T) {
 			wantErr: memstash.ErrPreallocWeighted,
 		},
 		{
+			name:    "growth threshold at the top of its range",
+			opts:    []memstash.Option{memstash.WithMemoryCapacity(1), memstash.WithGrowthThreshold(1)},
+			wantErr: memstash.ErrBadGrowthThreshold,
+		},
+		{
+			name:    "negative growth threshold",
+			opts:    []memstash.Option{memstash.WithMemoryCapacity(1), memstash.WithGrowthThreshold(-0.5)},
+			wantErr: memstash.ErrBadGrowthThreshold,
+		},
+		{
+			name:    "growth threshold that is not a number",
+			opts:    []memstash.Option{memstash.WithMemoryCapacity(1), memstash.WithGrowthThreshold(math.NaN())},
+			wantErr: memstash.ErrBadGrowthThreshold,
+		},
+		{
 			name: "capacity beyond the 32-bit pool index space is not checked when a cost function is set",
 			opts: []memstash.Option{
 				memstash.WithMemoryCapacity(itemstore.MaxItems + 1),

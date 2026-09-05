@@ -34,6 +34,7 @@ type FieldOverrides struct {
 	policy               *Policy
 	preallocateTable     *bool
 	preallocationRatio   *float64
+	growthThreshold      *float64
 	shards               *int
 	writePolicy          *WritePolicy
 	ghostSize            *int
@@ -84,6 +85,9 @@ func buildConfig[K comparable, V any](opts []Option) (*Config[K, V], error) {
 	}
 	if fields.preallocationRatio != nil {
 		cfg.PreallocationRatio = *fields.preallocationRatio
+	}
+	if fields.growthThreshold != nil {
+		cfg.GrowthThreshold = *fields.growthThreshold
 	}
 	if fields.shards != nil {
 		cfg.ShardsCount = *fields.shards
@@ -196,6 +200,14 @@ func WithPreallocatedSize() Option {
 // cache purging on every insert.
 func WithPreallocationRatio(ratio float64) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.preallocationRatio = &ratio }}
+}
+
+// WithGrowthThreshold sets Config.GrowthThreshold: the occupancy - live items and tombstones together - a shard table
+// is rebuilt at, in (0, 1). Anything outside it is rejected with ErrBadGrowthThreshold, except 0, which selects
+// DefaultGrowthThreshold (5/6). Higher means fewer rebuilds and less memory, at longer probe walks; it must stay above
+// WithPreallocationRatio, or a full preallocated cache sits over the line and rebuilds on every insert.
+func WithGrowthThreshold(threshold float64) Option {
+	return Option{ApplyField: func(f *FieldOverrides) { f.growthThreshold = &threshold }}
 }
 
 // WithShardsCount sets Config.ShardsCount: the number of shards the eviction state is split into.

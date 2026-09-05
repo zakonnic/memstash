@@ -42,6 +42,17 @@ const (
 	// DefaultGetBatchedBuffer is the queue GetBatched coalesces reads through when GetBatchedBufferSize is not set.
 	DefaultGetBatchedBuffer = 1024
 
+	// DefaultPreallocationRatio is Config.PreallocationRatio when it is not set: how full a preallocated shard sits
+	// once the cache holds its whole capacity.
+	DefaultPreallocationRatio = 0.75
+
+	// DefaultGrowthThreshold is Config.GrowthThreshold when it is not set: the occupancy a shard table is rebuilt at.
+	DefaultGrowthThreshold = 5.0 / 6.0
+
+	// growthShift keeps the growth threshold in fixed point, a numerator over 1<<growthShift, so the insert path's
+	// growth test is two integer multiplies.
+	growthShift = 12
+
 	// minTableSlots is the initial table size of every shard.
 	minTableSlots = 64
 
@@ -73,6 +84,8 @@ type Cache[K comparable, V any] struct {
 	shardMask uint32
 	// preallocated pins the table size: the whole capacity is already there, so a rebuild may only purge.
 	preallocated bool
+	// growthNum is Config.GrowthThreshold as a numerator over 1<<growthShift.
+	growthNum int
 	// onDeletion sits with the fields the write path already touches: every removal site tests it, so a cache without
 	// a handler pays one predicted branch off a hot cache line.
 	onDeletion func(key K, value V, cause DeletionCause)
@@ -163,6 +176,10 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		}
 		cfg.PreallocateMap = true // sizing the fill is asking for a preallocated table
 	}
+	if cfg.GrowthThreshold != 0 &&
+		(math.IsNaN(cfg.GrowthThreshold) || cfg.GrowthThreshold <= 0 || cfg.GrowthThreshold >= 1) {
+		return nil, ErrBadGrowthThreshold
+	}
 	if cfg.PreallocateMap && cfg.CostFunc != nil {
 		return nil, ErrPreallocWeighted
 	}
@@ -190,6 +207,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		flights:           make([]flightBucket[K, V], numShards),
 		shardMask:         uint32(numShards - 1),
 		preallocated:      cfg.PreallocateMap,
+		growthNum:         int(math.Round(cfg.growthThreshold() * (1 << growthShift))),
 		seed:              maphash.MakeSeed(),
 		epoch:             time.Now(),
 		ttl:               cfg.TTL,
@@ -555,24 +573,24 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	}
 }
 
-// maybeRebuild replaces the shard's table when it passes 5/6 occupancy (tombstones included): grown when live
-// items need the space, same-size otherwise - either way tombstones are purged. Items move, so the policy re-links
+// maybeRebuild replaces the shard's table when it passes the growth threshold in occupancy (tombstones included):
+// grown when live items need the space, same-size otherwise - either way tombstones are purged. Items move, so the policy re-links
 // its queue nodes to the new positions and drops dead ones on the same pass. Readers finish on the superseded table:
 // a probe racing the swap may return a value as of the copy moment - the documented Get-racing-Set window. Called
 // under the shard mutex.
 //
 // Growth is off the same line: a purge leaves the table holding live items and nothing else, so it buys room only
-// while live itself sits below 5/6 of the table. Past that a purge would land right back on the line.
+// while live itself sits below the threshold. Past that a purge would land right back on the line.
 //
 // A preallocated cache never takes that branch: its table already holds the whole capacity below the line, so a live
 // count past it would mean the capacity itself was exceeded. Growing there would silently double a footprint the
 // caller asked for up front, so the purge stands.
 func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *itemstore.FlatHashMap[K, V]) {
-	if (sh.live+sh.dirty)*6 < t.Len()*5 {
+	if (sh.live+sh.dirty)<<growthShift < t.Len()*c.growthNum {
 		return
 	}
 	newSize := t.Len()
-	if !c.preallocated && sh.live*6 > newSize*5 && int64(newSize) < maxTableSlots {
+	if !c.preallocated && sh.live<<growthShift > newSize*c.growthNum && int64(newSize) < maxTableSlots {
 		newSize = min(itemstore.GrowSlots(newSize), int(maxTableSlots))
 		c.stats.addTableGrowths(1)
 	} else {

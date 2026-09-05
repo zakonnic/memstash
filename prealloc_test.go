@@ -30,7 +30,7 @@ func TestPreallocatedTableFillsWithoutRebuild(t *testing.T) {
 
 	initial := slotCounts(c)
 	for i := range c.shards {
-		require.Equal(t, preallocSlots(c.shards[i].cap, defaultPreallocRatio), initial[i],
+		require.Equal(t, preallocSlots(c.shards[i].cap, DefaultPreallocationRatio), initial[i],
 			"shard %d was not sized for its capacity", i)
 	}
 	for i := range capacity {
@@ -69,7 +69,7 @@ func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 		t.Cleanup(func() { c.Close() })
 
 		prealloc := slotCounts(c)[0]
-		require.Equal(t, preallocSlots(c.shards[0].cap, defaultPreallocRatio), prealloc)
+		require.Equal(t, preallocSlots(c.shards[0].cap, DefaultPreallocationRatio), prealloc)
 		return c, prealloc
 	}
 
@@ -167,6 +167,55 @@ func TestPreallocatedTableNeverGrows(t *testing.T) {
 	})
 }
 
+// TestGrowthThresholdMovesTheRebuildLine pins the other knob: seven tenths occupancy is over a 0.6 line and under a
+// 0.8 one, and the rebuild decision follows it.
+func TestGrowthThresholdMovesTheRebuildLine(t *testing.T) {
+	const capacity = 4096
+
+	rebuildAtSevenTenths := func(t *testing.T, threshold float64) (before, after int, growths, purges int64) {
+		t.Helper()
+		ctx := context.Background()
+		c, err := New[int, int](WithMemoryCapacity(capacity), WithShardsCount(1), WithStats(),
+			WithGrowthThreshold(threshold))
+		require.NoError(t, err)
+		t.Cleanup(func() { c.Close() })
+		for i := range capacity {
+			require.NoError(t, c.Set(ctx, i, i))
+		}
+		counts := func() (int64, int64) {
+			s := c.Stats()
+			return s.TableGrowths(), s.TablePurges()
+		}
+		grownBefore, purgedBefore := counts()
+
+		sh := &c.shards[0]
+		sh.mu.Lock()
+		storage := sh.items.GetStorage()
+		before = storage.Len()
+		sh.live, sh.dirty = before*7/10, 0
+		c.maybeRebuild(sh, storage)
+		after = sh.items.GetStorage().Len()
+		sh.mu.Unlock()
+
+		grownAfter, purgedAfter := counts()
+		return before, after, grownAfter - grownBefore, purgedAfter - purgedBefore
+	}
+
+	t.Run("over a 0.6 line", func(t *testing.T) {
+		before, after, growths, purges := rebuildAtSevenTenths(t, 0.6)
+		assert.Greater(t, after, before, "live past the line has to take the table up a step")
+		assert.Equal(t, int64(1), growths)
+		assert.Zero(t, purges)
+	})
+
+	t.Run("under a 0.8 line", func(t *testing.T) {
+		before, after, growths, purges := rebuildAtSevenTenths(t, 0.8)
+		assert.Equal(t, before, after, "seven tenths is below the line: no rebuild at all")
+		assert.Zero(t, growths)
+		assert.Zero(t, purges)
+	})
+}
+
 // TestPreallocationRatioSizesTheTable pins what the ratio dial does: it preallocates on its own, and the shard gets
 // the table that ratio names.
 func TestPreallocationRatioSizesTheTable(t *testing.T) {
@@ -203,15 +252,15 @@ func TestPreallocationRatioSizesTheTable(t *testing.T) {
 // TestPreallocSlots pins the sizing rule: whole chunks, enough that a full shard stays under the rebuild line and
 // packs no denser than the target load, and never below the initial table.
 func TestPreallocSlots(t *testing.T) {
-	assert.Equal(t, minTableSlots, preallocSlots(1, defaultPreallocRatio))
-	assert.Equal(t, 64, preallocSlots(40, defaultPreallocRatio))
-	assert.Equal(t, 88, preallocSlots(60, defaultPreallocRatio))
-	assert.Equal(t, 1336, preallocSlots(1000, defaultPreallocRatio))
-	assert.Equal(t, 1368, preallocSlots(1024, defaultPreallocRatio))
+	assert.Equal(t, minTableSlots, preallocSlots(1, DefaultPreallocationRatio))
+	assert.Equal(t, 64, preallocSlots(40, DefaultPreallocationRatio))
+	assert.Equal(t, 88, preallocSlots(60, DefaultPreallocationRatio))
+	assert.Equal(t, 1336, preallocSlots(1000, DefaultPreallocationRatio))
+	assert.Equal(t, 1368, preallocSlots(1024, DefaultPreallocationRatio))
 	// One shard of the 100M-entry memory benchmark: 32 shards of 64 chunks, ~3.1 GiB of tables, and it stays there -
 	// the target load sits below the growth line, so churn can only purge this table, never grow it.
-	assert.Equal(t, 64<<16, preallocSlots(100_000_000/32, defaultPreallocRatio))
-	assert.Equal(t, int(maxTableSlots), preallocSlots(3<<30, defaultPreallocRatio),
+	assert.Equal(t, 64<<16, preallocSlots(100_000_000/32, DefaultPreallocationRatio))
+	assert.Equal(t, int(maxTableSlots), preallocSlots(3<<30, DefaultPreallocationRatio),
 		"the table is capped by the uint32 index space")
 
 	// The ratio is the dial: the same shard packs into whatever share of its table the caller asked for.
@@ -220,9 +269,10 @@ func TestPreallocSlots(t *testing.T) {
 	assert.Equal(t, 10256, preallocSlots(1024, 0.1))
 
 	for _, shardCap := range []int64{100, 1000, 1024, 65_536, 3_125_000} {
-		slots := int64(preallocSlots(shardCap, defaultPreallocRatio))
-		assert.Less(t, (shardCap+1)*6, slots*5, "cap %d: a full shard must not trip the rebuild line", shardCap)
-		assert.LessOrEqual(t, float64(shardCap+1), float64(slots)*defaultPreallocRatio,
+		slots := int64(preallocSlots(shardCap, DefaultPreallocationRatio))
+		assert.Less(t, float64(shardCap+1), float64(slots)*DefaultGrowthThreshold,
+			"cap %d: a full shard must not trip the rebuild line", shardCap)
+		assert.LessOrEqual(t, float64(shardCap+1), float64(slots)*DefaultPreallocationRatio,
 			"cap %d: the table is packed past the target load", shardCap)
 	}
 }

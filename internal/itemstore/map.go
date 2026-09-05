@@ -17,7 +17,7 @@ const (
 	chunkMask  = chunkSlots - 1
 )
 
-// MaxItems caps the item count: 5/6 (the rebuild load factor) of the 2^32 slot positions.
+// MaxItems caps the item count: 5/6 (the default rebuild load factor) of the 2^32 slot positions.
 const MaxItems = int64(1) << 32 * 5 / 6
 
 // FlatHashMap is one shard's memory storage: an open-addressing (https://en.wikipedia.org/wiki/Linear_probing) linear
@@ -25,7 +25,8 @@ const MaxItems = int64(1) << 32 * 5 / 6
 // second lookup. Queue nodes address items by slot position; a rebuild moves items and re-links the queues.
 //
 // No buckets: the hash picks the starting slot, and a taken slot just means stepping forward with pos++ until the key
-// or an empty slot turns up. The 5/6 fill cap keeps the walk short - ~2 slots on a hit, 2 to 5 on a miss.
+// or an empty slot turns up. The fill cap (GrowthThreshold, 5/6 by default) keeps the walk short - ~2 slots on a
+// hit, 2 to 5 on a miss.
 // Readers probe lock-free against atomically published meta words; all mutations happen under the shard mutex.
 // A rebuild swaps the whole table: readers mid-probe finish on the superseded one and may miss a write that landed
 // after the swap - indistinguishable from the Get racing the Set.
