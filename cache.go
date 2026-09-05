@@ -545,17 +545,20 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	}
 }
 
-// maybeRebuild replaces the shard's table when it passes 3/4 occupancy (tombstones included): doubled when live
+// maybeRebuild replaces the shard's table when it passes 5/6 occupancy (tombstones included): grown when live
 // items need the space, same-size otherwise - either way tombstones are purged. Items move, so the policy re-links
 // its queue nodes to the new positions and drops dead ones on the same pass. Readers finish on the superseded table:
 // a probe racing the swap may return a value as of the copy moment - the documented Get-racing-Set window. Called
 // under the shard mutex.
+//
+// Growth is off the same line: a purge leaves the table holding live items and nothing else, so it buys room only
+// while live itself sits below 5/6 of the table. Past that a purge would land right back on the line.
 func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *itemstore.FlatHashMap[K, V]) {
-	if (sh.live+sh.dirty)*4 < t.Len()*3 {
+	if (sh.live+sh.dirty)*6 < t.Len()*5 {
 		return
 	}
 	newSize := t.Len()
-	if sh.live*2 >= newSize && int64(newSize) < maxTableSlots {
+	if sh.live*6 > newSize*5 && int64(newSize) < maxTableSlots {
 		newSize = min(itemstore.GrowSlots(newSize), int(maxTableSlots))
 		c.stats.addTableGrowths(1)
 	} else {

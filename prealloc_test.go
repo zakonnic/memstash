@@ -17,8 +17,9 @@ func slotCounts[K comparable, V any](c *Cache[K, V]) []int {
 }
 
 // TestPreallocatedTableFillsWithoutRebuild fills a preallocated cache and then churns it. The fill itself must never
-// rebuild - that is what preallocation is for. Churn is a different matter at the target load: tombstones push the
-// table over the rebuild line once, it grows a step, and from there it holds. One step, not a cycle of them.
+// rebuild - that is what preallocation is for. Churn is a different matter: the target load leaves room for a limited
+// number of tombstones, so they reach the rebuild line and are purged in place. The table never grows, it just pays
+// for that in periodic O(live) purges.
 func TestPreallocatedTableFillsWithoutRebuild(t *testing.T) {
 	ctx := context.Background()
 	const capacity = 4096
@@ -49,8 +50,8 @@ func TestPreallocatedTableFillsWithoutRebuild(t *testing.T) {
 	after := c.Stats()
 	assert.Equal(t, settled, slotCounts(c), "the table must hold its size once churn has settled")
 	assert.Equal(t, growths, after.TableGrowths(), "a settled table must not keep growing")
-	assert.LessOrEqual(t, after.TableGrowths(), int64(len(c.shards)), "one growth per shard at most")
-	assert.Zero(t, after.TablePurges(), "releasing slots in place must keep the table off the rebuild line")
+	assert.Zero(t, after.TableGrowths(), "the target load is below the growth line: a preallocated table never grows")
+	assert.Positive(t, after.TablePurges(), "the tombstones this churn leaves have to be reclaimed by a purge")
 }
 
 // TestPreallocatedTableSurvivesEarlyChurn is the regression that first forced preallocSlots to account for
@@ -117,18 +118,18 @@ func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 // packs no denser than the target load, and never below the initial table.
 func TestPreallocSlots(t *testing.T) {
 	assert.Equal(t, minTableSlots, preallocSlots(1))
-	assert.Equal(t, 72, preallocSlots(40))
-	assert.Equal(t, 104, preallocSlots(60))
-	assert.Equal(t, 1672, preallocSlots(1000))
-	assert.Equal(t, 1712, preallocSlots(1024))
-	// One shard of the 100M-entry memory benchmark: 32 shards of 80 chunks, ~4.0 GiB of tables against the 6.4 GiB
-	// a power-of-two table took for the same capacity.
-	assert.Equal(t, 80<<16, preallocSlots(100_000_000/32))
+	assert.Equal(t, 64, preallocSlots(40))
+	assert.Equal(t, 88, preallocSlots(60))
+	assert.Equal(t, 1336, preallocSlots(1000))
+	assert.Equal(t, 1368, preallocSlots(1024))
+	// One shard of the 100M-entry memory benchmark: 32 shards of 64 chunks, ~3.1 GiB of tables, and it stays there -
+	// the target load sits below the growth line, so churn can only purge this table, never grow it.
+	assert.Equal(t, 64<<16, preallocSlots(100_000_000/32))
 	assert.Equal(t, int(maxTableSlots), preallocSlots(3<<30), "the table is capped by the uint32 index space")
 
 	for _, shardCap := range []int64{100, 1000, 1024, 65_536, 3_125_000} {
 		slots := int64(preallocSlots(shardCap))
-		assert.Less(t, (shardCap+1)*4, slots*3, "cap %d: a full shard must not trip the rebuild line", shardCap)
+		assert.Less(t, (shardCap+1)*6, slots*5, "cap %d: a full shard must not trip the rebuild line", shardCap)
 		assert.LessOrEqual(t, (shardCap+1)*preallocLoadDen, slots*preallocLoadNum,
 			"cap %d: the table is packed past the target load", shardCap)
 	}

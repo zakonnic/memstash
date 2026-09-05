@@ -68,8 +68,8 @@ type Config[K comparable, V any] struct {
 	CustomPolicy EvictionPolicyFactory[K, V]
 
 	// PreallocateMap sizes every shard's FlatHashMap for its whole share of MemoryCapacity at construction, packed to
-	// preallocLoad, so the fill itself never rebuilds. Tombstones are released in place as they die, which normally
-	// keeps the table off the rebuild line entirely; a churning cache may still take one growth step and then hold.
+	// preallocLoad, so the fill itself never rebuilds. Tombstones are released in place as they die; what churn leaves
+	// on top of that is reclaimed by a same-size purge, since the load stays below the line a rebuild grows at.
 	// Requires CostFunc == nil: weight is not an item count.
 	PreallocateMap bool
 
@@ -155,10 +155,10 @@ func pow2Ceil[T int | int64](n T) T {
 	return 1 << bits.Len64(uint64(n-1))
 }
 
-// preallocLoad is the share of its table a preallocated shard fills, as den/num - 5/3 is a load of 0.6. Since the
+// preallocLoad is the share of its table a preallocated shard fills, as den/num - 4/3 is a load of 0.75. Since the
 // table can be any whole number of chunks, this one fraction is the whole memory-for-latency dial: linear probing
 // packs denser but walks further, and the walk grows faster than the saving.
-const preallocLoadNum, preallocLoadDen = 3, 5
+const preallocLoadNum, preallocLoadDen = 3, 4
 
 // preallocSlots sizes a shard's table for its share of the capacity. live peaks at cap+1 - the insert that trips
 // eviction is counted before its victim leaves - and the table is rounded up to a whole chunk from there.

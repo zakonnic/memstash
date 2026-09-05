@@ -287,20 +287,41 @@ func runFootprint(b *testing.B, tc footprintCase) {
 	c.Close()
 }
 
+// fillParallel fills the cache with n keys from GOMAXPROCS goroutines. The workers interleave over the key index
+// instead of taking contiguous stripes, so the fill still runs oldest-to-newest across the whole range and
+// hotWindow's middle offset keeps pointing at keys eviction has not reached.
+func fillParallel(c benchCache, n int) {
+	workers := runtime.GOMAXPROCS(0)
+	// What settleEvery bounds is the writes in flight at once, so the budget is shared out over the workers.
+	perWorker := max(settleEvery/workers, 1)
+
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func(start int) {
+			defer wg.Done()
+			pending := 0
+			for i := start; i < n; i += workers {
+				k := fillKey(i)
+				c.Set(k, k)
+				if pending++; pending >= perWorker {
+					c.Settle() // a lossy write buffer would otherwise leave the cache a fraction full
+					pending = 0
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	c.Settle()
+}
+
 func fillAndMeasure(b *testing.B, tc footprintCase) benchCache {
 	requireSinglePass(b)
 
 	resident := heapBaseline()
 
 	c := tc.build()
-	for i := 0; i < bigBenchCapacity; i++ {
-		k := fillKey(i)
-		c.Set(k, k)
-		if i%settleEvery == settleEvery-1 {
-			c.Settle() // a lossy write buffer would otherwise leave the cache a fraction full - see settleEvery
-		}
-	}
-	c.Settle()
+	fillParallel(c, bigBenchCapacity)
 
 	heapBytes := resident()
 	live := tc.live(c)
