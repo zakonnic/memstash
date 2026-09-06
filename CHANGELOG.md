@@ -45,6 +45,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   documentation already claims for concurrent writes - and never yield a key twice.
 - `WithPreallocationRatio` is now a pure memory-for-latency dial, and `WithGrowthThreshold` only means growth; the
   rule that the ratio must stay below the threshold is gone.
+- **What the compaction costs.** Reads and mixed workloads are ahead of the tombstone design (`Mixed90_10` -37%,
+  parallel throughput -30 to -37%, `GetMiss` and `DeleteMiss` level, `GetHit` +7% for the move sequence a lock-free
+  miss re-checks). Writes that remove pay for it: an eviction resolves its victim by key instead of by index, and a
+  delete-then-set of the same key is a full removal plus a full insertion where the old design resurrected the item
+  and its node in place. `Set` at capacity costs +51% and the `Delete`+`Set` pair +138% on the micro-benchmarks;
+  both are the price of a table that never carries a tombstone and never rebuilds.
 
 ## [0.9.8] - 2026-08-13
 

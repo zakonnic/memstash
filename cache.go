@@ -405,57 +405,97 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 	keyHash := maphash.Comparable(c.seed, key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
 	tagged := itemstore.TagOf(keyHash)
+	seq := sh.moveSeq.Load()
+	storage := sh.items.GetStorage()
+	home := storage.Home(keyHash)
+	groupEnd := (home | 7) + 1 // first position past home's overflow group
 	var entry itemstore.Entry[K, V]
 	var zero V
-	for attempt := 0; ; attempt++ {
-		seq := sh.moveSeq.Load()
-		storage := sh.items.GetStorage()
-		home := storage.Home(keyHash)
-		groupEnd := (home | 7) + 1 // first position past home's overflow group
-	probe:
-		for pos := home; ; pos++ {
-			if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
-				break probe // nothing homed in this group lives past it: definitely absent
-			}
-			item := storage.At(pos)
-			metaWord := item.Metadata()
-			for {
-				if metaWord&itemstore.DeadOrTag != tagged {
-					break // dead, or a foreign tag
-				}
-				if !item.SnapshotInto(&entry, metaWord) {
-					metaWord = item.Metadata()
-					continue // the copy raced a recycle or an overwrite: retry against the fresh meta word
-				}
-				if entry.Key != key {
-					break // tag collision or a recycled slot
-				}
-				nowOff := c.nowOff.Load()
-				if !itemstore.Expired(metaWord, nowOff) {
-					if c.refreshOnGet {
-						expireOff := uint32(metaWord & itemstore.ExpireMask >> itemstore.ExpireShift)
-						if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && item.TouchAndRefreshExpire(metaWord, newOff) {
-							return entry.Value, true
-						}
-					}
-					item.TouchWith(metaWord)
-					return entry.Value, true
-				}
-				// TTL has elapsed - drop the item lazily instead of waiting for the eviction queue to reach it.
-				c.dropExpired(sh, keyHash, key)
-				return zero, false
-			}
-			if metaWord&itemstore.HasNext == 0 {
-				break probe // no key homed at or before this slot lives past it
-			}
+	for pos := home; ; pos++ {
+		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+			break // no key with this tag left the group: absent
 		}
-		if seq&1 == 0 && sh.moveSeq.Load() == seq {
+		item := storage.At(pos)
+		metaWord := item.Metadata()
+		for {
+			if metaWord&itemstore.DeadOrTag != tagged {
+				break // dead, or a foreign tag
+			}
+			if !item.SnapshotInto(&entry, metaWord) {
+				metaWord = item.Metadata()
+				continue // the copy raced a recycle or an overwrite: retry against the fresh meta word
+			}
+			if entry.Key != key {
+				break // tag collision or a recycled slot
+			}
+			nowOff := c.nowOff.Load()
+			if !itemstore.Expired(metaWord, nowOff) {
+				if c.refreshOnGet {
+					expireOff := uint32(metaWord & itemstore.ExpireMask >> itemstore.ExpireShift)
+					if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && item.TouchAndRefreshExpire(metaWord, newOff) {
+						return entry.Value, true
+					}
+				}
+				item.TouchWith(metaWord)
+				return entry.Value, true
+			}
+			// Expired: drop it now rather than wait for the sweep or the policy to reach it.
+			c.dropExpired(sh, keyHash, key)
 			return zero, false
 		}
-		if attempt == 2 {
-			return c.getLocked(sh, keyHash, key)
+		if metaWord&itemstore.HasNext == 0 {
+			break // no key homed at or before this slot lives past it
 		}
 	}
+	if seq&1 == 0 && sh.moveSeq.Load() == seq {
+		return zero, false
+	}
+	return c.getMoved(sh, keyHash, key)
+}
+
+// getMoved settles a miss that overlapped a reclaim. It walks once more and, if the shard is still compacting, reads
+// under the mutex. It lives apart so getMemory stays one pass.
+func (c *Cache[K, V]) getMoved(sh *shard[K, V], keyHash uint64, key K) (V, bool) {
+	tagged := itemstore.TagOf(keyHash)
+	var entry itemstore.Entry[K, V]
+	var zero V
+	seq := sh.moveSeq.Load()
+	storage := sh.items.GetStorage()
+	home := storage.Home(keyHash)
+	groupEnd := (home | 7) + 1
+	for pos := home; ; pos++ {
+		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+			break
+		}
+		item := storage.At(pos)
+		metaWord := item.Metadata()
+		for {
+			if metaWord&itemstore.DeadOrTag != tagged {
+				break
+			}
+			if !item.SnapshotInto(&entry, metaWord) {
+				metaWord = item.Metadata()
+				continue
+			}
+			if entry.Key != key {
+				break
+			}
+			nowOff := c.nowOff.Load()
+			if !itemstore.Expired(metaWord, nowOff) {
+				item.TouchWith(metaWord)
+				return entry.Value, true
+			}
+			c.dropExpired(sh, keyHash, key)
+			return zero, false
+		}
+		if metaWord&itemstore.HasNext == 0 {
+			break
+		}
+	}
+	if seq&1 == 0 && sh.moveSeq.Load() == seq {
+		return zero, false
+	}
+	return c.getLocked(sh, keyHash, key)
 }
 
 // getLocked reads under the shard mutex, where no reclaim can move items: the fallback for a probe that keeps
@@ -580,7 +620,13 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 		}
 		break
 	}
-	if sh.weight.Add(weightDelta) > sh.cap {
+	// An overwrite of the same weight - the common one - leaves the total alone, and a plain load spares every
+	// reader of this shard the invalidation a locked add would cost them.
+	total := sh.weight.Load()
+	if weightDelta != 0 {
+		total = sh.weight.Add(weightDelta)
+	}
+	if total > sh.cap {
 		c.evictShard(sh, &deletions)
 	}
 	sh.mu.Unlock()
