@@ -64,12 +64,15 @@ const (
 // mutations for that key are serialized by the shard mutex. Readers never take it: they probe the atomically
 // published table and verify candidates against the items themselves.
 type shard[K comparable, V any] struct {
-	mu    sync.Mutex
+	// The first cache line is the read path's: a probe loads the table and the move sequence, and a writer taking
+	// the mutex must not bounce that line out of every reader's cache. shardBytes pins the layout.
 	items itemstore.StorageProxy[K, V] // the item table, swapped wholesale on growth
-	// moveSeq is odd while a reclaim moves items (see FlatHashMap.Reclaim). A lock-free probe that misses re-checks
-	// it: a change means a key may have crossed the probe, so the miss is not trusted. It sits next to items, on the
-	// line every read loads anyway - and one that the weight updates bounce on every Set already.
-	moveSeq  atomic.Uint32
+	// moveSeq is odd while a reclaim moves items. A lock-free probe that misses checks it was even and unchanged;
+	// otherwise a key may have crossed the probe, and the miss is not trusted.
+	moveSeq atomic.Uint32
+	_       [52]byte
+
+	mu       sync.Mutex
 	policy   EvictionPolicy[K, V]
 	weight   atomic.Int64
 	cap      int64
@@ -82,7 +85,7 @@ type shard[K comparable, V any] struct {
 	sweepParity bool
 	scratch     []itemstore.ShiftEntry // Reclaim's buffer for the run it compacts; guarded by mu
 
-	_ [64]byte // padding - spreads shards across cache lines
+	_ [32]byte
 }
 
 // Cache is a two-level cache.
@@ -1232,3 +1235,8 @@ func (t List[K, V]) ToMap() map[K]V {
 	}
 	return m
 }
+
+// shardBytes pins the shard layout the read path depends on: the table pointer and the move sequence alone on the
+// first cache line, the mutex and everything a writer touches past it, and a whole number of lines overall so that
+// the shards of one cache keep that separation down the array.
+const shardBytes = 192

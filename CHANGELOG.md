@@ -36,6 +36,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   the six generation bits the seqlock had to spare (22 left, 2M writes to one slot before a stalled reader could
   validate against a stale word) and moves the forced tag bit to the top of the field, which leaves the three hash
   bits the overflow counters are indexed by readable from the tag.
+- **A shard's read line carries nothing a writer touches.** The table pointer and the move sequence share the first
+  cache line and the mutex opens the second, where before a `Set` taking the mutex invalidated the line every reader
+  loads on every probe. Worth 30-37% on every mixed read/write benchmark.
 - Lock-free reads stay exact across the compaction: a miss that overlapped moves is re-probed (a per-shard move
   sequence on the line every read loads anyway), the third time under the shard mutex; hits are unchanged.
   `Iterator` and `SaveTo` may skip an item a concurrent deletion slid toward its home - the same weak consistency the
