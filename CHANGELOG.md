@@ -21,10 +21,16 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   and will be removed with the next stats revision.
 - **Queue nodes address keys, not slots.** `QNode` carries 40 bits of the key's hash and the weight (`Cost()`,
   24-bit float encoding, exact below 2 MiB), and a policy resolves a node to its item with `Items.Find` (exact) or
-  `Items.Locate` (by tag, for examining an item; a victim is named through `Find`); growth no longer walks the
-  queues. `EvictionPolicy` loses `Rebuild`, `Sweep` becomes `Sweep(limit int) (more bool)` and works in slices driven
-  by the writes, and `Evict` must skip the nodes `Find` cannot resolve. A custom policy written against `Items.At`
-  and `Rebuild` has to be updated.
+  `Items.Locate` (by tag, for read-only questions); growth no longer walks the queues. `EvictionPolicy` loses
+  `Rebuild`, `Sweep` becomes `Sweep(limit int, parity bool) (more bool)` and works in slices driven by the removals,
+  and `Evict` must skip the nodes `Find` cannot resolve. A custom policy written against `Items.At` and `Rebuild` has
+  to be updated.
+- **A removal leaves its node behind, and the sweep is what collects it.** Nothing links an item back to its node, so
+  `Delete` cannot take it out, and the reinsertion of a deleted key pushes a second one. The sweep now keeps the one
+  node each item is entitled to and drops the rest - stale and duplicate alike - which bounds the queues at twice the
+  live count on the invalidate-then-reload pattern that would otherwise grow them without end. It starts on the queue
+  length rather than a count of removals, so a cache at capacity, where eviction already drops what it pops, sweeps
+  not at all.
 - **The item's meta word carries its distance from its home slot**, so a compaction reads the run it moves instead of
   rehashing every key it passes - the difference between 1.0 us and 0.6 us per delete on 100M string keys. It costs
   the six generation bits the seqlock had to spare (22 left, 2M writes to one slot before a stalled reader could

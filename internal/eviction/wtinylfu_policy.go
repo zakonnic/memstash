@@ -53,14 +53,15 @@ func (p *WTinyLFUPolicy[K, V]) Bytes() int64 {
 	return int64(unsafe.Sizeof(*p)) + p.window.Bytes() + p.main.Bytes() + p.sketch.bytes()
 }
 
-func (p *WTinyLFUPolicy[K, V]) Sweep(limit int) bool {
+func (p *WTinyLFUPolicy[K, V]) Sweep(limit int, parity bool) bool {
 	if !p.window.Sweeping() && !p.main.Sweeping() {
 		p.window.BeginSweep()
 		p.main.BeginSweep()
 	}
 	// Nodes leaving window give their weight back, as in evictWindowOnce.
-	more := itemstore.SweepStep(&p.window, p.items, limit, func(node itemstore.QNode) { p.windowWeight -= int64(node.Cost()) })
-	return itemstore.SweepStep(&p.main, p.items, limit, nil) || more
+	more := itemstore.SweepStep(&p.window, p.items, limit, parity,
+		func(node itemstore.QNode) { p.windowWeight -= int64(node.Cost()) })
+	return itemstore.SweepStep(&p.main, p.items, limit, parity, nil) || more
 }
 
 func (p *WTinyLFUPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {

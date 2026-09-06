@@ -84,7 +84,7 @@ func TestSieveSweep(t *testing.T) {
 	// Two nodes per call: the pass over five nodes takes three calls.
 	calls := 0
 	for more := true; more; calls++ {
-		more = p.Sweep(2)
+		more = p.Sweep(2, true)
 	}
 	assert.Equal(t, 3, calls)
 	assert.Equal(t, 3, p.Len())
@@ -115,13 +115,15 @@ func TestSieveSweepSurvivesEvictionUnderCursor(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		addFromPool(p, pool, fmt.Sprintf("k%d", i))
 	}
-	require.True(t, p.Sweep(1), "one node examined, three to go") // the cursor now rests on k2 (head is k3)
-	for i := 0; i < 3; i++ {                                      // evict from the tail: k0, k1, k2 - the cursor's node among them
+	require.True(t, p.Sweep(1, true), "one node examined, three to go") // the cursor now rests on k2 (head is k3)
+	for i := 0; i < 3; i++ {                                            // evict from the tail: k0, k1, k2 - the cursor's node among them
 		idx, ok := p.Evict(0)
 		require.True(t, ok)
 		pool.release(idx)
 	}
-	assert.False(t, p.Sweep(10), "the pass finishes on what is left")
+	// The evictions consumed the rest of the pass, so this call opens the next one - and a pass carries the parity
+	// the last one did not, or it would read the marks that one left as its own and drop the nodes it kept.
+	assert.False(t, p.Sweep(10, false), "the pass finishes on what is left")
 	assert.Equal(t, 1, p.Len())
 	assert.True(t, pool.alive("k3"))
 }

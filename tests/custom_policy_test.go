@@ -38,8 +38,9 @@ func (p *fifoPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	return 0, false
 }
 
-// Sweep ignores the budget: the whole queue in one go is fine for a test policy.
-func (p *fifoPolicy[K, V]) Sweep(int) bool {
+// Sweep ignores the budget and the parity: the whole queue in one go is fine for a test policy, and it keeps every
+// node whose key is still there - duplicates included, which only costs it an extra pop later.
+func (p *fifoPolicy[K, V]) Sweep(int, bool) bool {
 	kept := p.nodes[:0]
 	for _, node := range p.nodes[p.head:] {
 		if _, _, ok := p.items.Find(node); ok {

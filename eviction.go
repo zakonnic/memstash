@@ -54,6 +54,13 @@ const (
 // EvictionPolicy.Evict).
 func ItemExpired(metaWord uint64, nowOff uint32) bool { return itemstore.Expired(metaWord, nowOff) }
 
+// ItemQueuedIn reports whether the running sweep pass has already kept a node for this item; MarkItemQueued records
+// that it has. Both take the parity handed to EvictionPolicy.Sweep, and both are for that method only.
+func ItemQueuedIn(metaWord uint64, parity bool) bool { return itemstore.QueuedIn(metaWord, parity) }
+
+// MarkItemQueued records that the running sweep pass has kept a node for this item. See ItemQueuedIn.
+func MarkItemQueued[K comparable, V any](item *Item[K, V], parity bool) { item.SetQueued(parity) }
+
 // EvictionPolicy is one shard's eviction policy: the contract the built-in policies (Clock, S3-FIFO, W-TinyLFU,
 // SIEVE) implement and a custom policy plugged in through WithCustomEvictionPolicy must satisfy. Every method is
 // called strictly under the owning shard's mutex, so implementations need no synchronization of their own - but
@@ -70,10 +77,15 @@ type EvictionPolicy[K comparable, V any] interface {
 	Evict(nowOff uint32) (uint32, bool)
 	// Len returns the total number of queued nodes, stale ones included.
 	Len() int
-	// Sweep drops stale nodes - those Find cannot resolve - preserving the order and reference counters of the rest.
-	// It works in slices: each call examines up to limit nodes and reports whether the pass that began with the
-	// first call still has nodes to examine; the cache calls it from every write until it reports false.
-	Sweep(limit int) (more bool)
+	// Sweep keeps the one node each live item is entitled to and drops the rest: the nodes Find cannot resolve, whose
+	// keys left the cache, and the duplicates a delete-then-set of one key leaves behind. It works in slices: each
+	// call examines up to limit nodes and reports whether the pass that began with the first call still has nodes to
+	// examine; the cache calls it from every write until it reports false.
+	//
+	// parity is the same for every call of one pass and the opposite of the last pass's: ItemQueuedIn tells whether
+	// the pass has already kept a node for that item, and MarkItemQueued records that it has. A policy that ignores
+	// parity still works - it just leaves the duplicates for the eviction path to pop.
+	Sweep(limit int, parity bool) (more bool)
 	// Bytes returns the footprint of the policy's own bookkeeping.
 	Bytes() int64
 }

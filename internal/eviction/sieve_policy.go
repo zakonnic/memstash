@@ -88,9 +88,10 @@ func (p *SievePolicy[K, V]) removeAt(cur int32, node *sieveNode) {
 	p.unlink(cur, node)
 }
 
-// Sweep walks up to limit nodes from where the last call stopped (the head on a fresh pass) toward the tail, dropping
-// the nodes whose keys are gone; eviction keeps the cursor valid when it unlinks the node under it (see unlink).
-func (p *SievePolicy[K, V]) Sweep(limit int) bool {
+// Sweep walks up to limit nodes from where the last call stopped (the head on a fresh pass) toward the tail, keeping
+// the one node each live item is entitled to and dropping the rest - see itemstore.SweepStep for what parity carries.
+// Eviction keeps the cursor valid when it unlinks the node under it (see unlink).
+func (p *SievePolicy[K, V]) Sweep(limit int, parity bool) bool {
 	if p.sweep == noLink {
 		p.sweep = p.head
 	}
@@ -98,13 +99,16 @@ func (p *SievePolicy[K, V]) Sweep(limit int) bool {
 		cur := p.sweep
 		node := &p.nodes[cur]
 		p.sweep = node.next
-		if _, _, found := p.slots.Find(node.item); !found {
+		item, _, found := p.slots.Find(node.item)
+		if !found || itemstore.QueuedIn(item.Metadata(), parity) {
 			if p.hand == cur {
 				// The walk goes head to tail, so prev nodes are already swept: the hand lands on a live node.
 				p.hand = node.prev
 			}
 			p.unlink(cur, node)
+			continue
 		}
+		item.SetQueued(parity)
 	}
 	return p.sweep != noLink
 }

@@ -118,12 +118,16 @@ func (q *EvictQueue) BeginSweep() { q.sweepLeft = q.size }
 // Sweeping reports whether the current sweep pass has nodes left.
 func (q *EvictQueue) Sweeping() bool { return q.sweepLeft > 0 }
 
-// SweepStep is one slice of the sweep pass BeginSweep started: it examines up to limit nodes from the head, drops
-// those Find can no longer resolve - their keys left the cache - and pushes the rest back in their order. A pass
-// covers the nodes queued when it began; it is spread over calls so that no single write stalls on a queue of
+// SweepStep is one slice of the sweep pass BeginSweep started: it examines up to limit nodes from the head and pushes
+// back the one node each live item is entitled to, dropping the rest - the nodes whose keys left the cache, and the
+// duplicates a delete-then-set of one key leaves behind. The item carries which pass has accounted for it (Queued),
+// so parity must be the same for every call of one pass and the opposite of the last one's.
+//
+// A pass covers the nodes queued when it began; it is spread over calls so that no single write stalls on a queue of
 // millions, at the price of the nodes pushed meanwhile ending up a few places ahead of the survivors rotated after
 // them. Returns whether the pass has nodes left. onDrop, when not nil, sees every dropped node.
-func SweepStep[K comparable, V any](q *EvictQueue, items *StorageProxy[K, V], limit int, onDrop func(QNode)) bool {
+func SweepStep[K comparable, V any](q *EvictQueue, items *StorageProxy[K, V], limit int, parity bool,
+	onDrop func(QNode)) bool {
 	q.sweepLeft = min(q.sweepLeft, q.size) // evictions may have popped part of the pass already
 	for ; limit > 0 && q.sweepLeft > 0; limit, q.sweepLeft = limit-1, q.sweepLeft-1 {
 		node, ok := q.Pop()
@@ -131,11 +135,16 @@ func SweepStep[K comparable, V any](q *EvictQueue, items *StorageProxy[K, V], li
 			q.sweepLeft = 0
 			break
 		}
-		if _, _, found := items.Locate(node); found { // a tag twin keeps a stale node one pass longer: harmless
-			q.Push(node)
-		} else if onDrop != nil {
-			onDrop(node)
+		// Exactly, not by tag: dropping a twin's node would leave that item with none, and nothing would evict it.
+		item, _, found := items.Find(node)
+		if !found || QueuedIn(item.Metadata(), parity) {
+			if onDrop != nil {
+				onDrop(node)
+			}
+			continue
 		}
+		item.SetQueued(parity)
+		q.Push(node)
 	}
 	return q.sweepLeft > 0
 }

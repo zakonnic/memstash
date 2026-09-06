@@ -34,7 +34,7 @@ func (m *model) insert(key, value uint64) uint32 {
 	for pos := home; ; pos++ {
 		item := m.t.At(pos)
 		if Empty(item.Metadata()) {
-			item.Publish(Entry[uint64, uint64]{Key: key, Value: value}, TagOf(hash), 0, m.t.Dist(home, m.t.Wrap(pos)))
+			item.Publish(Entry[uint64, uint64]{Key: key, Value: value}, TagOf(hash), 0, m.t.Dist(home, m.t.Wrap(pos)), false)
 			m.t.NoteDisplaced(hash, pos)
 			m.t.MarkChain(home, m.t.Wrap(pos))
 			m.live[key] = value
@@ -154,7 +154,7 @@ func (m *model) check(t *testing.T) {
 		hash := m.hash(key)
 		for pos := fresh.Home(hash); ; pos++ {
 			if item := fresh.At(pos); Empty(item.Metadata()) {
-				item.Publish(Entry[uint64, uint64]{Key: key, Value: value}, TagOf(hash), 0, fresh.Dist(fresh.Home(hash), fresh.Wrap(pos)))
+				item.Publish(Entry[uint64, uint64]{Key: key, Value: value}, TagOf(hash), 0, fresh.Dist(fresh.Home(hash), fresh.Wrap(pos)), false)
 				break
 			}
 		}
@@ -238,12 +238,12 @@ func TestReclaimUncoveredHoleIsCheap(t *testing.T) {
 // even when the new one carries the same tag.
 func TestClearAdvancesGeneration(t *testing.T) {
 	item := NewFlatHashMap[uint64, uint64](64, maphash.MakeSeed()).At(0)
-	item.Publish(Entry[uint64, uint64]{Key: 1, Value: 1}, TagForced, 0, 0)
+	item.Publish(Entry[uint64, uint64]{Key: 1, Value: 1}, TagForced, 0, 0, false)
 	before := item.Metadata()
 	item.Kill()
 	item.Clear()
 	require.True(t, Empty(item.Metadata()))
-	item.Publish(Entry[uint64, uint64]{Key: 2, Value: 2}, TagForced, 0, 0)
+	item.Publish(Entry[uint64, uint64]{Key: 2, Value: 2}, TagForced, 0, 0, false)
 	_, ok := item.Snapshot(before)
 	require.False(t, ok, "a snapshot of the old occupant validated against the new one")
 }

@@ -26,11 +26,11 @@ func (p *ClockPolicy[K, V]) Len() int { return p.q.Len() }
 
 func (p *ClockPolicy[K, V]) Bytes() int64 { return int64(unsafe.Sizeof(*p)) + p.q.Bytes() }
 
-func (p *ClockPolicy[K, V]) Sweep(limit int) bool {
+func (p *ClockPolicy[K, V]) Sweep(limit int, parity bool) bool {
 	if !p.q.Sweeping() {
 		p.q.BeginSweep()
 	}
-	return itemstore.SweepStep(&p.q, p.items, limit, nil)
+	return itemstore.SweepStep(&p.q, p.items, limit, parity, nil)
 }
 
 // Evict pops the head until it finds a victim. Every candidate is resolved exactly: examining an item changes its

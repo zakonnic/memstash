@@ -61,7 +61,7 @@ func TestSweepStep(t *testing.T) {
 	q.BeginSweep()
 	calls := 0
 	for more := true; more; calls++ {
-		more = SweepStep(&q, &items, 3, onDrop)
+		more = SweepStep(&q, &items, 3, true, onDrop)
 	}
 	assert.Equal(t, 4, calls, "ten nodes at three per call")
 	assert.Equal(t, []uint64{2, 4, 6, 8, 10}, dropped, "every node of a gone key is dropped, in order")

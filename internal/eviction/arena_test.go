@@ -36,7 +36,7 @@ func (a *arena) claim(key string) uint32 {
 	for pos := home; ; pos++ {
 		item := t.At(pos)
 		if itemstore.Empty(item.Metadata()) {
-			item.Publish(itemstore.Entry[string, string]{Key: key, Value: "v"}, itemstore.TagOf(hash), 0, t.Dist(home, t.Wrap(pos)))
+			item.Publish(itemstore.Entry[string, string]{Key: key, Value: "v"}, itemstore.TagOf(hash), 0, t.Dist(home, t.Wrap(pos)), false)
 			t.NoteDisplaced(hash, pos)
 			t.MarkChain(home, t.Wrap(pos))
 			return t.Wrap(pos)

@@ -69,16 +69,18 @@ type shard[K comparable, V any] struct {
 	// moveSeq is odd while a reclaim moves items (see FlatHashMap.Reclaim). A lock-free probe that misses re-checks
 	// it: a change means a key may have crossed the probe, so the miss is not trusted. It sits next to items, on the
 	// line every read loads anyway - and one that the weight updates bounce on every Set already.
-	moveSeq atomic.Uint32
-	policy  EvictionPolicy[K, V]
-	weight  atomic.Int64
-	cap     int64
-	live    int // alive items; guarded by mu
-	// staleNodes counts the queue nodes whose keys left through Delete or lazy TTL removal - the ones no eviction
-	// pop will drop - until a sweep clears them out; guarded by mu.
-	staleNodes int
-	sweeping   bool                   // a sweep pass is in progress: every write advances it by sweepBudget nodes
-	scratch    []itemstore.ShiftEntry // Reclaim's buffer for the run it compacts; guarded by mu
+	moveSeq  atomic.Uint32
+	policy   EvictionPolicy[K, V]
+	weight   atomic.Int64
+	cap      int64
+	live     int  // alive items; guarded by mu
+	sweeping bool // a sweep pass is in progress: every removal advances it by sweepBudget nodes
+	removals int  // removals since the last look at the queue length; guarded by mu
+	// sweepParity alternates with each pass and is what an item is stamped with when a pass keeps its node (see
+	// EvictionPolicy.Sweep). An insert stamps the current one, so a key inserted between passes reads as unaccounted
+	// in the next.
+	sweepParity bool
+	scratch     []itemstore.ShiftEntry // Reclaim's buffer for the run it compacts; guarded by mu
 
 	_ [64]byte // padding - spreads shards across cache lines
 }
@@ -549,7 +551,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 		metaWord := item.Metadata()
 		if itemstore.Empty(metaWord) {
 			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff,
-				storage.Dist(home, storage.Wrap(pos)))
+				storage.Dist(home, storage.Wrap(pos)), sh.sweepParity)
 			storage.NoteDisplaced(keyHash, pos)
 			storage.MarkChain(home, storage.Wrap(pos))
 			sh.live++
@@ -578,7 +580,6 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	if sh.weight.Add(weightDelta) > sh.cap {
 		c.evictShard(sh, &deletions)
 	}
-	c.sweepStep(sh)
 	sh.mu.Unlock()
 	if len(deletions) > 0 {
 		c.callOnDeletion(deletions)
@@ -638,9 +639,8 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K) {
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	if ok && itemstore.Expired(item.Metadata(), c.nowOff.Load()) {
 		c.killAt(sh, h, idx, item, CauseExpiration, &deletions)
-		c.noteStale(sh)
 	}
-	c.sweepStep(sh)
+	c.noteStale(sh)
 	sh.mu.Unlock()
 	if len(deletions) > 0 {
 		c.callOnDeletion(deletions)
@@ -731,31 +731,34 @@ func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, 
 	}
 }
 
-// sweepMinStale is the minimum number of stale queue nodes before a sweep is considered; smaller piles are not worth
-// the pass.
+// sweepMinStale is the smallest pile of extra queue nodes worth a pass; below it the walk costs more than the nodes.
 const sweepMinStale = 128
 
 // sweepBudget is how many queue nodes one write examines while a sweep pass runs: a pass over millions of nodes
 // completes within a few hundred thousand writes, and a write holds the shard mutex for well under a microsecond
 // more - the cap matters, since every reader that missed under an open move bracket ends up waiting on that mutex.
-const sweepBudget = 16
+const sweepBudget = 4
 
-// noteStale accounts a queue node whose key left through Delete or lazy TTL removal - an eviction pop drops its own
-// node - and, once such nodes outnumber the live ones, starts a sweep pass that the writes then carry (sweepStep).
-// Without this a delete-heavy workload below capacity would grow the queues without bound (eviction, the other
-// reclaimer, never runs there); the half-stale trigger keeps the sweep amortized O(1) per delete. Called under the
-// shard mutex.
+// sweepCheckMask gates how often a removal asks the policy how long its queues are: the answer moves by one per
+// removal and the trigger sits thousands away, so asking on every 64th is as good and costs an interface call
+// instead of sixty-four.
+const sweepCheckMask = 63
+
+// noteStale carries the sweep: it advances a running pass by one budget, or starts one once the queues hold enough
+// nodes beyond the live items to be worth the walk. A removal leaves the key's node behind and a reinsertion pushes
+// another, so without this a delete-heavy workload below capacity would grow the queues without bound - eviction,
+// the other reclaimer, never runs there. Two things keep it off the hot paths: only removals carry a pass, which is
+// what lengthens the queues in the first place, and the trigger reads the queue length rather than counting
+// removals, so the evictions that already drop nodes count for something and a workload at capacity sweeps not at
+// all. Called under the shard mutex.
 func (c *Cache[K, V]) noteStale(sh *shard[K, V]) {
-	sh.staleNodes++
-	if !sh.sweeping && sh.staleNodes >= sweepMinStale && sh.staleNodes*2 >= sh.policy.Len() {
-		sh.sweeping, sh.staleNodes = true, 0
-	}
-}
-
-// sweepStep advances the running sweep pass, if any, by one budget. Called under the shard mutex by every write.
-func (c *Cache[K, V]) sweepStep(sh *shard[K, V]) {
 	if sh.sweeping {
-		sh.sweeping = sh.policy.Sweep(sweepBudget)
+		sh.sweeping = sh.policy.Sweep(sweepBudget, sh.sweepParity)
+		return
+	}
+	sh.removals++
+	if sh.removals&sweepCheckMask == 0 && sh.policy.Len() >= 2*sh.live+sweepMinStale {
+		sh.sweeping, sh.sweepParity = true, !sh.sweepParity
 	}
 }
 
@@ -764,9 +767,8 @@ func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K, cause
 	deletions *[]deletion[K, V]) {
 	if idx, item, ok := c.findSlot(sh, keyHash, key); ok {
 		c.killAt(sh, keyHash, idx, item, cause, deletions)
-		c.noteStale(sh)
 	}
-	c.sweepStep(sh)
+	c.noteStale(sh)
 }
 
 // Delete removes the key from memory and forwards the deletion to L2 according to WritePolicy (async for WriteBack).
