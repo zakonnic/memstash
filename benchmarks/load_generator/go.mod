@@ -9,9 +9,9 @@ require (
 	github.com/memcachier/mc/v3 v3.0.3
 	github.com/rainycape/memcache v0.0.0-20150622160815-1031fa0ce2f2
 	github.com/redis/go-redis/v9 v9.22.0
-	github.com/redis/rueidis v1.0.76
-	github.com/stretchr/testify v1.11.1
-	github.com/valkey-io/valkey-go v1.0.76
+	github.com/redis/rueidis v1.0.77
+	github.com/stretchr/testify v1.12.1
+	github.com/valkey-io/valkey-go v1.0.77
 	github.com/zakonnic/memstash v0.9.7
 	github.com/zakonnic/memstash/l2/gomemcache_adapter v0.9.7
 	github.com/zakonnic/memstash/l2/goredis_adapter v0.9.7
@@ -27,10 +27,13 @@ require (
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/joomcode/errorx v1.2.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
+	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	golang.org/x/net v0.58.0 // indirect
+	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
