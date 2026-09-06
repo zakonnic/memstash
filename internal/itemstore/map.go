@@ -1,6 +1,7 @@
 package itemstore
 
 import (
+	"hash/maphash"
 	"sync/atomic"
 	"unsafe"
 )
@@ -17,30 +18,32 @@ const (
 	chunkMask  = chunkSlots - 1
 )
 
-// MaxItems caps the item count: 5/6 (the default rebuild load factor) of the 2^32 slot positions.
+// MaxItems caps the item count: 5/6 (the default growth load factor) of the 2^32 slot positions.
 const MaxItems = int64(1) << 32 * 5 / 6
 
 // FlatHashMap is one shard's memory storage: an open-addressing (https://en.wikipedia.org/wiki/Linear_probing) linear
 // hash table whose slots are the items themselves, so a probe that lands has meta, key and value right there, with no
-// second lookup. Queue nodes address items by slot position; a rebuild moves items and re-links the queues.
+// second lookup. Queue nodes address items by key hash (see QNode) and are resolved with Find, so items are free to
+// move: a deletion compacts its run in place (Reclaim) and the table never holds a tombstone.
 //
 // No buckets: the hash picks the starting slot, and a taken slot just means stepping forward with pos++ until the key
-// or an empty slot turns up. The fill cap (GrowthThreshold, 5/6 by default) keeps the walk short - ~2 slots on a
-// hit, 2 to 5 on a miss.
+// or an empty slot turns up. The load factor keeps the walk short - ~2.5 slots on a hit at 0.75.
 // Readers probe lock-free against atomically published meta words; all mutations happen under the shard mutex.
-// A rebuild swaps the whole table: readers mid-probe finish on the superseded one and may miss a write that landed
+// A growth swaps the whole table: readers mid-probe finish on the superseded one and may miss a write that landed
 // after the swap - indistinguishable from the Get racing the Set.
 type FlatHashMap[K comparable, V any] struct {
 	short     []Item[K, V]              // the whole table while it fits one chunk - most tables do
 	chunks    []*[chunkSlots]Item[K, V] // past that: the slot's high bits pick the chunk, the low ones the slot in it
 	overflows *atomic.Uint32            // per group: how many keys homed in it live past its edge (SwissTable/f14)
+	seed      maphash.Seed              // the cache's key hash seed: Find and Reclaim rehash the keys they meet
 	size      uint32                    // slot count, as TableSlots and GrowSlots size it
 }
 
 // NewFlatHashMap allocates a table of itemCount slots: a whole number of chunks, or a power of two below one chunk,
-// where the table is one flat run of exactly that many slots and a small shard costs no more than it used to.
-func NewFlatHashMap[K comparable, V any](itemCount int) *FlatHashMap[K, V] {
-	t := &FlatHashMap[K, V]{size: uint32(itemCount)}
+// where the table is one flat run of exactly that many slots and a small shard costs no more than it used to. seed is
+// the seed the cache hashes keys with.
+func NewFlatHashMap[K comparable, V any](itemCount int, seed maphash.Seed) *FlatHashMap[K, V] {
+	t := &FlatHashMap[K, V]{size: uint32(itemCount), seed: seed}
 	if itemCount <= chunkSlots {
 		t.short = make([]Item[K, V], itemCount)
 	} else {
@@ -69,8 +72,16 @@ func (t *FlatHashMap[K, V]) At(pos uint32) *Item[K, V] {
 // Home returns a key hash's home slot: the high 32 hash bits scaled into the slot range, so it stays independent of
 // the tag and of the shard bits. Multiply-shift rather than a mask, because the slot count is not a power of two.
 func (t *FlatHashMap[K, V]) Home(hash uint64) uint32 {
-	return uint32((hash >> 32) * uint64(t.size) >> 32)
+	return t.homeOfHigh(uint32(hash >> 32))
 }
+
+// homeOfHigh is Home for the high hash word alone - what a queue node carries.
+func (t *FlatHashMap[K, V]) homeOfHigh(high uint32) uint32 {
+	return uint32(uint64(high) * uint64(t.size) >> 32)
+}
+
+// hashOf rehashes a slot's key with the cache's seed. Called under the shard mutex.
+func (t *FlatHashMap[K, V]) hashOf(key K) uint64 { return maphash.Comparable(t.seed, key) }
 
 // Wrap normalizes a probe position into a slot index.
 func (t *FlatHashMap[K, V]) Wrap(pos uint32) uint32 {
@@ -95,7 +106,7 @@ func (t *FlatHashMap[K, V]) Covers(home, pos, q uint32) bool {
 
 // A group's overflow word is 8 counters of 4 bits, picked by the key's tag, so a probe asks whether a key with ITS
 // tag left the group rather than whether any key did. Same word, same 4 bytes, but it turns 43% of misses that must
-// walk past the group edge into 9%. A counter sticks at 15 instead of wrapping into its neighbour; measured peak is
+// walk past the group edge into 9%. A counter sticks at 15 instead of wrapping into its neighbor; measured peak is
 // 5, and a stuck counter only makes the group over-walk that one tag.
 const (
 	overflowBuckets = 8
@@ -124,7 +135,7 @@ func (t *FlatHashMap[K, V]) NoteDisplaced(keyHash uint64, pos uint32) {
 	}
 }
 
-// ForgetDisplaced undoes NoteDisplaced when the key at pos dies.
+// ForgetDisplaced undoes NoteDisplaced when the key at pos dies or moves.
 func (t *FlatHashMap[K, V]) ForgetDisplaced(keyHash uint64, pos uint32) {
 	home := t.Home(keyHash)
 	if home>>groupShift == t.Wrap(pos)>>groupShift {
@@ -151,10 +162,6 @@ func (t *FlatHashMap[K, V]) MarkChain(home, placed uint32) {
 	}
 }
 
-// cascadeLimit caps the walk left of a freed slot. The walk stops on its own within a slot or two; the cap only
-// keeps a table that is almost entirely tombstones from turning one free into a long scan.
-const cascadeLimit = 64
-
 // TableSlots rounds a wanted slot count up to a size a table can take: whole chunks once it needs more than one,
 // and whole overflow groups below that, since every group owns a counter.
 func TableSlots(want int) int {
@@ -179,31 +186,168 @@ func GrowSlots(size int) int {
 	}
 }
 
-// Release hands a dead slot back once its queue node is gone. When no live key's probe chain runs through it the slot
-// goes back to a zero meta word instead of staying a tombstone, and so do the slots to its left that can no longer be
-// covered. Returns how many slots it reclaimed, so the shard can drop them from its tombstone count.
-//
-// uncovered says the caller has established that nothing homed at or before idx lives past it. Everything from there
-// needs no further test: if a slot is uncovered and holds no live key, its neighbour to the left is uncovered too,
-// because the only key that could have covered the neighbour is the one that lived in the slot itself. So the walk
-// stops at the first live item - whose stale bit it still clears - and at the first slot that is already empty.
-// Called under the shard mutex.
-func (t *FlatHashMap[K, V]) Release(idx uint32, uncovered bool) int {
-	item := t.At(idx)
-	if !uncovered {
-		item.MakeFree()
-		return 0
+// Find resolves a queue node to the item it was enqueued for: the item and its current slot. false means the key has
+// left the cache since. The walk is the reader's probe, run under the shard mutex, plus one rehash of every candidate
+// to confirm the node's 40 identity bits - a false candidate is a rehash every ~256 probes.
+func (t *FlatHashMap[K, V]) Find(node QNode) (*Item[K, V], uint32, bool) {
+	return t.resolve(node, true)
+}
+
+// Locate is Find without the rehash: the first live item on the node's probe path carrying its tag byte, which is the
+// node's item, or once in ~256 probes a neighbor sharing the byte. For read-only questions where a neighbor costs
+// nothing - a sweep asking whether the node still resolves, an admission filter peeking at main's head. A policy
+// that writes to the item it examines (a reference counter is written on every eviction step) resolves with Find:
+// writing to a neighbor would cost that neighbor its standing. Called under the shard mutex.
+func (t *FlatHashMap[K, V]) Locate(node QNode) (*Item[K, V], uint32, bool) {
+	return t.resolve(node, false)
+}
+
+func (t *FlatHashMap[K, V]) resolve(node QNode, exact bool) (*Item[K, V], uint32, bool) {
+	home := t.homeOfHigh(node.home)
+	tagged := uint64(node.tag()|1) << TagShift
+	bucket := uint32(node.tag()) & (overflowBuckets - 1)
+	groupEnd := (home | 7) + 1
+	for pos := home; ; pos++ {
+		if pos == groupEnd && !t.OverflowedTag(home, bucket) {
+			return nil, 0, false
+		}
+		item := t.At(pos)
+		metaWord := item.Metadata()
+		if metaWord&(Dead|tag8Mask) == tagged {
+			if !exact {
+				return item, t.Wrap(pos), true
+			}
+			if hash := t.hashOf(item.Entry().Key); uint32(hash>>32) == node.home && uint8(hash>>14) == node.tag() {
+				return item, t.Wrap(pos), true
+			}
+		}
+		if metaWord&HasNext == 0 {
+			return nil, 0, false
+		}
 	}
-	item.Clear()
-	freed, pos := 1, idx
+}
+
+// ShiftEntry is Reclaim's record of one live slot in the run it compacts: where the slot is and where its key is
+// homed, both as offsets from the reclaimed slot so the table wrap never enters the arithmetic. homeOff is negative
+// when the home lies before the reclaimed slot.
+type ShiftEntry struct{ off, homeOff int64 }
+
+// Reclaim closes the hole a kill left at idx (the item there is Dead, its weight and overflow count already
+// accounted). It is backward-shift deletion (Knuth, TAOCP 6.4, Algorithm R) with one twist: of the items to the
+// right whose probe chains run through the hole, the farthest one slides into it - not the nearest. Its old slot is
+// the hole now, and so on until no item to the right can cover the hole; that slot is cleared. The occupied slots come
+// out the same either way (linear probing's occupied set does not depend on order), but the farthest item is the most
+// displaced one, so this halves the moves per deletion (~1 instead of ~2 at load 0.75) and trims the long chains.
+// The run walked is then given exact HasNext bits, which also repairs the stale ones earlier churn left behind. The
+// table ends in the state the live keys alone would produce: never a tombstone.
+//
+// Called under the shard mutex. The moves - and only they - run inside a bracket on moves (odd while open): a reader
+// whose probe overlapped it and missed re-probes, since a key sliding toward its home can cross a probe. The scan and
+// the bit repass stay outside, so the bracket is a few tens of nanoseconds, and an uncovered hole opens none. Every
+// moved item is live in its new slot before its old one is killed, so a reader finds it at one or the other at every
+// instant. scratch is the caller's buffer, reused across calls.
+func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]ShiftEntry, moves *atomic.Uint32) {
+	if t.At(idx).Metadata()&HasNext == 0 {
+		t.Release(idx) // uncovered: nothing to move
+		return
+	}
+	// The run: every live slot from the hole to the first slot nothing is chained past, with its key's home.
+	entries := (*scratch)[:0]
+	end := int64(0)
+	for d := int64(1); ; d++ {
+		if d >= int64(t.size) {
+			end = d // the whole table is one run: nothing left to examine
+			break
+		}
+		pos := idx + uint32(d)
+		item := t.At(pos)
+		metaWord := item.Metadata()
+		if Empty(metaWord) {
+			end = d
+			break
+		}
+		if metaWord&Dead == 0 {
+			hash := t.hashOf(item.Entry().Key)
+			entries = append(entries, ShiftEntry{off: d, homeOff: d - int64(t.Dist(t.Home(hash), t.Wrap(pos)))})
+		}
+		if metaWord&HasNext == 0 {
+			end = d // nothing further can cover the hole
+			break
+		}
+	}
+	*scratch = entries
+
+	// Fill the hole with the farthest item whose chain runs through it, then the hole it leaves, until none does.
+	hole, moved := int64(0), false
+	for {
+		pick := -1
+		for i := len(entries) - 1; i >= 0 && entries[i].off > hole; i-- {
+			if entries[i].homeOff <= hole {
+				pick = i
+				break
+			}
+		}
+		if pick < 0 {
+			break
+		}
+		if !moved {
+			moves.Add(1)
+			moved = true
+		}
+		src, dst := t.At(idx+uint32(entries[pick].off)), t.At(idx+uint32(hole))
+		hash := t.hashOf(src.Entry().Key)
+		// Counted at the new slot before it is forgotten at the old one, so a reader never sees the group
+		// under-counted.
+		dst.PublishMoved(src)
+		t.NoteDisplaced(hash, idx+uint32(hole))
+		t.ForgetDisplaced(hash, idx+uint32(entries[pick].off))
+		src.Kill()
+		hole, entries[pick].off = entries[pick].off, hole
+	}
+	if moved {
+		moves.Add(1)
+	}
+
+	// Back to slot order. Only the moved entries are out of place, so this is a few swaps.
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0 && entries[j].off < entries[j-1].off; j-- {
+			entries[j], entries[j-1] = entries[j-1], entries[j]
+		}
+	}
+	// Exact chain bits over [idx, idx+end): a slot's bit is earned by an item beyond it homed at or before it. Every
+	// such item lies in the run, since one past end would contradict the clear bit that ended the scan.
+	minHome, i := int64(1)<<62, len(entries)-1
+	for s := end - 1; s >= 0; s-- {
+		for ; i >= 0 && entries[i].off > s; i-- {
+			minHome = min(minHome, entries[i].homeOff)
+		}
+		slot := t.At(idx + uint32(s))
+		if want := minHome <= s; (slot.Metadata()&HasNext != 0) != want {
+			slot.SetHasNext(want)
+		}
+	}
+	t.Release(t.Wrap(idx + uint32(hole)))
+}
+
+// cascadeLimit caps the walk left of a freed slot. The walk stops on its own within a slot or two; the cap only
+// keeps a run of stale chain bits from turning one release into a long scan.
+const cascadeLimit = 64
+
+// Release empties an uncovered dead slot and retires the chain bits to its left that nothing can earn any more. If a
+// slot is uncovered and holds no live key, its left neighbor is uncovered too: the only key that could cover the
+// neighbor lived in the slot itself. So the walk goes left until a live item, whose stale bit it still clears, or an
+// empty slot.
+func (t *FlatHashMap[K, V]) Release(idx uint32) {
+	t.At(idx).Clear()
+	pos := idx
 	for back := 0; back < cascadeLimit; back++ {
 		if pos == 0 {
 			pos = t.size
 		}
 		pos--
-		item = t.At(pos)
+		item := t.At(pos)
 		metaWord := item.Metadata()
-		if metaWord == 0 {
+		if Empty(metaWord) {
 			break // already empty and its bit is clear: nothing left of here can be stale through it
 		}
 		if metaWord&HasNext != 0 {
@@ -212,20 +356,16 @@ func (t *FlatHashMap[K, V]) Release(idx uint32, uncovered bool) int {
 		if metaWord&Dead == 0 {
 			break // a live key: its bit is fixed, but it may still cover what lies further left
 		}
-		if Reusable(metaWord) {
-			item.Clear()
-			freed++
-		}
+		item.Clear()
 	}
-	return freed
 }
 
-// InsertFresh copies a live item into a table nobody reads yet (rebuilds) and returns its slot index.
+// InsertFresh copies a live item into a table nobody reads yet (growth) and returns its slot index.
 func (t *FlatHashMap[K, V]) InsertFresh(keyHash uint64, src *Item[K, V]) uint32 {
 	home := t.Home(keyHash)
 	for pos := home; ; pos++ {
 		dst := t.At(pos)
-		if dst.meta.Load() == 0 {
+		if Empty(dst.meta.Load()) {
 			dst.entry = src.entry
 			// The chains are the old table's; this one gets its own from MarkChain.
 			dst.meta.Store(src.meta.Load() &^ HasNext)
@@ -244,8 +384,8 @@ func (t *FlatHashMap[K, V]) Bytes() int64 {
 	return int64(unsafe.Sizeof(*t)) + chunkPtrs + length*int64(unsafe.Sizeof(Item[K, V]{})) + (length>>groupShift)*4
 }
 
-// StorageProxy is a shard's stable handle to its current FlatHashMap: rebuilds swap the table underneath while the shard's
-// policy keeps the ref. Implements the public ItemStates resolver.
+// StorageProxy is a shard's stable handle to its current FlatHashMap: growth swaps the table underneath while the
+// shard's policy keeps the ref. Implements the public Items resolver.
 type StorageProxy[K comparable, V any] struct {
 	storage atomic.Pointer[FlatHashMap[K, V]]
 }
@@ -253,5 +393,15 @@ type StorageProxy[K comparable, V any] struct {
 func (r *StorageProxy[K, V]) GetStorage() *FlatHashMap[K, V] { return r.storage.Load() }
 func (r *StorageProxy[K, V]) Store(t *FlatHashMap[K, V])     { r.storage.Store(t) }
 
-// At resolves a queue-node index into its item via the current table.
+// At resolves a slot index into its item via the current table.
 func (r *StorageProxy[K, V]) At(idx uint32) *Item[K, V] { return r.storage.Load().At(idx) }
+
+// Find resolves a queue node into its item and current slot via the current table. Called under the shard mutex.
+func (r *StorageProxy[K, V]) Find(node QNode) (*Item[K, V], uint32, bool) {
+	return r.storage.Load().Find(node)
+}
+
+// Locate is FlatHashMap.Locate on the current table. Called under the shard mutex.
+func (r *StorageProxy[K, V]) Locate(node QNode) (*Item[K, V], uint32, bool) {
+	return r.storage.Load().Locate(node)
+}

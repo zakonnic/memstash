@@ -38,7 +38,8 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
   [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
 - **Easy on the GC.** Items live inline in a per-shard flat hash table, so an insert allocates
   nothing. Growth swaps one array for a larger one - a few objects for the collector, never one per
-  entry - and stops once the cache is at capacity.
+  entry - and stops once the cache is at capacity. A deletion compacts its probe run in place, so
+  the table never holds dead slots and is never rebuilt to get rid of them.
 - **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No
   `interface{}`, no casts.
 - **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a
@@ -350,13 +351,13 @@ order — the simplest, with an S3-FIFO-class hit rate). All share the same lock
 read only sets a 2-bit reference counter on the item's meta word.
 
 **Custom eviction policy** — implement the `memstash.EvictionPolicy` interface (the same contract
-the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Rebuild`/`Bytes`, all called under the shard mutex)
-and plug its per-shard factory in:
+the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Bytes`, all called under the shard mutex; a queue
+node is a claim on a key, resolved to its item with `Items.Find`) and plug its per-shard factory in:
 
 ```go
 c, err := memstash.New[string, User](
 	memstash.WithCustomEvictionPolicy(func(items memstash.Items[string, User], shardCap int64) memstash.EvictionPolicy[string, User] {
-		return newMyPolicy(items, shardCap) // items resolves QNode indices to the cached items
+		return newMyPolicy(items, shardCap) // items resolves queue nodes to the cached items
 	}),
 )
 ```
@@ -375,8 +376,8 @@ Affects the hit rate — you control which items stay and which get evicted, for
 | `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`. |
 | `WithCustomEvictionPolicy(fn)` | Plug in your own eviction policy: a per-shard factory returning a `memstash.EvictionPolicy` implementation. |
 | `WithPreallocatedSize()` | Allocate every shard's item table up front, at the size filling to capacity would grow it to anyway. Such a table never grows afterwards. Not available with `WithCostFunc` / `WithMemoryBudget`. |
-| `WithPreallocationRatio(r)` | How full a preallocated table sits at capacity, `0 < r < 1` (default `DefaultPreallocationRatio`, 0.75). Preallocates on its own. Denser packs tighter and walks further. |
-| `WithGrowthThreshold(t)` | Occupancy (live + tombstones) a shard table is rebuilt at, `0 < t < 1` (default `DefaultGrowthThreshold`, 5/6). Live alone past it grows the table, below it purges in place. Must stay above the preallocation ratio. |
+| `WithPreallocationRatio(r)` | How full a preallocated table sits at capacity, `0 < r < 1` (default `DefaultPreallocationRatio`, 0.75). Preallocates on its own. Denser packs tighter and walks further: (1 + 1/(1-r))/2 slots per hit, 2.5 at 0.75. The table holds live items only, so that is the walk the cache keeps. |
+| `WithGrowthThreshold(t)` | Occupancy (live items over slots) a non-preallocated shard table grows at, `0 < t < 1` (default `DefaultGrowthThreshold`, 5/6). A preallocated table never grows. |
 | `WithShardsCount(n)` | Number of eviction shards (default: auto by GOMAXPROCS). |
 | `WithL2Cache(l2)` | Attach a second level directly. |
 | `WithWritePolicy(p)` | How writes reach L2, ignored when no L2 is attached: `WriteBack` (default) hands `Set` to the background worker pool, `WriteThrough` writes on `Set` and returns the L2 error, `WriteDisabled` makes L2 read-only. Deletes follow the same policy as writes. |

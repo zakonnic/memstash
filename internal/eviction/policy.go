@@ -5,3 +5,11 @@
 // The policy contract itself is public: memstash.EvictionPolicy. The types here implement it, and custom policies
 // plugged in through memstash.WithCustomEvictionPolicy implement the same interface.
 package eviction
+
+import "github.com/zakonnic/memstash/internal/itemstore"
+
+// chanced reports whether an item still has a chance on its reference counter and has not expired. Such an item gets
+// another round instead of eviction.
+func chanced(metaWord uint64, nowOff uint32) bool {
+	return metaWord&itemstore.ChanceMask != 0 && !itemstore.Expired(metaWord, nowOff)
+}

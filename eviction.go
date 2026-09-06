@@ -2,25 +2,33 @@ package memstash
 
 import "github.com/zakonnic/memstash/internal/itemstore"
 
-// QNode is an eviction-queue element: a cached item's index in the shard's table plus the item's weight at enqueue
-// time. The weight may drift after an overwrite - only queue selection depends on it, the global accounting is
-// recomputed from the live value.
+// QNode is an eviction-queue element: a claim on a cached key - 40 bits of its hash - plus the item's weight at
+// enqueue time (Cost). A node never names a slot: items move when a deletion compacts their run, so a policy resolves
+// a node to its item through Items.Find whenever it needs one. The weight may drift after an overwrite - only queue
+// selection depends on it, the global accounting is recomputed from the live value.
 type QNode = itemstore.QNode
 
-// Item is one cached item: its key/value Entry alongside eviction metadata (a dead bit, a 2-bit
-// reference counter set by lock-free reads, the expiration offset and an occupancy generation). See
-// Metadata/Entry/Kill/TouchWith/RevokeChance/ResetChances for what a policy may do with it.
+// Item is one cached item: its key/value Entry alongside eviction metadata (a 2-bit reference counter set by
+// lock-free reads, the expiration offset and an occupancy generation). See Metadata/Entry/TouchWith/RevokeChance/
+// ResetChances for what a policy may do with it; killing is the cache's job, after Evict names the victim.
 type Item[K comparable, V any] = itemstore.Item[K, V]
 
-// Items resolves queue-node indices into the items themselves; the cache hands one to a custom eviction policy's
-// factory. Resolution is lock-free and stays valid for the lifetime of the cache.
+// Items resolves queue nodes into the items themselves; the cache hands one to a custom eviction policy's factory.
 type Items[K comparable, V any] interface {
-	At(idx uint32) *Item[K, V]
+	// Find returns the item a node was enqueued for and its current slot index, or false when that key has since
+	// left the cache - the node is stale then and the policy drops it. Call under the shard mutex only, which is
+	// where every policy method already runs.
+	Find(node QNode) (item *Item[K, V], idx uint32, ok bool)
+	// Locate is Find without the confirming rehash: the first live item on the node's probe path that carries its
+	// tag byte - the node's item, or once in ~256 probes a neighbor sharing the byte. For read-only questions where
+	// a neighbor costs nothing, such as whether a node still resolves at all: never write through its result, and
+	// never name its index a victim.
+	Locate(node QNode) (item *Item[K, V], idx uint32, ok bool)
 }
 
 const (
-	// ItemDead is the meta-word bit marking a tombstone: the item was removed (Delete, TTL, overwrite races) and its
-	// weight is already accounted; the policy's only job is to return the node's index from Evict or Sweep it out.
+	// ItemDead is the meta-word bit of a killed item. A policy never meets one: Find hands out live items only, and
+	// the kill happens after Evict returns; the bit is exported for tooling that reads meta words directly.
 	ItemDead = itemstore.Dead
 	// ItemChanceMask isolates the meta word's reference counter: non-zero means the item was read since the counter
 	// was last cleared.
@@ -52,21 +60,20 @@ func ItemExpired(metaWord uint64, nowOff uint32) bool { return itemstore.Expired
 // item reference counters are set concurrently by lock-free readers, so meta words must be read through
 // Item.Metadata.
 type EvictionPolicy[K comparable, V any] interface {
-	// Add registers the node of a newly inserted item. The item already carries its Entry.
+	// Add registers the node of a newly inserted item. The item already carries its Entry; the node carries the
+	// key's hash (QNode.Hash) for a policy that keeps history across residencies.
 	Add(node QNode)
-	// Evict removes the next reclaimable node from the queues and returns its index: the policy's chosen victim, an
-	// expired item (ItemExpired), or an item that died earlier (ItemDead). The cache kills the item and accounts its
-	// weight - the policy must not call Item.Kill. (0, false) means there is nothing to evict.
+	// Evict removes the next victim's node from the queues and returns the item's current slot index: the policy's
+	// chosen victim, or an expired item (ItemExpired). A node Find cannot resolve is stale - its key is gone - and
+	// the policy drops it and moves on. The index must come from Find, not Locate. The cache kills the item and
+	// accounts its weight - the policy must not call Item.Kill. (0, false) means there is nothing to evict.
 	Evict(nowOff uint32) (uint32, bool)
-	// Len returns the total number of queued nodes, dead ones included.
+	// Len returns the total number of queued nodes, stale ones included.
 	Len() int
-	// Sweep removes the nodes of dead items and hands their indices to release, preserving the order and reference
-	// counters of live nodes.
-	Sweep(release func(idx uint32))
-	// Rebuild re-links the queues after a table rebuild: remap turns a live node's old index into its new one, or
-	// reports the node dead - those must drop out (their weight-accounting mirrors Sweep). Each node is visited
-	// exactly once.
-	Rebuild(remap func(oldIdx uint32) (newIdx uint32, live bool))
+	// Sweep drops stale nodes - those Find cannot resolve - preserving the order and reference counters of the rest.
+	// It works in slices: each call examines up to limit nodes and reports whether the pass that began with the
+	// first call still has nodes to examine; the cache calls it from every write until it reports false.
+	Sweep(limit int) (more bool)
 	// Bytes returns the footprint of the policy's own bookkeeping.
 	Bytes() int64
 }

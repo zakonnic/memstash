@@ -27,35 +27,27 @@ func (p *fifoPolicy[K, V]) Len() int { return len(p.nodes) - p.head }
 func (p *fifoPolicy[K, V]) Bytes() int64 { return int64(cap(p.nodes) * 8) }
 
 func (p *fifoPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
-	if p.head < len(p.nodes) {
+	for p.head < len(p.nodes) {
 		node := p.nodes[p.head]
 		p.head++
-		return node.Idx, true // the cache kills and accounts the victim
+		if _, idx, ok := p.items.Find(node); ok {
+			return idx, true // the cache kills and accounts the victim
+		}
+		// a stale node: its key was deleted; drop it and keep looking
 	}
 	return 0, false
 }
 
-func (p *fifoPolicy[K, V]) Sweep(release func(idx uint32)) {
+// Sweep ignores the budget: the whole queue in one go is fine for a test policy.
+func (p *fifoPolicy[K, V]) Sweep(int) bool {
 	kept := p.nodes[:0]
 	for _, node := range p.nodes[p.head:] {
-		if p.items.At(node.Idx).Metadata()&memstash.ItemDead != 0 {
-			release(node.Idx)
-		} else {
+		if _, _, ok := p.items.Find(node); ok {
 			kept = append(kept, node)
 		}
 	}
 	p.nodes, p.head = kept, 0
-}
-
-func (p *fifoPolicy[K, V]) Rebuild(remap func(oldIdx uint32) (uint32, bool)) {
-	kept := p.nodes[:0]
-	for _, node := range p.nodes[p.head:] {
-		if newIdx, live := remap(node.Idx); live {
-			node.Idx = newIdx
-			kept = append(kept, node)
-		}
-	}
-	p.nodes, p.head = kept, 0
+	return false
 }
 
 func newFIFOPolicy[K comparable, V any](items memstash.Items[K, V], _ int64) memstash.EvictionPolicy[K, V] {
@@ -88,7 +80,7 @@ func TestCustomEvictionPolicy(t *testing.T) {
 		assert.Equal(t, i, v)
 	}
 
-	// Delete-heavy churn below capacity exercises the custom Sweep through the cache's tombstone reclamation.
+	// Delete-heavy churn below capacity exercises the custom Sweep through the cache's stale-node reclamation.
 	for i := 0; i < 10_000; i++ {
 		key := fmt.Sprintf("churn-%d", i)
 		require.NoError(t, c.Set(ctx, key, i))

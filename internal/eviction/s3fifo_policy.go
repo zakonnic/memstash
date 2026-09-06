@@ -1,7 +1,6 @@
 package eviction
 
 import (
-	"hash/maphash"
 	"math/bits"
 	"unsafe"
 
@@ -16,9 +15,9 @@ type S3FIFOPolicy[K comparable, V any] struct {
 	items *itemstore.StorageProxy[K, V]
 	small itemstore.EvictQueue
 	main  itemstore.EvictQueue
-	ghost ghostTable[K]
+	ghost ghostTable
 
-	smallWeight int64 // total weight of nodes in small (including tombstones not yet reclaimed)
+	smallWeight int64 // total weight of nodes in small (including nodes of keys already gone)
 	smallCap    int64 // target weight of small: ~10% of the shard capacity
 }
 
@@ -30,19 +29,19 @@ func NewS3FIFO[K comparable, V any](items *itemstore.StorageProxy[K, V], shardCa
 	}
 	return &S3FIFOPolicy[K, V]{
 		items:    items,
-		ghost:    newGhostTable[K](ghostSize),
+		ghost:    newGhostTable(ghostSize),
 		smallCap: smallCap,
 	}
 }
 
 func (p *S3FIFOPolicy[K, V]) Add(node itemstore.QNode) {
-	if p.ghost.hit(p.items.At(node.Idx).Entry().Key) {
+	if p.ghost.hit(node.Hash()) {
 		// Recently evicted and needed again - straight to the protected queue.
 		p.main.Push(node)
 		return
 	}
 	p.small.Push(node)
-	p.smallWeight += int64(node.Cost)
+	p.smallWeight += int64(node.Cost())
 }
 
 func (p *S3FIFOPolicy[K, V]) Len() int { return p.small.Len() + p.main.Len() }
@@ -51,19 +50,14 @@ func (p *S3FIFOPolicy[K, V]) Bytes() int64 {
 	return int64(unsafe.Sizeof(*p)) + p.small.Bytes() + p.main.Bytes() + p.ghost.bytes()
 }
 
-func (p *S3FIFOPolicy[K, V]) Sweep(release func(idx uint32)) {
-	storage := p.items.GetStorage()
-	// Dead nodes leaving small give their weight back, as in evictSmallOnce.
-	itemstore.SweepQueue(&p.small, storage, func(node itemstore.QNode) {
-		p.smallWeight -= int64(node.Cost)
-		release(node.Idx)
-	})
-	itemstore.SweepQueue(&p.main, storage, func(node itemstore.QNode) { release(node.Idx) })
-}
-
-func (p *S3FIFOPolicy[K, V]) Rebuild(remap func(oldIdx uint32) (uint32, bool)) {
-	itemstore.RebuildQueue(&p.small, remap, func(node itemstore.QNode) { p.smallWeight -= int64(node.Cost) })
-	itemstore.RebuildQueue(&p.main, remap, nil)
+func (p *S3FIFOPolicy[K, V]) Sweep(limit int) bool {
+	if !p.small.Sweeping() && !p.main.Sweeping() {
+		p.small.BeginSweep()
+		p.main.BeginSweep()
+	}
+	// Nodes leaving small give their weight back, as in evictSmallOnce.
+	more := itemstore.SweepStep(&p.small, p.items, limit, func(node itemstore.QNode) { p.smallWeight -= int64(node.Cost()) })
+	return itemstore.SweepStep(&p.main, p.items, limit, nil) || more
 }
 
 func (p *S3FIFOPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
@@ -90,29 +84,29 @@ func (p *S3FIFOPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	}
 }
 
-// evictSmallOnce processes the head of small: (idx, true) means the item is reclaimed, (0, false) means the node
-// was skipped or promoted to main.
+// evictSmallOnce processes the head of small: (idx, true) means the item is the victim, (0, false) means the node
+// was dropped or promoted to main.
 func (p *S3FIFOPolicy[K, V]) evictSmallOnce(nowOff uint32) (uint32, bool) {
 	candidate, ok := p.small.Pop()
 	if !ok {
 		return 0, false
 	}
-	p.smallWeight -= int64(candidate.Cost)
+	p.smallWeight -= int64(candidate.Cost())
 
-	item := p.items.At(candidate.Idx)
-	metaWord := item.Metadata()
-	switch {
-	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
-		return candidate.Idx, true
-	case metaWord&itemstore.ChanceMask != 0:
+	item, idx, found := p.items.Find(candidate)
+	if !found {
+		return 0, false // the key left the cache; its node goes with it
+	}
+	if chanced(item.Metadata(), nowOff) {
 		// Touched while in quarantine - promote to main with a clean counter.
 		item.ResetChances()
 		p.main.Push(candidate)
 		return 0, false
-	default:
-		p.ghost.push(item.Entry().Key)
-		return candidate.Idx, true
 	}
+	if !itemstore.Expired(item.Metadata(), nowOff) {
+		p.ghost.push(candidate.Hash())
+	}
+	return idx, true
 }
 
 // evictMainOnce performs a single GCLOCK step over main.
@@ -121,27 +115,25 @@ func (p *S3FIFOPolicy[K, V]) evictMainOnce(nowOff uint32) (uint32, bool) {
 	if !ok {
 		return 0, false
 	}
-	item := p.items.At(candidate.Idx)
-	metaWord := item.Metadata()
-	switch {
-	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
-		return candidate.Idx, true
-	case metaWord&itemstore.ChanceMask != 0:
+	item, idx, found := p.items.Find(candidate)
+	if !found {
+		return 0, false
+	}
+	if metaWord := item.Metadata(); chanced(metaWord, nowOff) {
 		item.RevokeChance(metaWord)
 		p.main.Push(candidate)
 		return 0, false
-	default:
-		return candidate.Idx, true
 	}
+	return idx, true
 }
 
 // ghostTable is the S3-FIFO "ghost" queue: 32-bit key fingerprints in a fixed 2-way set-associative hash table -
 // 8 bytes per slot, allocated once, no per-operation allocations. Every push stamps its slot with a sequence number;
 // entries older than ageWindow pushes count as absent, approximating FIFO expiry. Collisions are benign both ways: a
 // false hit sends a newcomer straight to main (GCLOCK still evicts it if unused), a lost entry costs one missed
-// promotion.
-type ghostTable[K comparable] struct {
-	seed      maphash.Seed
+// promotion. Keys are identified by the 40 hash bits a queue node carries, mixed so the slot and the fingerprint
+// draw on all of them.
+type ghostTable struct {
 	slots     []ghostSlot
 	mask      uint32 // number of 2-slot buckets minus one
 	seq       uint32 // pushes so far; ages are uint32 differences, so wraparound is fine
@@ -155,43 +147,50 @@ type ghostSlot struct {
 }
 
 // newGhostTable creates a ghost table with at least `capacity` slots (rounded up to a power of two).
-func newGhostTable[K comparable](capacity int) ghostTable[K] {
+func newGhostTable(capacity int) ghostTable {
 	if capacity <= 0 {
-		return ghostTable[K]{seed: maphash.MakeSeed()}
+		return ghostTable{}
 	}
 	slots := 1 << bits.Len(uint(capacity-1)) // pow2 >= capacity, and >= 2 so buckets hold full pairs
 	if slots < 2 {
 		slots = 2
 	}
-	return ghostTable[K]{
-		seed:      maphash.MakeSeed(),
+	return ghostTable{
 		slots:     make([]ghostSlot, slots),
 		mask:      uint32(slots/2 - 1),
 		ageWindow: uint32(slots),
 	}
 }
 
-// locate maps a key to its bucket's first slot and its fingerprint. The table hashes with its own seed so slot
-// selection is uncorrelated with shard selection.
-func (g *ghostTable[K]) locate(key K) (uint32, uint32) {
-	hash := maphash.Comparable(g.seed, key)
-	shortHash := uint32(hash >> 32)
+// mixHash spreads a node's identity bits (the high hash word and eight tag bits) over a full 64-bit word.
+func mixHash(hash uint64) uint64 {
+	hash ^= hash >> 33
+	hash *= 0xff51afd7ed558ccd
+	hash ^= hash >> 33
+	hash *= 0xc4ceb9fe1a85ec53
+	return hash ^ hash>>33
+}
+
+// locate maps a key's node hash to its bucket's first slot and its fingerprint.
+func (g *ghostTable) locate(hash uint64) (uint32, uint32) {
+	mixed := mixHash(hash)
+	shortHash := uint32(mixed >> 32)
 	if shortHash == 0 {
 		shortHash = 1
 	}
-	return (uint32(hash) & g.mask) * 2, shortHash
+	return (uint32(mixed) & g.mask) * 2, shortHash
 }
 
-func (g *ghostTable[K]) bytes() int64 {
+func (g *ghostTable) bytes() int64 {
 	return int64(len(g.slots)) * int64(unsafe.Sizeof(ghostSlot{}))
 }
 
 // push records the key: refreshes its entry if present, otherwise replaces the older slot of the bucket.
-func (g *ghostTable[K]) push(key K) {
+func (g *ghostTable) push(hash uint64) {
 	if len(g.slots) == 0 {
 		return
 	}
-	first, shortHash := g.locate(key)
+	first, shortHash := g.locate(hash)
 	g.seq++
 	a, b := &g.slots[first], &g.slots[first+1]
 	target := a
@@ -206,11 +205,11 @@ func (g *ghostTable[K]) push(key K) {
 }
 
 // hit reports whether the key was pushed within the age window, consuming the entry on a hit.
-func (g *ghostTable[K]) hit(key K) bool {
+func (g *ghostTable) hit(hash uint64) bool {
 	if len(g.slots) == 0 {
 		return false
 	}
-	first, fp := g.locate(key)
+	first, fp := g.locate(hash)
 	for i := first; i < first+2; i++ {
 		slot := &g.slots[i]
 		if slot.shortHash == fp && g.seq-slot.seq < g.ageWindow {

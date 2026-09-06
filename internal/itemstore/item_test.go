@@ -1,6 +1,7 @@
 package itemstore
 
 import (
+	"hash/maphash"
 	"math/rand"
 	"testing"
 	"unsafe"
@@ -18,7 +19,7 @@ func TestItemSize(t *testing.T) {
 // TestSnapshotSeqlock: a multi-word overwrite must invalidate a snapshot taken against the pre-overwrite meta word,
 // a single-word one must not bump the generation at all.
 func TestSnapshotSeqlock(t *testing.T) {
-	item := NewFlatHashMap[string, string](64).At(0)
+	item := NewFlatHashMap[string, string](64, maphash.MakeSeed()).At(0)
 	item.Publish(Entry[string, string]{Key: "k", Value: "old"}, 0, 0)
 	before := item.Metadata()
 
@@ -30,7 +31,7 @@ func TestSnapshotSeqlock(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "new", entry.Value)
 
-	word := NewFlatHashMap[uint64, uint64](64).At(0)
+	word := NewFlatHashMap[uint64, uint64](64, maphash.MakeSeed()).At(0)
 	word.Publish(Entry[uint64, uint64]{Key: 1, Value: 10}, 0, 0)
 	wordBefore := word.Metadata()
 	word.SetValue(20)
@@ -43,7 +44,7 @@ func TestSnapshotSeqlock(t *testing.T) {
 // TestSnapshotRejectsWriteInProgress covers the reader that lives entirely inside one write window: an odd meta word
 // must fail validation even though it never changed.
 func TestSnapshotRejectsWriteInProgress(t *testing.T) {
-	item := NewFlatHashMap[string, string](64).At(0)
+	item := NewFlatHashMap[string, string](64, maphash.MakeSeed()).At(0)
 	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
 
 	item.beginWrite()
@@ -60,7 +61,7 @@ func TestSnapshotRejectsWriteInProgress(t *testing.T) {
 func TestGenWrapNeverLooksEmpty(t *testing.T) {
 	lastEven := GenMask - 1
 
-	item := NewFlatHashMap[string, string](64).At(0)
+	item := NewFlatHashMap[string, string](64, maphash.MakeSeed()).At(0)
 	item.meta.Store(lastEven)
 	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
 	assert.NotZero(t, item.Metadata(), "a wrapped occupancy must not publish an empty-slot meta word")

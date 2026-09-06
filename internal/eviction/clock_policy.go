@@ -26,14 +26,15 @@ func (p *ClockPolicy[K, V]) Len() int { return p.q.Len() }
 
 func (p *ClockPolicy[K, V]) Bytes() int64 { return int64(unsafe.Sizeof(*p)) + p.q.Bytes() }
 
-func (p *ClockPolicy[K, V]) Sweep(release func(idx uint32)) {
-	itemstore.SweepQueue(&p.q, p.items.GetStorage(), func(node itemstore.QNode) { release(node.Idx) })
+func (p *ClockPolicy[K, V]) Sweep(limit int) bool {
+	if !p.q.Sweeping() {
+		p.q.BeginSweep()
+	}
+	return itemstore.SweepStep(&p.q, p.items, limit, nil)
 }
 
-func (p *ClockPolicy[K, V]) Rebuild(remap func(oldIdx uint32) (uint32, bool)) {
-	itemstore.RebuildQueue(&p.q, remap, nil)
-}
-
+// Evict pops the head until it finds a victim. Every candidate is resolved exactly: examining an item changes its
+// reference counter, and that must never land on a neighbor.
 func (p *ClockPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	// Finite: each step removes a node for good or spends one of its at most two chances.
 	for {
@@ -41,16 +42,15 @@ func (p *ClockPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 		if !ok {
 			return 0, false
 		}
-		item := p.items.At(candidate.Idx)
-		metaWord := item.Metadata()
-		switch {
-		case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
-			return candidate.Idx, true
-		case metaWord&itemstore.ChanceMask != 0:
+		item, idx, found := p.items.Find(candidate)
+		if !found {
+			continue // the key left the cache; its node goes with it
+		}
+		if metaWord := item.Metadata(); chanced(metaWord, nowOff) {
 			item.RevokeChance(metaWord)
 			p.q.Push(candidate)
-		default:
-			return candidate.Idx, true
+			continue
 		}
+		return idx, true
 	}
 }

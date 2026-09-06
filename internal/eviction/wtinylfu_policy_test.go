@@ -60,8 +60,8 @@ func TestWTinyLFUAdmission(t *testing.T) {
 	pool := newArena()
 	p := NewWTinyLFU(&pool.items, 300, 1024) // windowCap = 3
 
-	residentIdx := addFromPool(p, pool, "resident")
-	touch(pool, residentIdx) // reused in the window: will be admitted to main outright
+	addFromPool(p, pool, "resident")
+	touch(pool, "resident") // reused in the window: will be admitted to main outright
 	for i := 0; i < 4; i++ {
 		addFromPool(p, pool, fmt.Sprintf("one-hit-%d", i))
 	}
@@ -70,14 +70,14 @@ func TestWTinyLFUAdmission(t *testing.T) {
 	// next candidate "one-hit-0" (frequency 1) loses the admission duel against the resident (frequency 2).
 	idx, ok := p.Evict(0)
 	require.True(t, ok)
-	assert.Equal(t, "one-hit-0", pool.items.At(idx).Entry().Key, "the rejected candidate must be the victim")
+	assert.Equal(t, "one-hit-0", pool.keyAt(idx), "the rejected candidate must be the victim")
 	pool.release(idx)
 
 	assert.Equal(t, 1, p.main.Len(), "main must hold exactly the admitted resident")
 	victim, ok := p.main.Peek()
 	require.True(t, ok)
-	assert.Equal(t, "resident", pool.items.At(victim.Idx).Entry().Key)
-	assert.Zero(t, pool.items.At(residentIdx).Metadata()&itemstore.Dead, "the protected resident must stay alive")
+	assert.Equal(t, "resident", pool.keyOf(victim))
+	assert.True(t, pool.alive("resident"), "the protected resident must stay alive")
 }
 
 // TestWTinyLFUAdmitsFrequentKey verifies the other side of the filter: a candidate whose key was seen more often
@@ -94,19 +94,19 @@ func TestWTinyLFUAdmitsFrequentKey(t *testing.T) {
 	}
 	idx, ok := p.Evict(0)
 	require.True(t, ok)
-	assert.Equal(t, "filler-0", pool.items.At(idx).Entry().Key, "the 1-vs-1 admission duel must keep the seated resident")
+	assert.Equal(t, "filler-0", pool.keyAt(idx), "the 1-vs-1 admission duel must keep the seated resident")
 	pool.release(idx)
 	require.Equal(t, 1, p.main.Len())
 
 	// Pump the hot key's frequency and push it through the window under sustained pressure: low-frequency chaff is
 	// rejected at admission, the hot key must pass into main.
 	for i := 0; i < 4; i++ {
-		p.sketch.increment(p.keyHash("hot"))
+		p.sketch.increment(mixHash(pool.node("hot").Hash()))
 	}
-	hotIdx := addFromPool(p, pool, "hot")
+	addFromPool(p, pool, "hot")
 	inMain := func(key string) bool {
 		found := false
-		p.main.Range(func(node itemstore.QNode) { found = found || pool.items.At(node.Idx).Entry().Key == key })
+		p.main.Range(func(node itemstore.QNode) { found = found || pool.keyOf(node) == key })
 		return found
 	}
 	for i := 0; i < 20 && !inMain("hot"); i++ {
@@ -116,7 +116,7 @@ func TestWTinyLFUAdmitsFrequentKey(t *testing.T) {
 		pool.release(idx)
 	}
 	assert.True(t, inMain("hot"), "the frequent candidate must be admitted to main")
-	assert.Zero(t, pool.items.At(hotIdx).Metadata()&itemstore.Dead, "the admitted key must stay alive")
+	assert.True(t, pool.alive("hot"), "the admitted key must stay alive")
 }
 
 // TestWTinyLFUBytes verifies Bytes is the sum of its parts, sketch included.

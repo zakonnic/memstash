@@ -114,38 +114,54 @@ func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {
 	}
 }
 
-// peekMemory is getMemory without the TTL rules: an expired value is returned instead of reclaimed, the reference
-// counter is left alone, and a tombstone is still a miss.
+// peekMemory is getMemory without the TTL rules: an expired value is returned instead of reclaimed and the reference
+// counter is left alone. A miss that overlapped a reclaim is probed again, the third time under the mutex.
 func (c *Cache[K, V]) peekMemory(key K) (V, bool) {
 	keyHash := maphash.Comparable(c.seed, key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
-	storage := sh.items.GetStorage()
 	tagged := itemstore.TagOf(keyHash)
-	home := storage.Home(keyHash)
-	groupEnd := (home | 7) + 1
 	var entry itemstore.Entry[K, V]
 	var zero V
-	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+	for attempt := 0; ; attempt++ {
+		seq := sh.moveSeq.Load()
+		storage := sh.items.GetStorage()
+		home := storage.Home(keyHash)
+		groupEnd := (home | 7) + 1
+	probe:
+		for pos := home; ; pos++ {
+			if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+				break probe
+			}
+			item := storage.At(pos)
+			metaWord := item.Metadata()
+			for {
+				if metaWord&itemstore.DeadOrTag != tagged {
+					break
+				}
+				if !item.SnapshotInto(&entry, metaWord) {
+					metaWord = item.Metadata()
+					continue
+				}
+				if entry.Key != key {
+					break
+				}
+				return entry.Value, true
+			}
+			if metaWord&itemstore.HasNext == 0 {
+				break probe
+			}
+		}
+		if seq&1 == 0 && sh.moveSeq.Load() == seq {
 			return zero, false
 		}
-		item := storage.At(pos)
-		metaWord := item.Metadata()
-		for {
-			if metaWord&itemstore.DeadOrTag != tagged {
-				break
+		if attempt == 2 {
+			sh.mu.Lock()
+			_, item, ok := c.findSlot(sh, keyHash, key)
+			if ok {
+				entry = *item.Entry()
 			}
-			if !item.SnapshotInto(&entry, metaWord) {
-				metaWord = item.Metadata()
-				continue
-			}
-			if entry.Key != key {
-				break
-			}
-			return entry.Value, true
-		}
-		if metaWord&itemstore.HasNext == 0 {
-			return zero, false
+			sh.mu.Unlock()
+			return entry.Value, ok
 		}
 	}
 }

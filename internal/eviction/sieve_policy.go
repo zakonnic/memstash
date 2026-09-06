@@ -31,12 +31,13 @@ type SievePolicy[K comparable, V any] struct {
 	head  int32 // newest item; noLink when the list is empty
 	tail  int32 // oldest item
 	hand  int32 // next scan position; noLink wraps to tail
+	sweep int32 // where the running sweep pass resumes; noLink between passes
 	size  int
 }
 
 // NewSieve creates a SIEVE policy.
 func NewSieve[K comparable, V any](slots *itemstore.StorageProxy[K, V]) *SievePolicy[K, V] {
-	return &SievePolicy[K, V]{slots: slots, free: noLink, head: noLink, tail: noLink, hand: noLink}
+	return &SievePolicy[K, V]{slots: slots, free: noLink, head: noLink, tail: noLink, hand: noLink, sweep: noLink}
 }
 
 func (p *SievePolicy[K, V]) Add(node itemstore.QNode) {
@@ -65,61 +66,47 @@ func (p *SievePolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 			cur = p.tail // wrap: resume from the oldest item
 		}
 		node := &p.nodes[cur]
-		item := p.slots.At(node.item.Idx)
-		metaWord := item.Metadata()
-		switch {
-		case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
-			return p.removeAt(cur, node), true
-		case metaWord&itemstore.ChanceMask != 0:
+		item, idx, found := p.slots.Find(node.item)
+		if !found {
+			p.removeAt(cur, node) // the key left the cache; its node goes with it
+			continue
+		}
+		if chanced(item.Metadata(), nowOff) {
 			item.ResetChances()
 			p.hand = node.prev // survived in place; the hand moves on toward the newer end
-		default:
-			return p.removeAt(cur, node), true
+			continue
 		}
+		p.removeAt(cur, node)
+		return idx, true
 	}
 	return 0, false
 }
 
-// removeAt advances the hand past cur, unlinks it and returns its item's slot index.
-func (p *SievePolicy[K, V]) removeAt(cur int32, node *sieveNode) uint32 {
-	idx := node.item.Idx
+// removeAt advances the hand past cur and unlinks it.
+func (p *SievePolicy[K, V]) removeAt(cur int32, node *sieveNode) {
 	p.hand = node.prev
 	p.unlink(cur, node)
-	return idx
 }
 
-func (p *SievePolicy[K, V]) Sweep(release func(idx uint32)) {
-	storage := p.slots.GetStorage()
-	for cur := p.head; cur != noLink; {
+// Sweep walks up to limit nodes from where the last call stopped (the head on a fresh pass) toward the tail, dropping
+// the nodes whose keys are gone; eviction keeps the cursor valid when it unlinks the node under it (see unlink).
+func (p *SievePolicy[K, V]) Sweep(limit int) bool {
+	if p.sweep == noLink {
+		p.sweep = p.head
+	}
+	for ; limit > 0 && p.sweep != noLink; limit-- {
+		cur := p.sweep
 		node := &p.nodes[cur]
-		next := node.next
-		if storage.At(node.item.Idx).Metadata()&itemstore.Dead != 0 {
+		p.sweep = node.next
+		if _, _, found := p.slots.Find(node.item); !found {
 			if p.hand == cur {
 				// The walk goes head to tail, so prev nodes are already swept: the hand lands on a live node.
 				p.hand = node.prev
 			}
-			release(node.item.Idx)
 			p.unlink(cur, node)
 		}
-		cur = next
 	}
-}
-
-func (p *SievePolicy[K, V]) Rebuild(remap func(oldIdx uint32) (uint32, bool)) {
-	// Oldest first: rebuilds insert in this order, so the long-lived (usually hot) items get the short probe chains.
-	for cur := p.tail; cur != noLink; {
-		node := &p.nodes[cur]
-		prev := node.prev
-		if newIdx, live := remap(node.item.Idx); live {
-			node.item.Idx = newIdx
-		} else {
-			if p.hand == cur {
-				p.hand = prev
-			}
-			p.unlink(cur, node)
-		}
-		cur = prev
-	}
+	return p.sweep != noLink
 }
 
 // alloc hands out a node slot: from the freelist, or by growing the slice.
@@ -133,8 +120,12 @@ func (p *SievePolicy[K, V]) alloc() int32 {
 	return int32(len(p.nodes) - 1)
 }
 
-// unlink removes cur from the list and pushes its slot onto the freelist. The caller keeps the hand off cur.
+// unlink removes cur from the list and pushes its slot onto the freelist. The caller keeps the hand off cur; the
+// sweep cursor steps over it here.
 func (p *SievePolicy[K, V]) unlink(cur int32, node *sieveNode) {
+	if p.sweep == cur {
+		p.sweep = node.next
+	}
 	if node.prev != noLink {
 		p.nodes[node.prev].next = node.next
 	} else {

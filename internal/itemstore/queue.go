@@ -6,13 +6,50 @@ import "unsafe"
 // chunk exactly 1 KiB.
 const queueChunkSize = 127
 
-// QNode is an eviction-queue element: the slot index of an item plus its weight when enqueued (the index instead of
-// a pointer keeps the node at 8 bytes). The weight lets S3-FIFO balance its small queue without touching the item;
-// it may drift after an overwrite, but only queue selection depends on it - the global accounting is recomputed from
-// the live value.
+// QNode is an eviction-queue element: a claim on a key, not on a slot. It carries the 40 hash bits Find needs to
+// locate the item again - the 32 bits Home scales into the slot range and the 8 bits a probe compares first - plus the
+// item's weight when it was enqueued. Items may move between slots (deletion shifts their neighbors toward home),
+// so a node never remembers a position; it is resolved through Items.Find whenever the policy needs the item.
+//
+// The weight is kept to 24 bits with a small floating-point encoding: exact below 2 MiB, 2^-19 relative error above.
+// It only balances S3-FIFO's small queue and W-TinyLFU's window, so that precision is plenty; it may drift after an
+// overwrite anyway - the global accounting is recomputed from the live value.
 type QNode struct {
-	Idx  uint32
-	Cost uint32
+	home    uint32 // keyHash >> 32, the input of FlatHashMap.Home
+	tagCost uint32 // keyHash bits 14..21 in the top byte, the encoded weight below
+}
+
+// NewQNode builds the node for an item with the given key hash and weight.
+func NewQNode(keyHash uint64, cost uint32) QNode {
+	return QNode{home: uint32(keyHash >> 32), tagCost: uint32(uint8(keyHash>>14))<<24 | encodeCost(cost)}
+}
+
+// Cost is the item's weight when it was enqueued, decoded.
+func (n QNode) Cost() uint32 { return decodeCost(n.tagCost & (1<<24 - 1)) }
+
+// Hash lays the node's 40 identity bits out where the key hash carried them, so a frequency sketch or a ghost table
+// keyed by the hash sees the same key across the item's residencies.
+func (n QNode) Hash() uint64 { return uint64(n.home)<<32 | uint64(n.tag())<<14 }
+
+func (n QNode) tag() uint8 { return uint8(n.tagCost >> 24) }
+
+// The weight encoding: 3 exponent bits over a 21-bit mantissa, the value being mantissa << 2*exponent.
+const (
+	costMantissaBits = 21
+	costMantissaMax  = 1<<costMantissaBits - 1
+)
+
+func encodeCost(cost uint32) uint32 {
+	exp := uint32(0)
+	for cost>>(2*exp) > costMantissaMax {
+		exp++
+	}
+	return exp<<costMantissaBits | cost>>(2*exp)
+}
+
+func decodeCost(encoded uint32) uint32 {
+	exp := encoded >> costMantissaBits
+	return (encoded & costMantissaMax) << (2 * exp)
 }
 
 // queueChunk is a single link of the unrolled queue.
@@ -21,35 +58,41 @@ type queueChunk struct {
 	next  *queueChunk
 }
 
-// EvictQueue is a FIFO queue built on chunks. Dead nodes are not spliced out - they are lazily skipped during
-// eviction. Not thread-safe: guard with the shard mutex.
+// EvictQueue is a FIFO queue built on chunks. Nodes whose keys have left the cache are not spliced out - they are
+// lazily skipped during eviction, or dropped by SweepQueue. Not thread-safe: guard with the shard mutex.
 type EvictQueue struct {
-	head    *queueChunk
-	tail    *queueChunk
-	headIdx int
-	tailIdx int
-	size    int
+	head      *queueChunk
+	tail      *queueChunk
+	spare     *queueChunk // the last chunk the head drained, kept for the next one the tail needs
+	headIdx   int
+	tailIdx   int
+	size      int
+	sweepLeft int // nodes of the running sweep pass still to examine; 0 between passes
 }
 
 // Len returns the number of nodes currently queued.
 func (q *EvictQueue) Len() int { return q.size }
 
-// Bytes returns the footprint of the currently allocated chunks (a chunk is only released once fully drained).
+// Bytes returns the footprint of the chunks the queue holds, the spare one included.
 func (q *EvictQueue) Bytes() int64 {
 	var chunks int64
 	for c := q.head; c != nil; c = c.next {
 		chunks++
 	}
+	if q.spare != nil {
+		chunks++
+	}
 	return chunks * int64(unsafe.Sizeof(queueChunk{}))
 }
 
-// Push appends a node to the tail, allocating a new chunk when the current tail is full.
+// Push appends a node to the tail, taking a fresh chunk when the current tail is full: the one the head drained
+// last, if any, so that a rotation - a re-queue, a sweep - allocates nothing.
 func (q *EvictQueue) Push(item QNode) {
 	if q.tail == nil {
-		newChunk := &queueChunk{}
+		newChunk := q.freshChunk()
 		q.head, q.tail = newChunk, newChunk
 	} else if q.tailIdx == queueChunkSize {
-		newChunk := &queueChunk{}
+		newChunk := q.freshChunk()
 		q.tail.next = newChunk
 		q.tail = newChunk
 		q.tailIdx = 0
@@ -59,38 +102,42 @@ func (q *EvictQueue) Push(item QNode) {
 	q.size++
 }
 
-// SweepQueue rotates the queue once, handing the nodes of dead items to onDrop and pushing live ones back, so their
-// FIFO order and reference counters are preserved. It reclaims in bulk the tombstones that eviction would otherwise
-// only reach under capacity pressure. The storage resolves node indices.
-func SweepQueue[K comparable, V any](q *EvictQueue, storage *FlatHashMap[K, V], onDrop func(QNode)) {
-	for n := q.size; n > 0; n-- {
-		node, ok := q.Pop()
-		if !ok {
-			return
-		}
-		if storage.At(node.Idx).Metadata()&Dead != 0 {
-			onDrop(node)
-		} else {
-			q.Push(node)
-		}
+// freshChunk hands out the spare chunk (Pop zeroed its nodes on the way out) or allocates one.
+func (q *EvictQueue) freshChunk() *queueChunk {
+	if c := q.spare; c != nil {
+		q.spare = nil
+		c.next = nil
+		return c
 	}
+	return &queueChunk{}
 }
 
-// RebuildQueue re-links a queue after a table swap: remap turns an old slot index into the new one, or reports the
-// node dead - those drop out, going through onDrop when it is not nil.
-func RebuildQueue(q *EvictQueue, remap func(oldIdx uint32) (uint32, bool), onDrop func(QNode)) {
-	for n := q.size; n > 0; n-- {
+// BeginSweep starts a sweep pass over the nodes queued right now; SweepStep works through it.
+func (q *EvictQueue) BeginSweep() { q.sweepLeft = q.size }
+
+// Sweeping reports whether the current sweep pass has nodes left.
+func (q *EvictQueue) Sweeping() bool { return q.sweepLeft > 0 }
+
+// SweepStep is one slice of the sweep pass BeginSweep started: it examines up to limit nodes from the head, drops
+// those Find can no longer resolve - their keys left the cache - and pushes the rest back in their order. A pass
+// covers the nodes queued when it began; it is spread over calls so that no single write stalls on a queue of
+// millions, at the price of the nodes pushed meanwhile ending up a few places ahead of the survivors rotated after
+// them. Returns whether the pass has nodes left. onDrop, when not nil, sees every dropped node.
+func SweepStep[K comparable, V any](q *EvictQueue, items *StorageProxy[K, V], limit int, onDrop func(QNode)) bool {
+	q.sweepLeft = min(q.sweepLeft, q.size) // evictions may have popped part of the pass already
+	for ; limit > 0 && q.sweepLeft > 0; limit, q.sweepLeft = limit-1, q.sweepLeft-1 {
 		node, ok := q.Pop()
 		if !ok {
-			return
+			q.sweepLeft = 0
+			break
 		}
-		if newIdx, live := remap(node.Idx); live {
-			node.Idx = newIdx
+		if _, _, found := items.Locate(node); found { // a tag twin keeps a stale node one pass longer: harmless
 			q.Push(node)
 		} else if onDrop != nil {
 			onDrop(node)
 		}
 	}
+	return q.sweepLeft > 0
 }
 
 // Range calls f for every queued node in FIFO order without disturbing the queue.
@@ -116,8 +163,8 @@ func (q *EvictQueue) Peek() (QNode, bool) {
 	return q.head.items[q.headIdx], true
 }
 
-// Pop removes a node from the head. Fully consumed chunks are handed to the GC as a whole; a drained last chunk is
-// reused from the beginning.
+// Pop removes a node from the head. A fully consumed chunk becomes the spare for the next Push that needs one (one is
+// kept; further ones go to the GC); a drained last chunk is reused from the beginning.
 func (q *EvictQueue) Pop() (QNode, bool) {
 	if q.size == 0 {
 		return QNode{}, false
@@ -128,11 +175,15 @@ func (q *EvictQueue) Pop() (QNode, bool) {
 	q.size--
 
 	if q.headIdx == queueChunkSize {
+		drained := q.head
 		q.head = q.head.next
 		q.headIdx = 0
 		if q.head == nil {
 			q.tail = nil
 			q.tailIdx = 0
+		}
+		if q.spare == nil {
+			q.spare = drained
 		}
 	}
 	if q.size == 0 && q.head != nil {

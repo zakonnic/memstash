@@ -64,14 +64,21 @@ const (
 // mutations for that key are serialized by the shard mutex. Readers never take it: they probe the atomically
 // published table and verify candidates against the items themselves.
 type shard[K comparable, V any] struct {
-	mu        sync.Mutex
-	items     itemstore.StorageProxy[K, V] // the item table, swapped wholesale on growth/purge
-	policy    EvictionPolicy[K, V]
-	weight    atomic.Int64
-	cap       int64
-	live      int // items of alive items; guarded by mu
-	dirty     int // tombstoned items, purged on rebuild; guarded by mu
-	deadCount int // tombstones queued by Delete / lazy TTL removal, not yet reclaimed; guarded by mu
+	mu    sync.Mutex
+	items itemstore.StorageProxy[K, V] // the item table, swapped wholesale on growth
+	// moveSeq is odd while a reclaim moves items (see FlatHashMap.Reclaim). A lock-free probe that misses re-checks
+	// it: a change means a key may have crossed the probe, so the miss is not trusted. It sits next to items, on the
+	// line every read loads anyway - and one that the weight updates bounce on every Set already.
+	moveSeq atomic.Uint32
+	policy  EvictionPolicy[K, V]
+	weight  atomic.Int64
+	cap     int64
+	live    int // alive items; guarded by mu
+	// staleNodes counts the queue nodes whose keys left through Delete or lazy TTL removal - the ones no eviction
+	// pop will drop - until a sweep clears them out; guarded by mu.
+	staleNodes int
+	sweeping   bool                   // a sweep pass is in progress: every write advances it by sweepBudget nodes
+	scratch    []itemstore.ShiftEntry // Reclaim's buffer for the run it compacts; guarded by mu
 
 	_ [64]byte // padding - spreads shards across cache lines
 }
@@ -82,7 +89,7 @@ type Cache[K comparable, V any] struct {
 
 	shards    []shard[K, V]
 	shardMask uint32
-	// preallocated pins the table size: the whole capacity is already there, so a rebuild may only purge.
+	// preallocated pins the table size: the whole capacity is already there, so the table never grows.
 	preallocated bool
 	// growthNum is Config.GrowthThreshold as a numerator over 1<<growthShift.
 	growthNum int
@@ -237,7 +244,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		if cfg.PreallocateMap {
 			slots = preallocSlots(sh.cap, cfg.preallocRatio())
 		}
-		sh.items.Store(itemstore.NewFlatHashMap[K, V](slots))
+		sh.items.Store(itemstore.NewFlatHashMap[K, V](slots, c.seed))
 		if cfg.CustomPolicy != nil {
 			sh.policy = cfg.CustomPolicy(&sh.items, sh.cap)
 			if sh.policy == nil {
@@ -383,57 +390,85 @@ func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 	return value, ok
 }
 
-// getMemory is the lock-free memory-hit path. It probes the slot table by meta word (tag prefilter), then uses the
-// item's Entry snapshot to confirm an exact key match and to obtain a value that is never observed half-written.
+// getMemory is the lock-free read path. It hashes in place and inlines touchHit by hand: neither would inline as a
+// call.
 //
-// The body inlines the shardAndHash computation and the snapshot into a single stack slot, avoiding a call frame and
-// extra Entry copies. Those overheads would either slow things down directly or clog the works so the CPU can't do
-// something else while waiting.
+// Nothing is read before the home slot: that is the one dependent access a hit can afford. A validated snapshot is a
+// hit as it stands. A miss is trusted only if no reclaim moved items during the walk (moveSeq even and unchanged);
+// otherwise getMoved walks again.
 func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 	keyHash := maphash.Comparable(c.seed, key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
-	storage := sh.items.GetStorage()
 	tagged := itemstore.TagOf(keyHash)
-	home := storage.Home(keyHash)
-	groupEnd := (home | 7) + 1 // first position past home's overflow group
 	var entry itemstore.Entry[K, V]
 	var zero V
-	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
-			return zero, false // nothing homed in this group lives past it: definitely absent
-		}
-		item := storage.At(pos)
-		metaWord := item.Metadata()
-		for {
-			if metaWord&itemstore.DeadOrTag != tagged {
-				break // dead, or a foreign tag
+	for attempt := 0; ; attempt++ {
+		seq := sh.moveSeq.Load()
+		storage := sh.items.GetStorage()
+		home := storage.Home(keyHash)
+		groupEnd := (home | 7) + 1 // first position past home's overflow group
+	probe:
+		for pos := home; ; pos++ {
+			if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+				break probe // nothing homed in this group lives past it: definitely absent
 			}
-			if !item.SnapshotInto(&entry, metaWord) {
-				metaWord = item.Metadata()
-				continue // the copy raced a recycle or an overwrite: retry against the fresh meta word
-			}
-			if entry.Key != key {
-				break // tag collision or a recycled slot
-			}
-			nowOff := c.nowOff.Load()
-			if !itemstore.Expired(metaWord, nowOff) {
-				if c.refreshOnGet {
-					expireOff := uint32(metaWord & itemstore.ExpireMask >> itemstore.ExpireShift)
-					if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && item.TouchAndRefreshExpire(metaWord, newOff) {
-						return entry.Value, true
-					}
+			item := storage.At(pos)
+			metaWord := item.Metadata()
+			for {
+				if metaWord&itemstore.DeadOrTag != tagged {
+					break // dead, or a foreign tag
 				}
-				item.TouchWith(metaWord)
-				return entry.Value, true
+				if !item.SnapshotInto(&entry, metaWord) {
+					metaWord = item.Metadata()
+					continue // the copy raced a recycle or an overwrite: retry against the fresh meta word
+				}
+				if entry.Key != key {
+					break // tag collision or a recycled slot
+				}
+				nowOff := c.nowOff.Load()
+				if !itemstore.Expired(metaWord, nowOff) {
+					if c.refreshOnGet {
+						expireOff := uint32(metaWord & itemstore.ExpireMask >> itemstore.ExpireShift)
+						if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && item.TouchAndRefreshExpire(metaWord, newOff) {
+							return entry.Value, true
+						}
+					}
+					item.TouchWith(metaWord)
+					return entry.Value, true
+				}
+				// TTL has elapsed - drop the item lazily instead of waiting for the eviction queue to reach it.
+				c.dropExpired(sh, keyHash, key)
+				return zero, false
 			}
-			// TTL has elapsed - drop the item lazily instead of waiting for the eviction queue to reach it.
-			c.dropExpired(sh, keyHash, key, storage.Wrap(pos))
+			if metaWord&itemstore.HasNext == 0 {
+				break probe // no key homed at or before this slot lives past it
+			}
+		}
+		if seq&1 == 0 && sh.moveSeq.Load() == seq {
 			return zero, false
 		}
-		if metaWord&itemstore.HasNext == 0 {
-			return zero, false // no key homed at or before this slot lives past it
+		if attempt == 2 {
+			return c.getLocked(sh, keyHash, key)
 		}
 	}
+}
+
+// getLocked reads under the shard mutex, where no reclaim can move items: the fallback for a probe that keeps
+// overlapping compactions.
+func (c *Cache[K, V]) getLocked(sh *shard[K, V], keyHash uint64, key K) (V, bool) {
+	var zero V
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	_, item, ok := c.findSlot(sh, keyHash, key)
+	if !ok {
+		return zero, false
+	}
+	metaWord := item.Metadata()
+	if itemstore.Expired(metaWord, c.nowOff.Load()) {
+		return zero, false
+	}
+	item.TouchWith(metaWord)
+	return item.Entry().Value, true
 }
 
 // Set stores the value in memory and in L2 according to WritePolicy. An error can come only from a synchronous L2
@@ -486,8 +521,9 @@ func (c *Cache[K, V]) expireOffsetOf(ttl time.Duration) (uint32, time.Duration) 
 }
 
 // setMemory puts the value into the first level with the given expiration offset (0 = no TTL; callers that just
-// want the configured TTL pass expireOffset()). An overwrite stores into the item in place (the item, its queue
-// node and its slot stay put); a new key claims a free slot. Neither path allocates.
+// want the configured TTL pass expireOffset()). An overwrite stores into the item in place (the item and its slot
+// stay put); a new key takes the first empty slot on its walk - deletions compact their runs, so an empty slot is
+// never followed by a key homed at or before it, and the walk ends there with certainty. Neither path allocates.
 func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	weight := c.rawCost(key, value)
 	sh, keyHash := c.shardAndHash(key)
@@ -508,46 +544,20 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	tagged := itemstore.TagOf(keyHash)
 	home := storage.Home(keyHash)
 	weightDelta := weight
-	reuse, hasReuse := uint32(0), false
 	for pos := home; ; pos++ {
 		item := storage.At(pos)
 		metaWord := item.Metadata()
-		if metaWord == 0 {
-			// New key: claim this empty slot, or the first freed tombstone seen on the way.
-			if hasReuse {
-				pos, item = reuse, storage.At(reuse)
-				sh.dirty--
-			}
+		if itemstore.Empty(metaWord) {
 			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff)
 			storage.NoteDisplaced(keyHash, pos)
 			storage.MarkChain(home, storage.Wrap(pos))
 			sh.live++
-			sh.policy.Add(itemstore.QNode{Idx: storage.Wrap(pos), Cost: uint32(weight)})
-			c.maybeRebuild(sh, storage)
+			sh.policy.Add(itemstore.NewQNode(keyHash, uint32(weight)))
+			c.maybeGrow(sh, storage)
 			break
 		}
-		if metaWord&itemstore.Dead != 0 {
-			if !itemstore.Reusable(metaWord) && metaWord&itemstore.TagMask == tagged&itemstore.TagMask &&
-				item.Entry().Key == key {
-				// The queue node still references this slot, so re-insert resurrects the entry instead of extending
-				// the probe chain with a dead record, which hurts hash probing.
-				item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff)
-				storage.NoteDisplaced(keyHash, pos)
-				sh.live++
-				sh.dirty--
-				if sh.deadCount > 0 {
-					sh.deadCount--
-				}
-				break
-			}
-			// Any other tombstone still referenced by its queue node cannot be reused - the node would point at a stranger.
-			if !hasReuse && itemstore.Reusable(metaWord) {
-				reuse, hasReuse = pos, true
-			}
-			continue
-		}
-		if metaWord&itemstore.TagMask != tagged&itemstore.TagMask {
-			continue
+		if metaWord&itemstore.DeadOrTag != tagged {
+			continue // a foreign tag: a dead slot never outlives its reclaim, which runs under mu
 		}
 		entry := item.Entry()
 		if entry.Key != key {
@@ -567,52 +577,39 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	if sh.weight.Add(weightDelta) > sh.cap {
 		c.evictShard(sh, &deletions)
 	}
+	c.sweepStep(sh)
 	sh.mu.Unlock()
 	if len(deletions) > 0 {
 		c.callOnDeletion(deletions)
 	}
 }
 
-// maybeRebuild replaces the shard's table when it passes the growth threshold in occupancy (tombstones included):
-// grown when live items need the space, same-size otherwise - either way tombstones are purged. Items move, so the policy re-links
-// its queue nodes to the new positions and drops dead ones on the same pass. Readers finish on the superseded table:
-// a probe racing the swap may return a value as of the copy moment - the documented Get-racing-Set window. Called
-// under the shard mutex.
+// maybeGrow replaces the shard's table with a bigger one once live items pass the growth threshold - the table
+// holds nothing else, since a deletion compacts its run on the spot. Items are re-inserted in table order into a
+// table nobody reads yet; readers finish on the superseded one, and a probe racing the swap may return a value as of
+// the copy moment - the documented Get-racing-Set window. The queues need no attention: nodes address keys, not
+// slots. Called under the shard mutex.
 //
-// Growth is off the same line: a purge leaves the table holding live items and nothing else, so it buys room only
-// while live itself sits below the threshold. Past that a purge would land right back on the line.
-//
-// A preallocated cache never takes that branch: its table already holds the whole capacity below the line, so a live
-// count past it would mean the capacity itself was exceeded. Growing there would silently double a footprint the
-// caller asked for up front, so the purge stands.
-func (c *Cache[K, V]) maybeRebuild(sh *shard[K, V], t *itemstore.FlatHashMap[K, V]) {
-	if (sh.live+sh.dirty)<<growthShift < t.Len()*c.growthNum {
+// A preallocated cache never grows: its table already holds the whole capacity, so a live count past the line would
+// mean the capacity itself was exceeded, and growing would silently double a footprint the caller asked for up front.
+func (c *Cache[K, V]) maybeGrow(sh *shard[K, V], t *itemstore.FlatHashMap[K, V]) {
+	if c.preallocated || sh.live<<growthShift < t.Len()*c.growthNum || int64(t.Len()) >= maxTableSlots {
 		return
 	}
-	newSize := t.Len()
-	if !c.preallocated && sh.live<<growthShift > newSize*c.growthNum && int64(newSize) < maxTableSlots {
-		newSize = min(itemstore.GrowSlots(newSize), int(maxTableSlots))
-		c.stats.addTableGrowths(1)
-	} else {
-		c.stats.addTablePurges(1)
-	}
-	fresh := itemstore.NewFlatHashMap[K, V](newSize)
-	live := 0
-	sh.policy.Rebuild(func(oldIdx uint32) (uint32, bool) {
-		item := t.At(oldIdx)
-		if item.Metadata()&itemstore.Dead != 0 {
-			return 0, false
+	fresh := itemstore.NewFlatHashMap[K, V](min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), c.seed)
+	for pos := uint32(0); int(pos) < t.Len(); pos++ {
+		item := t.At(pos)
+		if metaWord := item.Metadata(); !itemstore.Empty(metaWord) && metaWord&itemstore.Dead == 0 {
+			fresh.InsertFresh(maphash.Comparable(c.seed, item.Entry().Key), item)
 		}
-		live++
-		return fresh.InsertFresh(maphash.Comparable(c.seed, item.Entry().Key), item), true
-	})
-	sh.live, sh.dirty, sh.deadCount = live, 0, 0
+	}
 	sh.items.Store(fresh)
+	c.stats.addTableGrowths(1)
 }
 
 // evictShard evicts items from the shard while its weight exceeds the capacity. The policy only picks and dequeues
-// the victim; the alive -> dead transition (and so the weight accounting) happens here - for items that died earlier
-// (Delete, lazy TTL removal) Kill reports false and everything is already accounted. Called under the shard mutex.
+// the victim - a live item, resolved through Items.Find - and the alive -> dead transition, the weight accounting
+// and the reclaim of the slot happen here. Called under the shard mutex.
 func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 	nowOff := c.nowOff.Load()
 	storage := sh.items.GetStorage()
@@ -622,77 +619,81 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 			return
 		}
 		item := storage.At(victimIdx)
-		if item.Kill() {
-			entry := item.Entry()
-			sh.weight.Add(-c.rawCost(entry.Key, entry.Value))
-			storage.ForgetDisplaced(maphash.Comparable(c.seed, entry.Key), victimIdx)
-			sh.live--
-			sh.dirty++
-			if c.onDeletion != nil {
-				// The policy hands over expired items too; the meta word says which of the two it was.
-				cause := CauseEviction
-				if itemstore.Expired(item.Metadata(), nowOff) {
-					cause = CauseExpiration
-				}
-				c.addDeletion(deletions, entry.Key, entry.Value, cause)
-			}
+		// The policy hands over expired items too; the meta word says which of the two it was.
+		cause := CauseEviction
+		if itemstore.Expired(item.Metadata(), nowOff) {
+			cause = CauseExpiration
 		}
-		sh.dirty -= c.releaseSlot(storage, victimIdx) // the queue node is gone: the slot may serve a new key
+		c.killAt(sh, maphash.Comparable(c.seed, item.Entry().Key), victimIdx, item, cause, deletions)
 	}
 }
 
-// dropExpired lazily removes a TTL-expired item found by the Get path. The item stays in the queue as a tombstone
-// until the next eviction pass or sweep.
-func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K, idx uint32) {
+// dropExpired lazily removes a TTL-expired item found by the Get path. Its queue node stays behind until the next
+// eviction pass or sweep drops it.
+func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K) {
 	sh.mu.Lock()
-	foundIdx, item, ok := c.findSlot(sh, h, key)
-	// The idx match and the Expired re-check reject the races: a re-claimed slot or a refreshed TTL means the item
-	// survives.
+	idx, item, ok := c.findSlot(sh, h, key)
+	// Recheck under the lock: the TTL may have been refreshed, and a reclaim may have moved the item.
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
-	if ok && foundIdx == idx && itemstore.Expired(item.Metadata(), c.nowOff.Load()) {
-		c.killAt(sh, h, foundIdx, item, CauseExpiration, &deletions)
+	if ok && itemstore.Expired(item.Metadata(), c.nowOff.Load()) {
+		c.killAt(sh, h, idx, item, CauseExpiration, &deletions)
+		c.noteStale(sh)
 	}
+	c.sweepStep(sh)
 	sh.mu.Unlock()
 	if len(deletions) > 0 {
 		c.callOnDeletion(deletions)
 	}
 }
 
-// livePresent probes for key without taking the shard mutex, so deleting a key the cache does not hold never queues
-// behind the writers of its shard. A Set racing the probe is the Get-racing-Set window: the delete lands before it.
+// livePresent probes for the key without the shard mutex, so deleting a key the cache does not hold never queues
+// behind the shard's writers. A Set racing the probe is the Get-racing-Set window: the delete lands before it. A miss
+// that overlapped a reclaim is retried; after three the answer is "present", and the locked path settles it.
 func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
-	storage := sh.items.GetStorage()
 	tagged := itemstore.TagOf(keyHash)
-	home := storage.Home(keyHash)
-	groupEnd := (home | 7) + 1
 	var entry itemstore.Entry[K, V]
-	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
-			return false
-		}
-		item := storage.At(pos)
-		metaWord := item.Metadata()
-		for {
-			if metaWord&itemstore.DeadOrTag != tagged {
+	for attempt := 0; ; attempt++ {
+		seq := sh.moveSeq.Load()
+		storage := sh.items.GetStorage()
+		home := storage.Home(keyHash)
+		groupEnd := (home | 7) + 1
+	probe:
+		for pos := home; ; pos++ {
+			if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+				break probe
+			}
+			item := storage.At(pos)
+			metaWord := item.Metadata()
+			for {
+				if metaWord&itemstore.DeadOrTag != tagged {
+					break
+				}
+				if !item.SnapshotInto(&entry, metaWord) {
+					metaWord = item.Metadata()
+					continue
+				}
+				if entry.Key == key {
+					return true
+				}
 				break
 			}
-			if !item.SnapshotInto(&entry, metaWord) {
-				metaWord = item.Metadata()
-				continue
+			if metaWord&itemstore.HasNext == 0 {
+				break probe
 			}
-			if entry.Key == key {
-				return true
-			}
-			break
 		}
-		if metaWord&itemstore.HasNext == 0 {
+		if seq&1 == 0 && sh.moveSeq.Load() == seq {
 			return false
+		}
+		if attempt == 2 {
+			return true
 		}
 	}
 }
 
-// killAt kills the item in its slot and subtracts its weight; the slot stays a non-reusable tombstone until
-// its queue node is swept. Called under the shard mutex.
+// killAt kills the item in its slot, subtracts its weight and reclaims the slot on the spot: the run it sat in is
+// compacted (FlatHashMap.Reclaim), so the table holds live items and nothing else, and no purge is ever needed. The
+// reclaim brackets its moves on moveSeq, which is what lets a lock-free probe tell a miss that overlapped them from
+// a real one. Called under the shard mutex.
 func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *itemstore.Item[K, V],
 	cause DeletionCause, deletions *[]deletion[K, V]) {
 	entry := item.Entry()
@@ -704,42 +705,7 @@ func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *
 	storage := sh.items.GetStorage()
 	storage.ForgetDisplaced(keyHash, idx)
 	sh.live--
-	sh.dirty++
-	c.noteDead(sh)
-}
-
-// coverScanLimit caps the walk that tests whether a chain bit is still earned. The walk stops on its own within a
-// couple of slots; the cap only bounds a table whose bits have gone stale in bulk, and stopping early just leaves a
-// tombstone where a zero would have done.
-const coverScanLimit = 64
-
-// releaseSlot hands a dead slot back once its queue node is gone. A slot no live key's probe chain runs through is
-// zeroed outright rather than left as a tombstone, which is what keeps a churning cache off the rebuild line without
-// ever moving an item. Returns how many slots it reclaimed. Called under the shard mutex.
-func (c *Cache[K, V]) releaseSlot(storage *itemstore.FlatHashMap[K, V], idx uint32) int {
-	// A clear chain bit is proof on its own: nothing homed at or before this slot lives past it. A set one only
-	// means some key did once, so it is worth asking whether that key is still there.
-	uncovered := storage.At(idx).Metadata()&itemstore.HasNext == 0 || !c.covered(storage, idx)
-	return storage.Release(idx, uncovered)
-}
-
-// covered reports whether some live key's probe chain still runs through the slot at q. It walks forward only while
-// the chain bits say a chain might continue, so it stops where the run provably ends. Called under the shard mutex.
-func (c *Cache[K, V]) covered(storage *itemstore.FlatHashMap[K, V], q uint32) bool {
-	for step, pos := 0, q+1; step < coverScanLimit; step, pos = step+1, pos+1 {
-		item := storage.At(pos)
-		metaWord := item.Metadata()
-		if metaWord&itemstore.Dead == 0 && metaWord != 0 {
-			home := storage.Home(maphash.Comparable(c.seed, item.Entry().Key))
-			if storage.Covers(home, storage.Wrap(pos), q) {
-				return true
-			}
-		}
-		if metaWord&itemstore.HasNext == 0 {
-			return false // the chain provably ends here, so nothing past it can reach back over q
-		}
-	}
-	return true // out of budget: leave the tombstone rather than risk cutting a chain
+	storage.Reclaim(idx, &sh.scratch, &sh.moveSeq)
 }
 
 // findSlot probes the shard's current table for the key's live slot: (slot index, item, true) when found. Called
@@ -764,34 +730,46 @@ func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, 
 	}
 }
 
-// sweepMinDead is the minimum number of queued tombstones before a sweep is considered; smaller piles are not worth
+// sweepMinStale is the minimum number of stale queue nodes before a sweep is considered; smaller piles are not worth
 // the pass.
-const sweepMinDead = 128
+const sweepMinStale = 128
 
-// noteDead accounts a tombstone queued by Delete or lazy TTL removal and, once tombstones outnumber live nodes,
-// reclaims them in bulk. Without this a delete-heavy workload below capacity would grow the queues without bound
-// (eviction, the other reclaimer, never runs there); the half-dead trigger keeps the sweep amortized O(1) per
-// delete. Called under the shard mutex.
-func (c *Cache[K, V]) noteDead(sh *shard[K, V]) {
-	sh.deadCount++
-	if sh.deadCount >= sweepMinDead && sh.deadCount*2 >= sh.policy.Len() {
-		storage := sh.items.GetStorage()
-		sh.policy.Sweep(func(idx uint32) { sh.dirty -= c.releaseSlot(storage, idx) })
-		sh.deadCount = 0
+// sweepBudget is how many queue nodes one write examines while a sweep pass runs: a pass over millions of nodes
+// completes within a few hundred thousand writes, and a write holds the shard mutex for well under a microsecond
+// more - the cap matters, since every reader that missed under an open move bracket ends up waiting on that mutex.
+const sweepBudget = 16
+
+// noteStale accounts a queue node whose key left through Delete or lazy TTL removal - an eviction pop drops its own
+// node - and, once such nodes outnumber the live ones, starts a sweep pass that the writes then carry (sweepStep).
+// Without this a delete-heavy workload below capacity would grow the queues without bound (eviction, the other
+// reclaimer, never runs there); the half-stale trigger keeps the sweep amortized O(1) per delete. Called under the
+// shard mutex.
+func (c *Cache[K, V]) noteStale(sh *shard[K, V]) {
+	sh.staleNodes++
+	if !sh.sweeping && sh.staleNodes >= sweepMinStale && sh.staleNodes*2 >= sh.policy.Len() {
+		sh.sweeping, sh.staleNodes = true, 0
 	}
 }
 
-// deleteLocked tombs the key's table slot, kills its item and subtracts its weight. Called under the shard
-// mutex; a missing key is a no-op.
+// sweepStep advances the running sweep pass, if any, by one budget. Called under the shard mutex by every write.
+func (c *Cache[K, V]) sweepStep(sh *shard[K, V]) {
+	if sh.sweeping {
+		sh.sweeping = sh.policy.Sweep(sweepBudget)
+	}
+}
+
+// deleteLocked removes the key if memory holds it.
 func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K, cause DeletionCause,
 	deletions *[]deletion[K, V]) {
 	if idx, item, ok := c.findSlot(sh, keyHash, key); ok {
 		c.killAt(sh, keyHash, idx, item, cause, deletions)
+		c.noteStale(sh)
 	}
+	c.sweepStep(sh)
 }
 
 // Delete removes the key from memory and forwards the deletion to L2 according to WritePolicy (async for WriteBack).
-// The memory the item held is reclaimed on the next eviction pass or tombstone sweep.
+// The slot is reclaimed on the spot; the queue node the item leaves behind goes with the next eviction pass or sweep.
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	sh, keyHash := c.shardAndHash(key)
 	if c.livePresent(sh, keyHash, key) {
@@ -905,18 +883,52 @@ func (c *Cache[K, V]) Iterator() iter.Seq2[K, V] {
 
 // iterateWithLife is the Iterator walk, plus how much life each item has left (0 when it has no TTL). SaveTo needs
 // the lifetime, and one walk is easier to keep correct than two.
+//
+// No key is yielded twice. A deletion slides items toward their homes, and the one move that could carry an item past
+// the walk a second time is a move across the table's end: out of the run that wraps onto the first slots, back to
+// the last ones. So the walk leaves the wrapped items of that leading run - those homed past their slot - for a final
+// pass over it; one that moved to the end meanwhile was seen there instead, and one that moves away later is simply
+// not seen, like any concurrent removal.
 func (c *Cache[K, V]) iterateWithLife(yield func(K, V, time.Duration) bool) {
 	var entry itemstore.Entry[K, V]
 	for i := range c.shards {
 		storage := c.shards[i].items.GetStorage()
 		nowOff := c.nowOff.Load()
-		for pos := 0; pos < storage.Len(); pos++ {
-			item := storage.At(uint32(pos))
+		size := uint32(storage.Len())
+		// The leading run ends at the first empty slot; no item past it can be homed past its slot.
+		lead := size
+		for pos := uint32(0); pos < size; pos++ {
+			if itemstore.Empty(storage.At(pos).Metadata()) {
+				lead = pos
+				break
+			}
+		}
+		wrapped := func(pos uint32) bool {
+			return pos < lead && storage.Home(maphash.Comparable(c.seed, entry.Key)) > pos
+		}
+		for pos := uint32(0); pos < size; pos++ {
+			item := storage.At(pos)
 			metaWord := item.Metadata()
-			if metaWord == 0 || metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff) {
+			if itemstore.Empty(metaWord) || metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff) {
 				continue
 			}
-			if !item.SnapshotInto(&entry, metaWord) {
+			if !item.SnapshotInto(&entry, metaWord) || wrapped(pos) {
+				continue
+			}
+			if !yield(entry.Key, entry.Value, c.lifeLeft(metaWord, nowOff)) {
+				return
+			}
+		}
+		for pos := uint32(0); pos < lead; pos++ {
+			item := storage.At(pos)
+			metaWord := item.Metadata()
+			if itemstore.Empty(metaWord) {
+				break
+			}
+			if metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff) {
+				continue
+			}
+			if !item.SnapshotInto(&entry, metaWord) || !wrapped(pos) {
 				continue
 			}
 			if !yield(entry.Key, entry.Value, c.lifeLeft(metaWord, nowOff)) {

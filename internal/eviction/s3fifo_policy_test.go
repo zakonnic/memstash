@@ -44,7 +44,7 @@ func TestS3FIFOGhostPromotion(t *testing.T) {
 	addFromPool(p, pool, "other")
 	idx, ok := p.Evict(0)
 	require.True(t, ok)
-	require.Equal(t, "victim", pool.items.At(idx).Entry().Key, "the untouched head of small must be the victim")
+	require.Equal(t, "victim", pool.keyAt(idx), "the untouched head of small must be the victim")
 	pool.release(idx)
 
 	mainBefore := p.main.Len()
@@ -60,7 +60,7 @@ func TestS3FIFOGhostPromotion(t *testing.T) {
 // TestGhostTable exercises the fingerprint table directly: push/hit round trip, remove-on-hit, aging past the
 // window, and the zero-capacity no-op mode.
 func TestGhostTable(t *testing.T) {
-	g := newGhostTable[int](64)
+	g := newGhostTable(64)
 	assert.False(t, g.hit(1), "an empty table hits nothing")
 
 	g.push(1)
@@ -70,11 +70,11 @@ func TestGhostTable(t *testing.T) {
 	// Aging: after ageWindow pushes of other keys, the entry is treated as absent even if its slot survived.
 	g.push(2)
 	for i := 0; i < int(g.ageWindow); i++ {
-		g.push(1000 + i)
+		g.push(uint64(1000 + i))
 	}
 	assert.False(t, g.hit(2), "an entry older than the age window must not hit")
 
-	disabled := newGhostTable[int](0)
+	disabled := newGhostTable(0)
 	disabled.push(1) // must not panic
 	assert.False(t, disabled.hit(1), "a zero-capacity table never hits")
 	assert.Zero(t, disabled.bytes())

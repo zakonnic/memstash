@@ -115,8 +115,8 @@ func BenchmarkGet(b *testing.B) {
 	}
 }
 
-// BenchmarkGetMiss reads a cache warmed far past its capacity: eviction leaves the table full of tombstones,
-// so most reads miss and walk churned probe chains.
+// BenchmarkGetMiss reads a cache warmed far past its capacity: most reads miss and walk the probe chains a long
+// eviction churn has shaped.
 func BenchmarkGetMiss(b *testing.B) {
 	const keySpace = speedCapacity * 8
 	keys := zipfSeq(seqLen, keySpace-1)

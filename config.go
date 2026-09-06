@@ -70,10 +70,9 @@ type Config[K comparable, V any] struct {
 	// takes precedence over Policy. The factory must not return nil.
 	CustomPolicy EvictionPolicyFactory[K, V]
 
-	// PreallocateMap sizes every shard's FlatHashMap for its whole share of MemoryCapacity at construction, packed to
-	// PreallocationRatio, so the fill itself never rebuilds. From there the table never grows either: tombstones are
-	// released in place as they die, and what churn leaves on top of that is reclaimed by a same-size purge.
-	// Requires CostFunc == nil: weight is not an item count.
+	// PreallocateMap sizes every shard's table for its whole share of MemoryCapacity at construction, filled to
+	// PreallocationRatio once the cache is full. The table is never allocated again. Requires CostFunc == nil, since a
+	// weight is not an item count.
 	PreallocateMap bool
 
 	// PreallocationRatio is how full a preallocated shard sits once the cache holds its whole capacity, in (0, 1).
@@ -81,16 +80,15 @@ type Config[K comparable, V any] struct {
 	// PreallocateMap.
 	//
 	// This one number is the memory-for-latency dial: linear probing packs denser but walks further, and the walk
-	// grows faster than the saving. Past GrowthThreshold a full cache is over the rebuild line by itself and every
-	// insert triggers a rebuild, so keep well below it.
+	// grows faster than the saving - (1 + 1/(1-r))/2 slots per hit on average, 2.5 at 0.75 and 5.5 at 0.9. A
+	// deletion costs more in a denser table too: the run it compacts is longer.
 	PreallocationRatio float64
 
-	// GrowthThreshold is the occupancy a shard table is rebuilt at - live items and tombstones together, as a share
-	// of the slots - in (0, 1). 0 means the default, DefaultGrowthThreshold. It is also the line the rebuild decides
-	// on: a table whose live items alone sit above it is grown, one still below is purged at the same size.
+	// GrowthThreshold is the occupancy a shard table grows at - live items as a share of the slots - in (0, 1). 0
+	// means the default, DefaultGrowthThreshold. Only a table that was not preallocated ever grows.
 	//
-	// Higher runs the table fuller: fewer rebuilds and less memory, but longer probe walks and less room for the
-	// tombstones churn leaves behind. It is held to a 1/4096 granularity internally.
+	// Higher runs the table fuller: fewer growths and less memory, but longer probe walks. It is held to a 1/4096
+	// granularity internally.
 	GrowthThreshold float64
 
 	// ShardsCount is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to

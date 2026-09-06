@@ -16,10 +16,9 @@ func slotCounts[K comparable, V any](c *Cache[K, V]) []int {
 	return counts
 }
 
-// TestPreallocatedTableFillsWithoutRebuild fills a preallocated cache and then churns it. The fill itself must never
-// rebuild - that is what preallocation is for. Churn is a different matter: the target load leaves room for a limited
-// number of tombstones, so they reach the rebuild line and are purged in place. The table never grows, it just pays
-// for that in periodic O(live) purges.
+// TestPreallocatedTableFillsWithoutRebuild fills a preallocated cache and then churns it. Neither the fill nor the
+// churn may rebuild: that is what preallocation is for, and a deletion reclaims its slot on the spot, so churn leaves
+// no tombstones to purge.
 func TestPreallocatedTableFillsWithoutRebuild(t *testing.T) {
 	ctx := context.Background()
 	const capacity = 4096
@@ -52,13 +51,13 @@ func TestPreallocatedTableFillsWithoutRebuild(t *testing.T) {
 	assert.Equal(t, settled, slotCounts(c), "the table must hold its size once churn has settled")
 	assert.Equal(t, growths, after.TableGrowths(), "a settled table must not keep growing")
 	assert.Zero(t, after.TableGrowths(), "the target load is below the growth line: a preallocated table never grows")
-	assert.Positive(t, after.TablePurges(), "the tombstones this churn leaves have to be reclaimed by a purge")
+	assert.Zero(t, after.TablePurges(), "a deletion compacts its run on the spot: nothing is ever purged")
 }
 
 // TestPreallocatedTableSurvivesEarlyChurn is the regression that first forced preallocSlots to account for
-// tombstones: every eviction leaves one, live+dirty is exactly the number of slots ever touched, and a few hundred
-// of them used to carry a just-filled table over the rebuild line and double it. Releasing slots in place is what
-// keeps that from happening now, so a cache barely past its fill must still be sitting on the table it was given.
+// tombstones: every eviction used to leave one, and a few hundred of them carried a just-filled table over the
+// rebuild line and doubled it. Slots are reclaimed on the spot now, so a cache barely past its fill must still be
+// sitting on the table it was given.
 func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 	const capacity = 12000
 
@@ -73,7 +72,7 @@ func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 		return c, prealloc
 	}
 
-	// Steady state at capacity: each Set evicts one item, so live stays put and only the tombstone count grows.
+	// Steady state at capacity: each Set evicts one item, so live stays put while the slots churn.
 	t.Run("eviction churn at capacity", func(t *testing.T) {
 		ctx := context.Background()
 		c, prealloc := newCache(t)
@@ -83,7 +82,7 @@ func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 		}
 		require.Equal(t, prealloc, slotCounts(c)[0], "the fill alone must not rebuild")
 
-		for i := capacity; i < capacity+capacity/32; i++ { // 375 sets, 375 evictions, 375 tombstones
+		for i := capacity; i < capacity+capacity/32; i++ { // 375 sets, 375 evictions
 			require.NoError(t, c.Set(ctx, i, i))
 		}
 
@@ -92,7 +91,7 @@ func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 			capacity/32, c.Len(), prealloc)
 	})
 
-	// Below capacity nothing is ever evicted, yet the same doubling arrives: Delete tombstones are touched slots too.
+	// Below capacity nothing is ever evicted; the deletes reclaim their slots and the table must stay put all the same.
 	t.Run("delete churn below capacity", func(t *testing.T) {
 		ctx := context.Background()
 		c, prealloc := newCache(t)
@@ -115,8 +114,8 @@ func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 	})
 }
 
-// TestPreallocatedTableNeverGrows drives the rebuild decision with a live count no eviction path would leave behind:
-// a preallocated table has to purge exactly where a grown one doubles.
+// TestPreallocatedTableNeverGrows drives the growth decision with a live count no eviction path would leave behind:
+// a preallocated table stays put exactly where a grown one doubles.
 func TestPreallocatedTableNeverGrows(t *testing.T) {
 	const capacity = 4096
 
@@ -144,7 +143,7 @@ func TestPreallocatedTableNeverGrows(t *testing.T) {
 		storage := sh.items.GetStorage()
 		before = storage.Len()
 		sh.live = before // over the line, so the rebuild has to choose between growing and purging
-		c.maybeRebuild(sh, storage)
+		c.maybeGrow(sh, storage)
 		after = sh.items.GetStorage().Len()
 		sh.mu.Unlock()
 
@@ -154,9 +153,9 @@ func TestPreallocatedTableNeverGrows(t *testing.T) {
 
 	t.Run("preallocated", func(t *testing.T) {
 		before, after, growths, purges := rebuildAtFullLive(t, WithPreallocatedSize())
-		assert.Equal(t, before, after, "a preallocated table must be purged in place, never grown")
+		assert.Equal(t, before, after, "a preallocated table is never grown, whatever its live count")
 		assert.Zero(t, growths)
-		assert.Equal(t, int64(1), purges)
+		assert.Zero(t, purges)
 	})
 
 	t.Run("grown", func(t *testing.T) {
@@ -168,7 +167,7 @@ func TestPreallocatedTableNeverGrows(t *testing.T) {
 }
 
 // TestGrowthThresholdMovesTheRebuildLine pins the other knob: seven tenths occupancy is over a 0.6 line and under a
-// 0.8 one, and the rebuild decision follows it.
+// 0.8 one, and the growth decision follows it.
 func TestGrowthThresholdMovesTheRebuildLine(t *testing.T) {
 	const capacity = 4096
 
@@ -192,8 +191,8 @@ func TestGrowthThresholdMovesTheRebuildLine(t *testing.T) {
 		sh.mu.Lock()
 		storage := sh.items.GetStorage()
 		before = storage.Len()
-		sh.live, sh.dirty = before*7/10, 0
-		c.maybeRebuild(sh, storage)
+		sh.live = before * 7 / 10
+		c.maybeGrow(sh, storage)
 		after = sh.items.GetStorage().Len()
 		sh.mu.Unlock()
 
@@ -258,7 +257,7 @@ func TestPreallocSlots(t *testing.T) {
 	assert.Equal(t, 1336, preallocSlots(1000, DefaultPreallocationRatio))
 	assert.Equal(t, 1368, preallocSlots(1024, DefaultPreallocationRatio))
 	// One shard of the 100M-entry memory benchmark: 32 shards of 64 chunks, ~3.1 GiB of tables, and it stays there -
-	// the target load sits below the growth line, so churn can only purge this table, never grow it.
+	// the target load sits below the growth line, so churn never grows this table.
 	assert.Equal(t, 64<<16, preallocSlots(100_000_000/32, DefaultPreallocationRatio))
 	assert.Equal(t, int(maxTableSlots), preallocSlots(3<<30, DefaultPreallocationRatio),
 		"the table is capped by the uint32 index space")

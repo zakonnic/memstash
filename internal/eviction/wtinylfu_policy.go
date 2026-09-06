@@ -1,7 +1,6 @@
 package eviction
 
 import (
-	"hash/maphash"
 	"math/bits"
 	"unsafe"
 
@@ -20,12 +19,11 @@ import (
 // main stays intact (scan resistance).
 type WTinyLFUPolicy[K comparable, V any] struct {
 	items  *itemstore.StorageProxy[K, V]
-	seed   maphash.Seed
 	window itemstore.EvictQueue
 	main   itemstore.EvictQueue
 	sketch freqSketch
 
-	windowWeight int64 // total weight of nodes in window (including tombstones not yet reclaimed)
+	windowWeight int64 // total weight of nodes in window (including nodes of keys already gone)
 	windowCap    int64 // target weight of window: ~1% of the shard capacity
 }
 
@@ -38,18 +36,15 @@ func NewWTinyLFU[K comparable, V any](items *itemstore.StorageProxy[K, V], shard
 	}
 	return &WTinyLFUPolicy[K, V]{
 		items:     items,
-		seed:      maphash.MakeSeed(),
 		sketch:    newFreqSketch(sketchKeys),
 		windowCap: windowCap,
 	}
 }
 
-func (p *WTinyLFUPolicy[K, V]) keyHash(key K) uint64 { return maphash.Comparable(p.seed, key) }
-
 func (p *WTinyLFUPolicy[K, V]) Add(node itemstore.QNode) {
-	p.sketch.increment(p.keyHash(p.items.At(node.Idx).Entry().Key))
+	p.sketch.increment(mixHash(node.Hash()))
 	p.window.Push(node)
-	p.windowWeight += int64(node.Cost)
+	p.windowWeight += int64(node.Cost())
 }
 
 func (p *WTinyLFUPolicy[K, V]) Len() int { return p.window.Len() + p.main.Len() }
@@ -58,19 +53,14 @@ func (p *WTinyLFUPolicy[K, V]) Bytes() int64 {
 	return int64(unsafe.Sizeof(*p)) + p.window.Bytes() + p.main.Bytes() + p.sketch.bytes()
 }
 
-func (p *WTinyLFUPolicy[K, V]) Sweep(release func(idx uint32)) {
-	storage := p.items.GetStorage()
-	// Dead nodes leaving window give their weight back, as in evictWindowOnce.
-	itemstore.SweepQueue(&p.window, storage, func(node itemstore.QNode) {
-		p.windowWeight -= int64(node.Cost)
-		release(node.Idx)
-	})
-	itemstore.SweepQueue(&p.main, storage, func(node itemstore.QNode) { release(node.Idx) })
-}
-
-func (p *WTinyLFUPolicy[K, V]) Rebuild(remap func(oldIdx uint32) (uint32, bool)) {
-	itemstore.RebuildQueue(&p.window, remap, func(node itemstore.QNode) { p.windowWeight -= int64(node.Cost) })
-	itemstore.RebuildQueue(&p.main, remap, nil)
+func (p *WTinyLFUPolicy[K, V]) Sweep(limit int) bool {
+	if !p.window.Sweeping() && !p.main.Sweeping() {
+		p.window.BeginSweep()
+		p.main.BeginSweep()
+	}
+	// Nodes leaving window give their weight back, as in evictWindowOnce.
+	more := itemstore.SweepStep(&p.window, p.items, limit, func(node itemstore.QNode) { p.windowWeight -= int64(node.Cost()) })
+	return itemstore.SweepStep(&p.main, p.items, limit, nil) || more
 }
 
 func (p *WTinyLFUPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
@@ -97,47 +87,45 @@ func (p *WTinyLFUPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	}
 }
 
-// evictWindowOnce processes the head of window: (idx, true) means the item is reclaimed, (0, false) means the
-// candidate was admitted to main.
+// evictWindowOnce processes the head of window: (idx, true) means the item is the victim, (0, false) means the
+// node was dropped or the candidate was admitted to main.
 func (p *WTinyLFUPolicy[K, V]) evictWindowOnce(nowOff uint32) (uint32, bool) {
 	candidate, ok := p.window.Pop()
 	if !ok {
 		return 0, false
 	}
-	p.windowWeight -= int64(candidate.Cost)
+	p.windowWeight -= int64(candidate.Cost())
 
-	item := p.items.At(candidate.Idx)
-	metaWord := item.Metadata()
-	switch {
-	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
-		return candidate.Idx, true
-	case metaWord&itemstore.ChanceMask != 0:
+	item, idx, found := p.items.Find(candidate)
+	if !found {
+		return 0, false // the key left the cache; its node goes with it
+	}
+	if chanced(item.Metadata(), nowOff) {
 		// Touched while in the window: record the reuse and admit without consulting the filter.
-		p.sketch.increment(p.keyHash(item.Entry().Key))
+		p.sketch.increment(mixHash(candidate.Hash()))
 		item.ResetChances()
 		p.main.Push(candidate)
 		return 0, false
-	default:
-		if p.admit(item.Entry().Key) {
-			p.main.Push(candidate)
-			return 0, false
-		}
-		return candidate.Idx, true
 	}
+	if !itemstore.Expired(item.Metadata(), nowOff) && p.admit(candidate) {
+		p.main.Push(candidate)
+		return 0, false
+	}
+	return idx, true
 }
 
 // admit is the TinyLFU admission filter: the candidate enters main only when its frequency estimate beats the next
-// main victim's. An empty main or a tombstone at its head admits freely - nothing of value is displaced.
-func (p *WTinyLFUPolicy[K, V]) admit(candidateKey K) bool {
+// main victim's. An empty main, or a head node whose key is already gone, admits freely - nothing of value is
+// displaced. Both estimates come from the nodes' own hash bits: no item is read.
+func (p *WTinyLFUPolicy[K, V]) admit(candidate itemstore.QNode) bool {
 	victim, ok := p.main.Peek()
 	if !ok {
 		return true
 	}
-	victimState := p.items.At(victim.Idx)
-	if victimState.Metadata()&itemstore.Dead != 0 {
+	if _, _, found := p.items.Locate(victim); !found {
 		return true
 	}
-	return p.sketch.estimate(p.keyHash(candidateKey)) > p.sketch.estimate(p.keyHash(victimState.Entry().Key))
+	return p.sketch.estimate(mixHash(candidate.Hash())) > p.sketch.estimate(mixHash(victim.Hash()))
 }
 
 // evictMainOnce performs a single GCLOCK step over main, feeding observed reuse into the sketch.
@@ -146,19 +134,17 @@ func (p *WTinyLFUPolicy[K, V]) evictMainOnce(nowOff uint32) (uint32, bool) {
 	if !ok {
 		return 0, false
 	}
-	item := p.items.At(candidate.Idx)
-	metaWord := item.Metadata()
-	switch {
-	case metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff):
-		return candidate.Idx, true
-	case metaWord&itemstore.ChanceMask != 0:
+	item, idx, found := p.items.Find(candidate)
+	if !found {
+		return 0, false
+	}
+	if metaWord := item.Metadata(); chanced(metaWord, nowOff) {
 		item.RevokeChance(metaWord)
-		p.sketch.increment(p.keyHash(item.Entry().Key))
+		p.sketch.increment(mixHash(candidate.Hash()))
 		p.main.Push(candidate)
 		return 0, false
-	default:
-		return candidate.Idx, true
 	}
+	return idx, true
 }
 
 // freqSketch is a Count-Min sketch with 4-bit saturating counters, 16 to a uint64 word, and periodic aging: after

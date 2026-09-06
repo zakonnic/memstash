@@ -179,11 +179,10 @@ func WithCustomEvictionPolicy[K comparable, V any](factory EvictionPolicyFactory
 	}}
 }
 
-// WithPreallocatedSize sets Config.PreallocateMap: every shard allocates its share of the capacity up front, sized so
-// that filling the cache never rebuilds, and never grows from there - churn is reclaimed by same-size purges instead.
-// WithPreallocationRatio sets how full that table sits; without it the fill lands at 0.75 of the slots.
-// Rejected together with WithCostFunc or WithMemoryBudget - the table is sized in items, and a weighted capacity does
-// not count items.
+// WithPreallocatedSize sets Config.PreallocateMap: every shard allocates its whole share of the capacity up front, so
+// the cache never allocates a table after New. WithPreallocationRatio sets how full that table gets; without it the
+// fill lands at 0.75 of the slots. It is rejected together with WithCostFunc or WithMemoryBudget: the table is sized
+// in items, and a weighted capacity does not count items.
 func WithPreallocatedSize() Option {
 	return Option{ApplyField: func(f *FieldOverrides) {
 		on := true
@@ -196,16 +195,17 @@ func WithPreallocatedSize() Option {
 // rejected with ErrBadPreallocationRatio, except 0, which selects the default of 0.75 - the same table
 // WithPreallocatedSize alone gives.
 //
-// Denser packs the table tighter and walks it further; the rebuild line is at 5/6, and a ratio near it leaves a full
-// cache purging on every insert.
+// Denser packs the table tighter and walks it further: with r the ratio, a hit walks (1 + 1/(1-r))/2 slots on
+// average - 2.5 at 0.75, 5.5 at 0.9 - and a miss up to (1 + 1/(1-r)^2)/2 before the group filter cuts it short. The
+// table never holds anything but live items, so those are the walks the cache keeps, however long it churns.
 func WithPreallocationRatio(ratio float64) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.preallocationRatio = &ratio }}
 }
 
-// WithGrowthThreshold sets Config.GrowthThreshold: the occupancy - live items and tombstones together - a shard table
-// is rebuilt at, in (0, 1). Anything outside it is rejected with ErrBadGrowthThreshold, except 0, which selects
-// DefaultGrowthThreshold (5/6). Higher means fewer rebuilds and less memory, at longer probe walks; it must stay above
-// WithPreallocationRatio, or a full preallocated cache sits over the line and rebuilds on every insert.
+// WithGrowthThreshold sets Config.GrowthThreshold: the occupancy - live items over slots - a shard table grows at, in
+// (0, 1). Anything outside it is rejected with ErrBadGrowthThreshold, except 0, which selects DefaultGrowthThreshold
+// (5/6). Higher means fewer growths and less memory, at longer probe walks. A preallocated table never grows, so
+// the option means nothing there.
 func WithGrowthThreshold(threshold float64) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.growthThreshold = &threshold }}
 }

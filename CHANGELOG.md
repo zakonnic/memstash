@@ -5,6 +5,33 @@ All notable changes to this project are documented here. The format follows
 
 Every module - the root and each `l2/*_adapter` - is tagged with the same version.
 
+## [Unreleased]
+
+### Changed
+
+- **The first level never holds a tombstone.** A deletion - `Delete`, an eviction, a lazy TTL removal - compacts its
+  probe run on the spot with backward-shift deletion (Knuth's Algorithm R, taking the farthest eligible item first,
+  which halves the moves), so the table always holds exactly what inserting the live keys into a fresh table would:
+  probe walks stay at their fresh-table values however long the cache churns, and dead slots never eat into the free
+  space. Measured on the churn harness at the default preallocation ratio: 0 dead slots and 0 purges over 4M inserts
+  with 30% deletes (before: 4-5% dead held there by a purge every ~630 inserts per shard), hit walks 2.45 slots
+  instead of 3.0-3.6, p99 hit walk 18 instead of 27.
+- **No same-size rebuilds.** With nothing to purge, a preallocated table is never allocated again after `New`, and a
+  non-preallocated one only grows; the transient second table of a purge is gone. `Stats.TablePurges` is always 0
+  and will be removed with the next stats revision.
+- **Queue nodes address keys, not slots.** `QNode` carries 40 bits of the key's hash and the weight (`Cost()`,
+  24-bit float encoding, exact below 2 MiB), and a policy resolves a node to its item with `Items.Find` (exact) or
+  `Items.Locate` (by tag, for examining an item; a victim is named through `Find`); growth no longer walks the
+  queues. `EvictionPolicy` loses `Rebuild`, `Sweep` becomes `Sweep(limit int) (more bool)` and works in slices driven
+  by the writes, and `Evict` must skip the nodes `Find` cannot resolve. A custom policy written against `Items.At`
+  and `Rebuild` has to be updated.
+- Lock-free reads stay exact across the compaction: a miss that overlapped moves is re-probed (a per-shard move
+  sequence on the line every read loads anyway), the third time under the shard mutex; hits are unchanged.
+  `Iterator` and `SaveTo` may skip an item a concurrent deletion slid toward its home - the same weak consistency the
+  documentation already claims for concurrent writes - and never yield a key twice.
+- `WithPreallocationRatio` is now a pure memory-for-latency dial, and `WithGrowthThreshold` only means growth; the
+  rule that the ratio must stay below the threshold is gone.
+
 ## [0.9.8] - 2026-08-13
 
 ### Fixed

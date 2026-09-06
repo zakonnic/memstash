@@ -16,6 +16,7 @@ type batchGroup[K comparable, V any] struct {
 	keyHash [batchGroupSize]uint64
 	sh      [batchGroupSize]*shard[K, V]
 	table   [batchGroupSize]*itemstore.FlatHashMap[K, V]
+	seq     [batchGroupSize]uint32 // the shard's moveSeq before the walk: a miss is final only if it held
 	pos     [batchGroupSize]uint32
 	item    [batchGroupSize]*itemstore.Item[K, V]
 	meta    [batchGroupSize]uint64
@@ -134,6 +135,7 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 	// hash, home slot, and the group's first meta loads.
 	for i := range keys {
 		sh, keyHash := c.shardAndHash(keys[i])
+		g.seq[i] = sh.moveSeq.Load()
 		storage := sh.items.GetStorage()
 		pos := storage.Home(keyHash)
 		g.sh[i], g.keyHash[i], g.table[i], g.pos[i] = sh, keyHash, storage, pos
@@ -171,7 +173,12 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 	for i := range keys {
 		item := g.item[i]
 		if item == nil {
-			g.hit[i] = false
+			// A definite miss holds only if no reclaim moved items under the walk; otherwise getMemory settles it.
+			if seq := g.seq[i]; seq&1 != 0 || g.sh[i].moveSeq.Load() != seq {
+				g.value[i], g.hit[i] = c.getMemory(keys[i])
+			} else {
+				g.hit[i] = false
+			}
 			continue
 		}
 		metaWord := g.meta[i]
@@ -181,7 +188,7 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 		}
 		nowOff := c.nowOff.Load()
 		if itemstore.Expired(metaWord, nowOff) {
-			c.dropExpired(g.sh[i], g.keyHash[i], keys[i], g.pos[i])
+			c.dropExpired(g.sh[i], g.keyHash[i], keys[i])
 			g.hit[i] = false
 			continue
 		}

@@ -11,7 +11,7 @@ type Stats struct {
 	l2Misses  xsync.Counter
 	sets      xsync.Counter
 	deletes   xsync.Counter
-	// Item-table rebuilds, split by what they did: a purge only drops tombstones, a growth also doubles the table.
+	// Item-table growths. tablePurges stays 0 since deletions compact their runs in place; it goes with the next revision.
 	tableGrowths xsync.Counter
 	tablePurges  xsync.Counter
 }
@@ -76,12 +76,6 @@ func (s *Stats) addTableGrowths(n int64) {
 	}
 }
 
-func (s *Stats) addTablePurges(n int64) {
-	if s.enabled {
-		s.tablePurges.Add(n)
-	}
-}
-
 // MemoryHits is the number of read keys served from memory.
 func (s *Stats) MemoryHits() int64 { return s.memHits.Value() }
 
@@ -113,11 +107,11 @@ func (s *Stats) Sets() int64 { return s.sets.Value() }
 func (s *Stats) Deletes() int64 { return s.deletes.Value() }
 
 // TableGrowths is the number of shard item tables rebuilt into a larger table. Always 0 with WithPreallocatedSize:
-// a preallocated table is never grown, only purged.
+// a preallocated table is never grown.
 func (s *Stats) TableGrowths() int64 { return s.tableGrowths.Value() }
 
-// TablePurges is the number of shard item tables rebuilt at the same size to reclaim tombstones. Expected to grow
-// steadily on any cache that evicts or deletes; it costs CPU, not memory.
+// TablePurges is always 0: a deletion compacts its probe run on the spot, so a table is never rebuilt at the same
+// size. Kept for callers that read it; it goes away with the next stats revision.
 func (s *Stats) TablePurges() int64 { return s.tablePurges.Value() }
 
 // Gets returns the total number of read keys: Hits() + Misses().

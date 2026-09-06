@@ -16,8 +16,7 @@ const (
 	// clock turns out to be. A Windows tick is wide enough to reach this cap; a Linux one settles far below it.
 	probeMaxOps = 1 << 17
 	// probeKeys is how many distinct keys the timed loops walk. It has to be large: a probe cycling a handful of keys
-	// would sit in CPU cache and report the cost of an empty table, not of a shard that has been evicting and leaving
-	// tombstones for hours. A power of two, so the index is a mask - at a nanosecond per operation a division shows
+	// would sit in CPU cache and report the cost of an empty table, not of a shard that has been evicting for hours. A power of two, so the index is a mask - at a nanosecond per operation a division shows
 	// up in the result.
 	probeKeys = 1 << 15
 	// probeWindows is how many clock ticks a timed run must span, which bounds the quantisation error at 1/n.
@@ -126,7 +125,7 @@ func measure(ops int, op func(n int) int) (float64, int) {
 
 // runProbe times Set, GetFromMemory and Get against the live cache and returns the mean nanoseconds of each. It runs
 // on the monitor goroutine and draws its keys the way the workers do, so the figures carry the contention, the probe
-// distances and the tombstones the scenario has accumulated by then.
+// distances the scenario has shaped by then.
 //
 // The probe goes through the cache's own counters, so its operations land in the totals and hit rates of the
 // following stats line.
