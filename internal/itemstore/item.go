@@ -7,14 +7,16 @@ import (
 
 // Layout of an item's 64-bit meta word:
 //
-//	[dead:1][secondChance:1][thirdChance:1][spare:1][expireOff:18][hasNext:1][tag:13][gen:28]
+//	[dead:1][secondChance:1][thirdChance:1][spare:1][expireOff:18][hasNext:1][tag:13][disp:6][gen:22]
 //
 // dead marks a killed item during the moment between its kill and the reclaim of its slot (see FlatHashMap.Reclaim);
 // the two chance bits form a unary reference counter; expireOff is the expiration time in expireUnit steps on a
 // wrapping scale (0 = no TTL); hasNext says a key homed at or before this slot lives past it, so a probe must keep
 // walking; tag prefilters candidates without touching the key - only items sharing a home slot are compared
-// against it, so 13 bits stay ample (12 of them carrying hash, see TagOf); gen counts the slot's occupancies and
-// in-place value writes, and lock-free readers validate their Entry snapshot against it (see Snapshot).
+// against it, so 13 bits stay ample (12 of them carrying hash, see TagOf); disp is how far the item sits from its
+// home slot, which is what lets a deletion compact a run without rehashing the keys it passes (see DispOf); gen
+// counts the slot's occupancies and in-place value writes, and lock-free readers validate their Entry snapshot
+// against it (see Snapshot).
 //
 // An empty slot carries nothing but its gen (Empty): a never-occupied slot is all zero, a cleared one keeps counting
 // so that no snapshot taken of a previous occupant can validate against the next. Gen 0 is reserved and TagOf never
@@ -45,25 +47,47 @@ const (
 
 	TagShift        = 28
 	TagMask  uint64 = (1<<13 - 1) << TagShift
+	// TagForced is the tag's top bit, set on every live item and clear on every empty slot (see TagOf).
+	TagForced uint64 = 1 << (TagShift + 12)
 	// DeadOrTag matches a probe candidate in one compare: alive and carrying the probed tag.
 	DeadOrTag = Dead | TagMask
-	// tag8Mask is the low byte of the tag field: the part a queue node carries (see QNode).
+	// tag8Mask is the low byte of the tag field: the part a queue node carries (see QNode). It holds hash bits
+	// 14..21, so its low three bits are the key's OverflowBucket - see BucketOf.
 	tag8Mask uint64 = 0xFF << TagShift
+	// TagMatchMask matches a queue node's item in one compare: alive, occupied (TagForced) and carrying the node's
+	// tag byte.
+	TagMatchMask = Dead | TagForced | tag8Mask
 
-	// GenMask isolates the occupancy generation - a cyclic counter incremented on every write.
-	GenMask uint64 = 1<<28 - 1
+	// DispShift and DispMask place the item's distance from its home slot, so a run compaction moves items without
+	// rehashing them. DispMax stands for anything farther; then the distance comes from the key's hash.
+	DispShift        = 22
+	DispMax   uint32 = 1<<6 - 1
+	DispMask  uint64 = uint64(DispMax) << DispShift
+
+	// GenMask isolates the generation, which advances on every occupancy and every in-place value write. At 22 bits a
+	// reader stalled mid-snapshot validates a stale word only if that one slot is rewritten 2M times meanwhile.
+	GenMask uint64 = 1<<22 - 1
 	// AliveGenMask checks "alive and still this generation" with one mask-and-compare.
 	AliveGenMask = Dead | GenMask
 )
 
-// TagOf extracts a key hash's slot tag, positioned for direct meta-word compares. Hash bits 14..26: disjoint from the
-// low bits picking the shard and the high bits picking the home slot.
+// TagOf extracts a key hash's slot tag, positioned for direct meta-word compares. Hash bits 14..25 plus a forced top
+// bit: disjoint from the low bits picking the shard and the high bits picking the home slot.
 //
-// The low bit is forced, so a tag is never 0. That is what lets probes drop the empty-slot test: an empty slot's meta
+// The top bit is forced, so a tag is never 0. That is what lets probes drop the empty-slot test: an empty slot's meta
 // word can no longer pass the candidate compare, and the probe falls through to HasNext, which an empty slot has
-// clear. It costs the low bit's entropy - 12 distinct tags rather than 13 bits' worth, so a false candidate every
-// 4096 instead of every 8192, and a false candidate is one key compare on a line already read.
-func TagOf(hash uint64) uint64 { return hash>>14<<TagShift&TagMask | 1<<TagShift }
+// clear. It costs the top bit's entropy - 12 distinct tags rather than 13 bits' worth, so a false candidate every
+// 4096 instead of every 8192, and a false candidate is one key compare on a line already read. Forcing the top bit
+// rather than the low one leaves hash bits 14..16 intact, which is what BucketOf reads back.
+func TagOf(hash uint64) uint64 { return hash>>14<<TagShift&TagMask | TagForced }
+
+// DispOf returns the item's distance from its home slot, or DispMax when it has to come from the key's hash.
+func DispOf(metaWord uint64) uint32 { return uint32(metaWord>>DispShift) & DispMax }
+
+// BucketOf returns the item's OverflowBucket, read back from its tag.
+func BucketOf(metaWord uint64) uint32 { return uint32(metaWord>>TagShift) & (overflowBuckets - 1) }
+
+func dispBits(disp uint32) uint64 { return uint64(min(disp, DispMax)) << DispShift }
 
 // Empty reports whether the slot holds no item: never occupied, or cleared since.
 func Empty(metaWord uint64) bool { return metaWord&^GenMask == 0 }
@@ -108,20 +132,20 @@ func (s *Item[K, V]) Snapshot(metaWord uint64) (Entry[K, V], bool) {
 
 // Publish fills an empty slot. The Entry lands before the meta word goes live, so a reader that sees the item alive
 // finds the pair in place. HasNext is kept: the slot may lie on another key's probe chain.
-func (s *Item[K, V]) Publish(entry Entry[K, V], tag uint64, expireOff uint32) {
+func (s *Item[K, V]) Publish(entry Entry[K, V], tag uint64, expireOff, disp uint32) {
 	s.entry = entry
 	prev := s.meta.Load()
-	s.meta.Store(prev&HasNext | uint64(expireOff)<<ExpireShift | tag | liveGen((prev+2)&^1))
+	s.meta.Store(prev&HasNext | uint64(expireOff)<<ExpireShift | tag | dispBits(disp) | liveGen((prev+2)&^1))
 }
 
 // PublishMoved fills an empty slot with the item at src, as Publish does, carrying over src's tag, TTL and reference
 // counter so the item keeps its identity and its standing with the policy. src stays live until the caller kills it,
 // so a reader finds the item at one slot or the other throughout. Called under the shard mutex.
-func (s *Item[K, V]) PublishMoved(src *Item[K, V]) {
+func (s *Item[K, V]) PublishMoved(src *Item[K, V], disp uint32) {
 	s.entry = src.entry
 	prev := s.meta.Load()
 	srcMeta := src.meta.Load()
-	s.meta.Store(prev&HasNext | srcMeta&(ChanceMask|ExpireMask|TagMask) | liveGen((prev+2)&^1))
+	s.meta.Store(prev&HasNext | srcMeta&(ChanceMask|ExpireMask|TagMask) | dispBits(disp) | liveGen((prev+2)&^1))
 }
 
 // liveGen fits a generation into its field, skipping 0: that value marks a never-occupied slot, and an item with no

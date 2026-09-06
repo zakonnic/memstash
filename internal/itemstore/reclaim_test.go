@@ -34,7 +34,7 @@ func (m *model) insert(key, value uint64) uint32 {
 	for pos := home; ; pos++ {
 		item := m.t.At(pos)
 		if Empty(item.Metadata()) {
-			item.Publish(Entry[uint64, uint64]{Key: key, Value: value}, TagOf(hash), 0)
+			item.Publish(Entry[uint64, uint64]{Key: key, Value: value}, TagOf(hash), 0, m.t.Dist(home, m.t.Wrap(pos)))
 			m.t.NoteDisplaced(hash, pos)
 			m.t.MarkChain(home, m.t.Wrap(pos))
 			m.live[key] = value
@@ -125,7 +125,13 @@ func (m *model) check(t *testing.T) {
 		}
 		hash := m.hash(m.t.At(pos).Entry().Key)
 		home := m.t.Home(hash)
-		for d, steps := uint32(0), m.t.Dist(home, pos); d < steps; d++ {
+		steps := m.t.Dist(home, pos)
+		// The meta word carries that same distance, which is what lets a compaction move an item without its hash.
+		require.Equal(t, min(steps, DispMax), DispOf(m.t.At(pos).Metadata()),
+			"slot %d: the stored displacement disagrees with the key's home", pos)
+		require.Equal(t, OverflowBucket(hash), BucketOf(m.t.At(pos).Metadata()),
+			"slot %d: the overflow bucket is not recoverable from the tag", pos)
+		for d := uint32(0); d < steps; d++ {
 			needBit[m.t.Wrap(home+d)] = true
 		}
 		if home>>groupShift != pos>>groupShift {
@@ -148,7 +154,7 @@ func (m *model) check(t *testing.T) {
 		hash := m.hash(key)
 		for pos := fresh.Home(hash); ; pos++ {
 			if item := fresh.At(pos); Empty(item.Metadata()) {
-				item.Publish(Entry[uint64, uint64]{Key: key, Value: value}, TagOf(hash), 0)
+				item.Publish(Entry[uint64, uint64]{Key: key, Value: value}, TagOf(hash), 0, fresh.Dist(fresh.Home(hash), fresh.Wrap(pos)))
 				break
 			}
 		}
@@ -232,12 +238,12 @@ func TestReclaimUncoveredHoleIsCheap(t *testing.T) {
 // even when the new one carries the same tag.
 func TestClearAdvancesGeneration(t *testing.T) {
 	item := NewFlatHashMap[uint64, uint64](64, maphash.MakeSeed()).At(0)
-	item.Publish(Entry[uint64, uint64]{Key: 1, Value: 1}, 1<<TagShift, 0)
+	item.Publish(Entry[uint64, uint64]{Key: 1, Value: 1}, TagForced, 0, 0)
 	before := item.Metadata()
 	item.Kill()
 	item.Clear()
 	require.True(t, Empty(item.Metadata()))
-	item.Publish(Entry[uint64, uint64]{Key: 2, Value: 2}, 1<<TagShift, 0)
+	item.Publish(Entry[uint64, uint64]{Key: 2, Value: 2}, TagForced, 0, 0)
 	_, ok := item.Snapshot(before)
 	require.False(t, ok, "a snapshot of the old occupant validated against the new one")
 }

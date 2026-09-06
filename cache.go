@@ -548,7 +548,8 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 		item := storage.At(pos)
 		metaWord := item.Metadata()
 		if itemstore.Empty(metaWord) {
-			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff)
+			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff,
+				storage.Dist(home, storage.Wrap(pos)))
 			storage.NoteDisplaced(keyHash, pos)
 			storage.MarkChain(home, storage.Wrap(pos))
 			sh.live++

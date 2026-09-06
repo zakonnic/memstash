@@ -91,6 +91,14 @@ func (t *FlatHashMap[K, V]) Wrap(pos uint32) uint32 {
 	return pos
 }
 
+// back steps a slot index back by n, which must be less than the slot count, wrapping at the table's start.
+func (t *FlatHashMap[K, V]) back(pos, n uint32) uint32 {
+	if pos < n {
+		return pos + t.size - n
+	}
+	return pos - n
+}
+
 // Dist is the number of steps a probe takes from one slot to another, the wrap included.
 func (t *FlatHashMap[K, V]) Dist(from, to uint32) uint32 {
 	if to >= from {
@@ -125,11 +133,16 @@ func (t *FlatHashMap[K, V]) OverflowedTag(home, bucket uint32) bool {
 
 // NoteDisplaced counts a key that settled outside its home group, under the counter its tag picks.
 func (t *FlatHashMap[K, V]) NoteDisplaced(keyHash uint64, pos uint32) {
-	home := t.Home(keyHash)
+	t.NoteDisplacedAt(t.Home(keyHash), pos, OverflowBucket(keyHash))
+}
+
+// NoteDisplacedAt is NoteDisplaced for a caller that already has the key's home and bucket. It loads and stores
+// rather than adds: the shard mutex excludes other writers, and a reader only needs the word to land whole.
+func (t *FlatHashMap[K, V]) NoteDisplacedAt(home, pos, bucket uint32) {
 	if home>>groupShift == t.Wrap(pos)>>groupShift {
 		return
 	}
-	word, shift := t.overflowAt(home), OverflowBucket(keyHash)*overflowWidth
+	word, shift := t.overflowAt(home), bucket*overflowWidth
 	if cur := word.Load(); cur>>shift&overflowMax != overflowMax {
 		word.Store(cur + 1<<shift)
 	}
@@ -137,11 +150,15 @@ func (t *FlatHashMap[K, V]) NoteDisplaced(keyHash uint64, pos uint32) {
 
 // ForgetDisplaced undoes NoteDisplaced when the key at pos dies or moves.
 func (t *FlatHashMap[K, V]) ForgetDisplaced(keyHash uint64, pos uint32) {
-	home := t.Home(keyHash)
+	t.ForgetDisplacedAt(t.Home(keyHash), pos, OverflowBucket(keyHash))
+}
+
+// ForgetDisplacedAt is ForgetDisplaced for a caller that already has the key's home and bucket.
+func (t *FlatHashMap[K, V]) ForgetDisplacedAt(home, pos, bucket uint32) {
 	if home>>groupShift == t.Wrap(pos)>>groupShift {
 		return
 	}
-	word, shift := t.overflowAt(home), OverflowBucket(keyHash)*overflowWidth
+	word, shift := t.overflowAt(home), bucket*overflowWidth
 	if cur := word.Load(); cur>>shift&overflowMax != overflowMax {
 		word.Store(cur - 1<<shift)
 	}
@@ -204,7 +221,7 @@ func (t *FlatHashMap[K, V]) Locate(node QNode) (*Item[K, V], uint32, bool) {
 
 func (t *FlatHashMap[K, V]) resolve(node QNode, exact bool) (*Item[K, V], uint32, bool) {
 	home := t.homeOfHigh(node.home)
-	tagged := uint64(node.tag()|1) << TagShift
+	tagged := uint64(node.tag())<<TagShift | TagForced
 	bucket := uint32(node.tag()) & (overflowBuckets - 1)
 	groupEnd := (home | 7) + 1
 	for pos := home; ; pos++ {
@@ -213,7 +230,7 @@ func (t *FlatHashMap[K, V]) resolve(node QNode, exact bool) (*Item[K, V], uint32
 		}
 		item := t.At(pos)
 		metaWord := item.Metadata()
-		if metaWord&(Dead|tag8Mask) == tagged {
+		if metaWord&TagMatchMask == tagged {
 			if !exact {
 				return item, t.Wrap(pos), true
 			}
@@ -267,8 +284,11 @@ func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]ShiftEntry, moves *at
 			break
 		}
 		if metaWord&Dead == 0 {
-			hash := t.hashOf(item.Entry().Key)
-			entries = append(entries, ShiftEntry{off: d, homeOff: d - int64(t.Dist(t.Home(hash), t.Wrap(pos)))})
+			disp := DispOf(metaWord)
+			if disp == DispMax { // saturated: ask the hash
+				disp = t.Dist(t.Home(t.hashOf(item.Entry().Key)), t.Wrap(pos))
+			}
+			entries = append(entries, ShiftEntry{off: d, homeOff: d - int64(disp)})
 		}
 		if metaWord&HasNext == 0 {
 			end = d // nothing further can cover the hole
@@ -295,12 +315,14 @@ func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]ShiftEntry, moves *at
 			moved = true
 		}
 		src, dst := t.At(idx+uint32(entries[pick].off)), t.At(idx+uint32(hole))
-		hash := t.hashOf(src.Entry().Key)
+		disp := uint32(entries[pick].off - entries[pick].homeOff)
+		itemHome := t.back(t.Wrap(idx+uint32(entries[pick].off)), disp)
+		bucket := BucketOf(src.Metadata())
 		// Counted at the new slot before it is forgotten at the old one, so a reader never sees the group
 		// under-counted.
-		dst.PublishMoved(src)
-		t.NoteDisplaced(hash, idx+uint32(hole))
-		t.ForgetDisplaced(hash, idx+uint32(entries[pick].off))
+		dst.PublishMoved(src, uint32(hole-entries[pick].homeOff))
+		t.NoteDisplacedAt(itemHome, idx+uint32(hole), bucket)
+		t.ForgetDisplacedAt(itemHome, idx+uint32(entries[pick].off), bucket)
 		src.Kill()
 		hole, entries[pick].off = entries[pick].off, hole
 	}
@@ -367,8 +389,8 @@ func (t *FlatHashMap[K, V]) InsertFresh(keyHash uint64, src *Item[K, V]) uint32 
 		dst := t.At(pos)
 		if Empty(dst.meta.Load()) {
 			dst.entry = src.entry
-			// The chains are the old table's; this one gets its own from MarkChain.
-			dst.meta.Store(src.meta.Load() &^ HasNext)
+			// The chains and the distances are the old table's; this one gets its own from MarkChain and here.
+			dst.meta.Store(src.meta.Load()&^(HasNext|DispMask) | dispBits(t.Dist(home, t.Wrap(pos))))
 			t.NoteDisplaced(keyHash, pos)
 			t.MarkChain(home, t.Wrap(pos))
 			return t.Wrap(pos)

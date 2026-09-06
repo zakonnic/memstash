@@ -25,6 +25,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   queues. `EvictionPolicy` loses `Rebuild`, `Sweep` becomes `Sweep(limit int) (more bool)` and works in slices driven
   by the writes, and `Evict` must skip the nodes `Find` cannot resolve. A custom policy written against `Items.At`
   and `Rebuild` has to be updated.
+- **The item's meta word carries its distance from its home slot**, so a compaction reads the run it moves instead of
+  rehashing every key it passes - the difference between 1.0 us and 0.6 us per delete on 100M string keys. It costs
+  the six generation bits the seqlock had to spare (22 left, 2M writes to one slot before a stalled reader could
+  validate against a stale word) and moves the forced tag bit to the top of the field, which leaves the three hash
+  bits the overflow counters are indexed by readable from the tag.
 - Lock-free reads stay exact across the compaction: a miss that overlapped moves is re-probed (a per-shard move
   sequence on the line every read loads anyway), the third time under the shard mutex; hits are unchanged.
   `Iterator` and `SaveTo` may skip an item a concurrent deletion slid toward its home - the same weak consistency the

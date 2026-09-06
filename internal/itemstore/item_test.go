@@ -20,7 +20,7 @@ func TestItemSize(t *testing.T) {
 // a single-word one must not bump the generation at all.
 func TestSnapshotSeqlock(t *testing.T) {
 	item := NewFlatHashMap[string, string](64, maphash.MakeSeed()).At(0)
-	item.Publish(Entry[string, string]{Key: "k", Value: "old"}, 0, 0)
+	item.Publish(Entry[string, string]{Key: "k", Value: "old"}, 0, 0, 0)
 	before := item.Metadata()
 
 	item.SetValue("new")
@@ -32,7 +32,7 @@ func TestSnapshotSeqlock(t *testing.T) {
 	assert.Equal(t, "new", entry.Value)
 
 	word := NewFlatHashMap[uint64, uint64](64, maphash.MakeSeed()).At(0)
-	word.Publish(Entry[uint64, uint64]{Key: 1, Value: 10}, 0, 0)
+	word.Publish(Entry[uint64, uint64]{Key: 1, Value: 10}, 0, 0, 0)
 	wordBefore := word.Metadata()
 	word.SetValue(20)
 	assert.Equal(t, wordBefore, word.Metadata(), "a single-word overwrite must not disturb the meta word")
@@ -45,7 +45,7 @@ func TestSnapshotSeqlock(t *testing.T) {
 // must fail validation even though it never changed.
 func TestSnapshotRejectsWriteInProgress(t *testing.T) {
 	item := NewFlatHashMap[string, string](64, maphash.MakeSeed()).At(0)
-	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
+	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0, 0)
 
 	item.beginWrite()
 	mid := item.Metadata()
@@ -63,7 +63,7 @@ func TestGenWrapNeverLooksEmpty(t *testing.T) {
 
 	item := NewFlatHashMap[string, string](64, maphash.MakeSeed()).At(0)
 	item.meta.Store(lastEven)
-	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0)
+	item.Publish(Entry[string, string]{Key: "k", Value: "v"}, 0, 0, 0)
 	assert.NotZero(t, item.Metadata(), "a wrapped occupancy must not publish an empty-slot meta word")
 
 	item.meta.Store(lastEven)

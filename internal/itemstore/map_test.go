@@ -17,7 +17,7 @@ func TestFlatHashMapChunkedSlots(t *testing.T) {
 	require.Empty(t, table.short, "a chunked table keeps nothing in the flat run")
 
 	for i := range uint32(slots) {
-		table.At(i).Publish(Entry[uint32, uint32]{Key: i, Value: i}, 0, 0)
+		table.At(i).Publish(Entry[uint32, uint32]{Key: i, Value: i}, 0, 0, 0)
 	}
 	for i := range uint32(slots) {
 		if got := table.At(i).Entry().Key; got != i {
@@ -37,7 +37,7 @@ func TestFlatHashMapShortTable(t *testing.T) {
 	require.Len(t, table.short, slots)
 
 	for i := range uint32(slots) {
-		table.At(i).Publish(Entry[uint32, uint32]{Key: i, Value: i}, 0, 0)
+		table.At(i).Publish(Entry[uint32, uint32]{Key: i, Value: i}, 0, 0, 0)
 	}
 	for i := range uint32(slots) {
 		require.EqualValues(t, i, table.At(i).Entry().Key)
