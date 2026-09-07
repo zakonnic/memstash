@@ -6,7 +6,6 @@ package memstash
 
 import (
 	"context"
-	"hash/maphash"
 	"math/rand/v2"
 	"runtime"
 	"sync"
@@ -69,7 +68,7 @@ func scanTables(c *Cache[uint64, uint64], collect bool) tableStats {
 			default:
 				st.live++
 				key := item.Entry().Key
-				home := storage.Home(maphash.Comparable(c.seed, key))
+				home := storage.Home(c.hasher.Hash(key))
 				probes := int(storage.Dist(home, pos)) + 1
 				st.probeSum += int64(probes)
 				st.probeMax = max(st.probeMax, probes)
@@ -91,7 +90,7 @@ func scanTables(c *Cache[uint64, uint64], collect bool) tableStats {
 // probeCost replays the getMemory slot walk: the slots it touches, how many of them are dead, and whether the
 // group-edge overflow filter cut the walk short.
 func probeCost(c *Cache[uint64, uint64], key uint64) (probes, dead int, hit, groupExit bool) {
-	keyHash := maphash.Comparable(c.seed, key)
+	keyHash := c.hasher.Hash(key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
 	storage := sh.items.GetStorage()
 	tagged := itemstore.TagOf(keyHash)

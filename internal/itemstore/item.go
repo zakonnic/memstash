@@ -58,12 +58,6 @@ const (
 	TagForced uint64 = 1 << (TagShift + 12)
 	// DeadOrTag matches a probe candidate in one compare: alive and carrying the probed tag.
 	DeadOrTag = Dead | TagMask
-	// tag8Mask is the low byte of the tag field: the part a queue node carries (see QNode). It holds hash bits
-	// 14..21, so its low three bits are the key's OverflowBucket - see BucketOf.
-	tag8Mask uint64 = 0xFF << TagShift
-	// TagMatchMask matches a queue node's item in one compare: alive, occupied (TagForced) and carrying the node's
-	// tag byte.
-	TagMatchMask = Dead | TagForced | tag8Mask
 
 	// DispShift and DispMask place the item's distance from its home slot, so a run compaction moves items without
 	// rehashing them. DispMax stands for anything farther; then the distance comes from the key's hash.
@@ -153,17 +147,17 @@ func (s *Item[K, V]) Snapshot(metaWord uint64) (Entry[K, V], bool) {
 func (s *Item[K, V]) Publish(entry Entry[K, V], tag uint64, expireOff, disp uint32, sweepParity bool) {
 	s.entry = entry
 	prev := s.meta.Load()
-	s.meta.Store(prev&HasNext | uint64(expireOff)<<ExpireShift | tag | dispBits(disp) |
-		queuedBits(sweepParity) | liveGen((prev+2)&^1))
+	storeMeta(&s.meta, prev&HasNext|uint64(expireOff)<<ExpireShift|tag|dispBits(disp)|
+		queuedBits(sweepParity)|liveGen((prev+2)&^1))
 }
 
 // SetQueued marks the item as accounted for by a sweep pass of this parity. Called under the shard mutex.
 func (s *Item[K, V]) SetQueued(parity bool) {
 	if parity {
-		s.meta.Or(Queued)
+		orMeta(&s.meta, Queued)
 		return
 	}
-	s.meta.And(^Queued)
+	andMeta(&s.meta, ^Queued)
 }
 
 // PublishMoved fills an empty slot with the item at src, as Publish does, carrying over src's tag, TTL and reference
@@ -173,7 +167,7 @@ func (s *Item[K, V]) PublishMoved(src *Item[K, V], disp uint32) {
 	s.entry = src.entry
 	prev := s.meta.Load()
 	srcMeta := src.meta.Load()
-	s.meta.Store(prev&HasNext | srcMeta&(ChanceMask|ExpireMask|TagMask|Queued) | dispBits(disp) |
+	storeMeta(&s.meta, prev&HasNext|srcMeta&(ChanceMask|ExpireMask|TagMask|Queued)|dispBits(disp)|
 		liveGen((prev+2)&^1))
 }
 
@@ -189,25 +183,25 @@ func liveGen(gen uint64) uint64 {
 
 // MarkHasNext records that a key homed at or before this slot lives past it. A probe that reads the bit just before
 // it appears behaves like a Get racing the Set.
-func (s *Item[K, V]) MarkHasNext() { s.meta.Or(HasNext) }
+func (s *Item[K, V]) MarkHasNext() { orMeta(&s.meta, HasNext) }
 
 // Clear empties a dead slot. It zeroes the pair, then advances the generation once more, so no snapshot of the old
 // occupant validates. No live key's probe chain may run through the slot: a probe that stops here must stop correctly.
 func (s *Item[K, V]) Clear() {
 	s.entry = Entry[K, V]{}
 	prev := s.meta.Load()
-	s.meta.Store(liveGen((prev + 2) &^ 1))
+	storeMeta(&s.meta, liveGen((prev+2)&^1))
 }
 
 // ClearHasNext retires a chain bit whose key is gone, on a slot proven uncovered. A reader that still sees the bit
 // walks one slot too far, nothing worse.
-func (s *Item[K, V]) ClearHasNext() { s.meta.And(^HasNext) }
+func (s *Item[K, V]) ClearHasNext() { andMeta(&s.meta, ^HasNext) }
 
 func (s *Item[K, V]) SetHasNext(set bool) {
 	if set {
-		s.meta.Or(HasNext)
+		orMeta(&s.meta, HasNext)
 	} else {
-		s.meta.And(^HasNext)
+		andMeta(&s.meta, ^HasNext)
 	}
 }
 
@@ -227,21 +221,15 @@ func (s *Item[K, V]) SetValue(value V) {
 
 // beginWrite makes the generation odd to signal a write in progress.
 func (s *Item[K, V]) beginWrite() {
-	// The retry also keeps a concurrent touch from being lost.
-	for {
-		metaWord := s.meta.Load()
-		// readers must see the odd marker before any bytes of the new value - no Store to prevent reordering.
-		if s.meta.CompareAndSwap(metaWord, metaWord&^GenMask|(metaWord+1)&GenMask) {
-			return
-		}
-	}
+	metaWord := s.meta.Load()
+	storeMeta(&s.meta, metaWord&^GenMask|(metaWord+1)&GenMask)
 }
 
 // endWrite makes the generation even again; the store's release ordering keeps the value stores before it. A
 // concurrent touch may lose its chance bit here - harmless, as everywhere else.
 func (s *Item[K, V]) endWrite() {
 	metaWord := s.meta.Load()
-	s.meta.Store(metaWord&^GenMask | liveGen(metaWord+1))
+	storeMeta(&s.meta, metaWord&^GenMask|liveGen(metaWord+1))
 }
 
 // Gen returns the item's current occupancy generation.
@@ -265,27 +253,27 @@ func (s *Item[K, V]) TouchWith(metaWord uint64) {
 // RevokeChance withdraws one second chance. Called under the shard mutex.
 func (s *Item[K, V]) RevokeChance(metaWord uint64) {
 	if metaWord&ThirdChance != 0 {
-		s.meta.And(^ThirdChance)
+		andMeta(&s.meta, ^ThirdChance)
 		return
 	}
-	s.meta.And(^SecondChance)
+	andMeta(&s.meta, ^SecondChance)
 }
 
 // ResetChances clears the reference counter (S3-FIFO promotion from small to main). Called under the shard mutex.
 func (s *Item[K, V]) ResetChances() {
-	s.meta.And(^ChanceMask)
+	andMeta(&s.meta, ^ChanceMask)
 }
 
 // Kill marks the item dead and reports whether it was alive. FlatHashMap.Reclaim frees the slot.
 func (s *Item[K, V]) Kill() bool {
-	return s.meta.Or(Dead)&Dead == 0
+	return orMeta(&s.meta, Dead)&Dead == 0
 }
 
 // RefreshExpire extends the TTL, preserving the generation and reference counter. A race with a concurrent touch may
 // lose one second chance - harmless.
 func (s *Item[K, V]) RefreshExpire(expireOff uint32) {
 	metaWord := s.meta.Load()
-	s.meta.Store(metaWord&^ExpireMask | uint64(expireOff)<<ExpireShift)
+	storeMeta(&s.meta, metaWord&^ExpireMask|uint64(expireOff)<<ExpireShift)
 }
 
 // TouchAndRefreshExpire extends the TTL and grants the touch in one CAS from the lock-free read path.

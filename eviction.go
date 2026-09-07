@@ -16,14 +16,16 @@ type Item[K comparable, V any] = itemstore.Item[K, V]
 // Items resolves queue nodes into the items themselves; the cache hands one to a custom eviction policy's factory.
 type Items[K comparable, V any] interface {
 	// Find returns the item a node was enqueued for and its current slot index, or false when that key has since
-	// left the cache - the node is stale then and the policy drops it. Call under the shard mutex only, which is
-	// where every policy method already runs.
+	// left the cache - the node is stale then and the policy drops it. It reads no key: the match is the home slot
+	// and twelve hash bits, and two live keys sharing both - a twin pair, once in ~4096 keys homed together - look
+	// alike to it. That is harmless for eviction: the twins' nodes serve either item, so evicting one for the
+	// other's node leaves the class with as many nodes as items, and nothing ends up unevictable. Call under the
+	// shard mutex only, which is where every policy method already runs.
 	Find(node QNode) (item *Item[K, V], idx uint32, ok bool)
-	// Locate is Find without the confirming rehash: the first live item on the node's probe path that carries its
-	// tag byte - the node's item, or once in ~256 probes a neighbor sharing the byte. For read-only questions where
-	// a neighbor costs nothing, such as whether a node still resolves at all: never write through its result, and
-	// never name its index a victim.
-	Locate(node QNode) (item *Item[K, V], idx uint32, ok bool)
+	// FindExact is Find with the candidate's key rehashed against the node's hash bits, so a twin is passed over.
+	// It is for the one decision a twin would corrupt: dropping a node as a duplicate in Sweep, which would leave
+	// the twin's item without a node. Eviction has no use for it - see Find.
+	FindExact(node QNode) (item *Item[K, V], idx uint32, ok bool)
 }
 
 const (
@@ -72,7 +74,7 @@ type EvictionPolicy[K comparable, V any] interface {
 	Add(node QNode)
 	// Evict removes the next victim's node from the queues and returns the item's current slot index: the policy's
 	// chosen victim, or an expired item (ItemExpired). A node Find cannot resolve is stale - its key is gone - and
-	// the policy drops it and moves on. The index must come from Find, not Locate. The cache kills the item and
+	// the policy drops it and moves on. The cache kills the item and
 	// accounts its weight - the policy must not call Item.Kill. (0, false) means there is nothing to evict.
 	Evict(nowOff uint32) (uint32, bool)
 	// Len returns the total number of queued nodes, stale ones included.

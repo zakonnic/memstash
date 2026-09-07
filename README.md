@@ -352,7 +352,8 @@ read only sets a 2-bit reference counter on the item's meta word.
 
 **Custom eviction policy** — implement the `memstash.EvictionPolicy` interface (the same contract
 the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Bytes`, all called under the shard mutex; a queue
-node is a claim on a key, resolved to its item with `Items.Find`) and plug its per-shard factory in:
+node is a claim on a key, resolved to its item with `Items.Find`, or `Items.FindExact` before a node is
+dropped as a duplicate) and plug its per-shard factory in:
 
 ```go
 c, err := memstash.New[string, User](

@@ -1,7 +1,6 @@
 package itemstore
 
 import (
-	"hash/maphash"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,7 +11,7 @@ import (
 // distinct slot per index, and positions past the last slot wrap to the front.
 func TestFlatHashMapChunkedSlots(t *testing.T) {
 	const slots = 2 * chunkSlots
-	table := NewFlatHashMap[uint32, uint32](slots, maphash.MakeSeed())
+	table := NewFlatHashMap[uint32, uint32](slots, NewHasher[uint32]())
 	require.Len(t, table.chunks, 2)
 	require.Empty(t, table.short, "a chunked table keeps nothing in the flat run")
 
@@ -32,7 +31,7 @@ func TestFlatHashMapChunkedSlots(t *testing.T) {
 // TestFlatHashMapShortTable covers a table too small for a chunk: one flat run of exactly that many slots.
 func TestFlatHashMapShortTable(t *testing.T) {
 	const slots = 64
-	table := NewFlatHashMap[uint32, uint32](slots, maphash.MakeSeed())
+	table := NewFlatHashMap[uint32, uint32](slots, NewHasher[uint32]())
 	require.Empty(t, table.chunks, "a table this size stays one flat run")
 	require.Len(t, table.short, slots)
 
@@ -49,7 +48,7 @@ func TestFlatHashMapShortTable(t *testing.T) {
 // and a saturated one sticks non-zero rather than wrapping into its neighbor.
 func TestOverflowTagBuckets(t *testing.T) {
 	const slots = 64
-	table := NewFlatHashMap[uint32, uint32](slots, maphash.MakeSeed())
+	table := NewFlatHashMap[uint32, uint32](slots, NewHasher[uint32]())
 
 	// Two hashes homed in group 0 but landing in different tag buckets, plus a position outside that group.
 	var a, b uint64 = 1 << 14, 2 << 14

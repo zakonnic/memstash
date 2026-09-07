@@ -1,7 +1,6 @@
 package itemstore
 
 import (
-	"hash/maphash"
 	"math/rand/v2"
 	"sync/atomic"
 	"testing"
@@ -13,19 +12,19 @@ import (
 // plain map as the oracle.
 type model struct {
 	t     *FlatHashMap[uint64, uint64]
-	seed  maphash.Seed
+	h     Hasher[uint64]
 	live  map[uint64]uint64
 	rng   *rand.Rand
 	moves atomic.Uint32
 }
 
 func newModel(slots int, seed uint64) *model {
-	s := maphash.MakeSeed()
-	return &model{t: NewFlatHashMap[uint64, uint64](slots, s), seed: s, live: map[uint64]uint64{},
+	h := NewHasher[uint64]()
+	return &model{t: NewFlatHashMap[uint64, uint64](slots, h), h: h, live: map[uint64]uint64{},
 		rng: rand.New(rand.NewPCG(seed, seed^0x9E37))}
 }
 
-func (m *model) hash(key uint64) uint64 { return maphash.Comparable(m.seed, key) }
+func (m *model) hash(key uint64) uint64 { return m.h.Hash(key) }
 
 // insert mirrors Cache.setMemory for a key known to be absent.
 func (m *model) insert(key, value uint64) uint32 {
@@ -149,7 +148,7 @@ func (m *model) check(t *testing.T) {
 	}
 
 	// The occupied set of a fresh table holding the same keys.
-	fresh := NewFlatHashMap[uint64, uint64](int(size), m.seed)
+	fresh := NewFlatHashMap[uint64, uint64](int(size), m.h)
 	for key, value := range m.live {
 		hash := m.hash(key)
 		for pos := fresh.Home(hash); ; pos++ {
@@ -237,7 +236,7 @@ func TestReclaimUncoveredHoleIsCheap(t *testing.T) {
 // TestClearAdvancesGeneration: a slot cleared and refilled must not validate a snapshot of its previous occupant,
 // even when the new one carries the same tag.
 func TestClearAdvancesGeneration(t *testing.T) {
-	item := NewFlatHashMap[uint64, uint64](64, maphash.MakeSeed()).At(0)
+	item := NewFlatHashMap[uint64, uint64](64, NewHasher[uint64]()).At(0)
 	item.Publish(Entry[uint64, uint64]{Key: 1, Value: 1}, TagForced, 0, 0, false)
 	before := item.Metadata()
 	item.Kill()
@@ -248,7 +247,7 @@ func TestClearAdvancesGeneration(t *testing.T) {
 	require.False(t, ok, "a snapshot of the old occupant validated against the new one")
 }
 
-// TestQNodeCost pins the weight encoding: exact below the mantissa, monotone and within 2^-19 above it.
+// TestQNodeCost pins the weight encoding: exact below the mantissa, monotone and within 2^-14 above it.
 func TestQNodeCost(t *testing.T) {
 	for _, cost := range []uint32{0, 1, 2, 1000, costMantissaMax, costMantissaMax + 1, 1 << 24, 3_000_000_000, 1<<32 - 1} {
 		got := NewQNode(0, cost).Cost()
@@ -257,11 +256,11 @@ func TestQNodeCost(t *testing.T) {
 			continue
 		}
 		require.LessOrEqual(t, got, cost)
-		require.Less(t, float64(cost-got)/float64(cost), 1.0/(1<<18), "cost %d decoded as %d", cost, got)
+		require.Less(t, float64(cost-got)/float64(cost), 1.0/(1<<14), "cost %d decoded as %d", cost, got)
 	}
 	hash := uint64(0xDEADBEEF_CAFEBABE)
 	node := NewQNode(hash, 5)
 	require.Equal(t, uint32(hash>>32), node.home)
-	require.Equal(t, uint8(hash>>14), node.tag())
-	require.Equal(t, hash>>32<<32|uint64(uint8(hash>>14))<<14, node.Hash())
+	require.Equal(t, uint32(hash>>14)&(1<<12-1), node.tag12())
+	require.Equal(t, hash>>32<<32|uint64(uint32(hash>>14)&(1<<12-1))<<14, node.Hash())
 }

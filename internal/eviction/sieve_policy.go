@@ -100,7 +100,13 @@ func (p *SievePolicy[K, V]) Sweep(limit int, parity bool) bool {
 		node := &p.nodes[cur]
 		p.sweep = node.next
 		item, _, found := p.slots.Find(node.item)
-		if !found || itemstore.QueuedIn(item.Metadata(), parity) {
+		if found && itemstore.QueuedIn(item.Metadata(), parity) {
+			// Kept already, or a twin's item: only an exact match is a duplicate (see itemstore.SweepStep).
+			if item, _, found = p.slots.FindExact(node.item); found && itemstore.QueuedIn(item.Metadata(), parity) {
+				found = false
+			}
+		}
+		if !found {
 			if p.hand == cur {
 				// The walk goes head to tail, so prev nodes are already swept: the hand lands on a live node.
 				p.hand = node.prev

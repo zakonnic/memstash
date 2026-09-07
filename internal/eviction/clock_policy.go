@@ -33,8 +33,7 @@ func (p *ClockPolicy[K, V]) Sweep(limit int, parity bool) bool {
 	return itemstore.SweepStep(&p.q, p.items, limit, parity, nil)
 }
 
-// Evict pops the head until it finds a victim. Every candidate is resolved exactly: examining an item changes its
-// reference counter, and that must never land on a neighbor.
+// Evict pops the head until it finds a victim.
 func (p *ClockPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
 	// Finite: each step removes a node for good or spends one of its at most two chances.
 	for {

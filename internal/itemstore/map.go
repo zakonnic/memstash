@@ -1,7 +1,6 @@
 package itemstore
 
 import (
-	"hash/maphash"
 	"sync/atomic"
 	"unsafe"
 )
@@ -34,39 +33,43 @@ const MaxItems = int64(1) << 32 * 5 / 6
 type FlatHashMap[K comparable, V any] struct {
 	short     []Item[K, V]              // the whole table while it fits one chunk - most tables do
 	chunks    []*[chunkSlots]Item[K, V] // past that: the slot's high bits pick the chunk, the low ones the slot in it
+	base      unsafe.Pointer            // the array behind short, or behind chunks: what At steps through
 	overflows *atomic.Uint32            // per group: how many keys homed in it live past its edge (SwissTable/f14)
-	seed      maphash.Seed              // the cache's key hash seed: Find and Reclaim rehash the keys they meet
+	hasher    Hasher[K]                 // the cache's key hash, for the few places a key must be hashed again
 	size      uint32                    // slot count, as TableSlots and GrowSlots size it
 }
 
 // NewFlatHashMap allocates a table of itemCount slots: a whole number of chunks, or a power of two below one chunk,
-// where the table is one flat run of exactly that many slots and a small shard costs no more than it used to. seed is
-// the seed the cache hashes keys with.
-func NewFlatHashMap[K comparable, V any](itemCount int, seed maphash.Seed) *FlatHashMap[K, V] {
-	t := &FlatHashMap[K, V]{size: uint32(itemCount), seed: seed}
+// where the table is one flat run of exactly that many slots and a small shard costs no more than it used to. hasher
+// is the cache's key hash.
+func NewFlatHashMap[K comparable, V any](itemCount int, hasher Hasher[K]) *FlatHashMap[K, V] {
+	t := &FlatHashMap[K, V]{size: uint32(itemCount), hasher: hasher}
 	if itemCount <= chunkSlots {
 		t.short = make([]Item[K, V], itemCount)
+		t.base = unsafe.Pointer(&t.short[0])
 	} else {
 		t.chunks = make([]*[chunkSlots]Item[K, V], itemCount>>chunkShift)
 		for i := range t.chunks {
 			t.chunks[i] = new([chunkSlots]Item[K, V])
 		}
+		t.base = unsafe.Pointer(&t.chunks[0])
 	}
 	over := make([]atomic.Uint32, itemCount>>groupShift)
 	t.overflows = &over[0]
 	return t
 }
 
-// At resolves a probe position into its item. A probe walks forward from a slot index, so pos stays below twice the
-// slot count and one subtraction brings it back in range.
+// At resolves a probe position into its item. pos must be below twice the slot count: a probe walks forward from a
+// slot index, so one subtraction brings it back in range. base replaces the slices to save a bounds check per step.
 func (t *FlatHashMap[K, V]) At(pos uint32) *Item[K, V] {
 	if pos >= t.size {
 		pos -= t.size
 	}
 	if t.size <= chunkSlots { // the slot count says which of the two layouts is in use
-		return &t.short[pos]
+		return (*Item[K, V])(unsafe.Add(t.base, uintptr(pos)*unsafe.Sizeof(Item[K, V]{})))
 	}
-	return &t.chunks[pos>>chunkShift][pos&chunkMask]
+	chunk := *(**[chunkSlots]Item[K, V])(unsafe.Add(t.base, uintptr(pos>>chunkShift)*unsafe.Sizeof(uintptr(0))))
+	return &chunk[pos&chunkMask]
 }
 
 // Home returns a key hash's home slot: the high 32 hash bits scaled into the slot range, so it stays independent of
@@ -80,8 +83,7 @@ func (t *FlatHashMap[K, V]) homeOfHigh(high uint32) uint32 {
 	return uint32(uint64(high) * uint64(t.size) >> 32)
 }
 
-// hashOf rehashes a slot's key with the cache's seed. Called under the shard mutex.
-func (t *FlatHashMap[K, V]) hashOf(key K) uint64 { return maphash.Comparable(t.seed, key) }
+func (t *FlatHashMap[K, V]) hashOf(key K) uint64 { return t.hasher.Hash(key) }
 
 // Wrap normalizes a probe position into a slot index.
 func (t *FlatHashMap[K, V]) Wrap(pos uint32) uint32 {
@@ -144,7 +146,7 @@ func (t *FlatHashMap[K, V]) NoteDisplacedAt(home, pos, bucket uint32) {
 	}
 	word, shift := t.overflowAt(home), bucket*overflowWidth
 	if cur := word.Load(); cur>>shift&overflowMax != overflowMax {
-		word.Store(cur + 1<<shift)
+		StoreU32(word, cur+1<<shift)
 	}
 }
 
@@ -160,8 +162,21 @@ func (t *FlatHashMap[K, V]) ForgetDisplacedAt(home, pos, bucket uint32) {
 	}
 	word, shift := t.overflowAt(home), bucket*overflowWidth
 	if cur := word.Load(); cur>>shift&overflowMax != overflowMax {
-		word.Store(cur - 1<<shift)
+		StoreU32(word, cur-1<<shift)
 	}
+}
+
+// ForgetDisplacedOf is ForgetDisplaced for the item at idx, its home and bucket read from its meta word: the caller
+// holds the item, not its hash. A saturated distance sends it to the hash.
+func (t *FlatHashMap[K, V]) ForgetDisplacedOf(idx uint32, item *Item[K, V]) {
+	metaWord := item.Metadata()
+	home, disp := uint32(0), DispOf(metaWord)
+	if disp == DispMax {
+		home = t.Home(t.hashOf(item.Entry().Key))
+	} else {
+		home = t.back(idx, disp)
+	}
+	t.ForgetDisplacedAt(home, idx, BucketOf(metaWord))
 }
 
 // overflowAt takes a home that Home already reduced into range.
@@ -203,45 +218,74 @@ func GrowSlots(size int) int {
 	}
 }
 
-// Find resolves a queue node to the item it was enqueued for: the item and its current slot. false means the key has
-// left the cache since. The walk is the reader's probe, run under the shard mutex, plus one rehash of every candidate
-// to confirm the node's 40 identity bits - a false candidate is a rehash every ~256 probes.
-func (t *FlatHashMap[K, V]) Find(node QNode) (*Item[K, V], uint32, bool) {
-	return t.resolve(node, true)
+// Find resolves a queue node to the item it was enqueued for: the item and its current slot; false means the key has
+// left the cache. A candidate is a live item on the node's probe path carrying the node's twelve tag bits at the
+// node's home slot - the distance in its meta word says so. The node's item, if it is anywhere, is a candidate, so a
+// cold candidate whose run ends within findLookahead slots is the answer without its key being read; one with a
+// reference bit set, a second one, or one whose run goes on is confirmed by rehashing its key, so a hot key is only
+// ever examined through its own node, and the walk never reads further than the old exact walk did. What is left is
+// a stale node meeting a lone cold twin (a key homed at the same slot with the same twelve bits: once in ~4096) and
+// evicting it a little early. Under the shard mutex.
+func (t *FlatHashMap[K, V]) Find(node QNode) (*Item[K, V], uint32, bool) { return t.find(node, false) }
+
+// FindExact is Find with every candidate confirmed by its key. It is for the one decision a twin would corrupt:
+// dropping a node as a duplicate in a sweep, which would leave the twin's item without a node.
+func (t *FlatHashMap[K, V]) FindExact(node QNode) (*Item[K, V], uint32, bool) {
+	return t.find(node, true)
 }
 
-// Locate is Find without the rehash: the first live item on the node's probe path carrying its tag byte, which is the
-// node's item, or once in ~256 probes a neighbor sharing the byte. For read-only questions where a neighbor costs
-// nothing - a sweep asking whether the node still resolves, an admission filter peeking at main's head. A policy
-// that writes to the item it examines (a reference counter is written on every eviction step) resolves with Find:
-// writing to a neighbor would cost that neighbor its standing. Called under the shard mutex.
-func (t *FlatHashMap[K, V]) Locate(node QNode) (*Item[K, V], uint32, bool) {
-	return t.resolve(node, false)
-}
+// findLookahead is how many slots past a cold candidate Find reads for a second one before it settles the first by
+// its hash instead: about one cache line of items, which most runs end within.
+const findLookahead = 2
 
-func (t *FlatHashMap[K, V]) resolve(node QNode, exact bool) (*Item[K, V], uint32, bool) {
+func (t *FlatHashMap[K, V]) find(node QNode, exact bool) (*Item[K, V], uint32, bool) {
 	home := t.homeOfHigh(node.home)
-	tagged := uint64(node.tag())<<TagShift | TagForced
-	bucket := uint32(node.tag()) & (overflowBuckets - 1)
+	tagged := node.tagBits()
+	bucket := node.bucket()
 	groupEnd := (home | 7) + 1
-	for pos := home; ; pos++ {
+	var first *Item[K, V] // a cold candidate, trusted if it stays the only one until its run ends
+	firstPos, ahead, seen := uint32(0), 0, 0
+	for pos, d := home, uint32(0); ; pos, d = pos+1, d+1 {
 		if pos == groupEnd && !t.OverflowedTag(home, bucket) {
-			return nil, 0, false
+			break
 		}
 		item := t.At(pos)
 		metaWord := item.Metadata()
-		if metaWord&TagMatchMask == tagged {
-			if !exact {
-				return item, t.Wrap(pos), true
-			}
-			if hash := t.hashOf(item.Entry().Key); uint32(hash>>32) == node.home && uint8(hash>>14) == node.tag() {
-				return item, t.Wrap(pos), true
+		if metaWord&DeadOrTag == tagged {
+			// Same home slot when the stored distance says so; a saturated distance leaves it to the hash.
+			if disp := DispOf(metaWord); disp == d || disp == DispMax && d >= DispMax {
+				seen++
+				if seen == 1 && !exact && metaWord&ChanceMask == 0 && disp != DispMax {
+					first, firstPos, ahead = item, t.Wrap(pos), findLookahead
+				} else if t.holdsKeyOf(item, node) {
+					return item, t.Wrap(pos), true
+				}
 			}
 		}
 		if metaWord&HasNext == 0 {
-			return nil, 0, false
+			break
+		}
+		if first != nil {
+			if ahead == 0 { // the run outlasts the lookahead: settle the candidate by its hash, not by reading on
+				if t.holdsKeyOf(first, node) {
+					return first, firstPos, true
+				}
+				first = nil
+			} else {
+				ahead--
+			}
 		}
 	}
+	if first != nil && (seen == 1 || t.holdsKeyOf(first, node)) {
+		return first, firstPos, true
+	}
+	return nil, 0, false
+}
+
+// holdsKeyOf rehashes the item's key and checks it against the 44 hash bits the node carries.
+func (t *FlatHashMap[K, V]) holdsKeyOf(item *Item[K, V], node QNode) bool {
+	hash := t.hashOf(item.Entry().Key)
+	return uint32(hash>>32) == node.home && uint32(hash>>14)&(1<<12-1) == node.tag12()
 }
 
 // ShiftEntry is Reclaim's record of one live slot in the run it compacts: where the slot is and where its key is
@@ -311,7 +355,7 @@ func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]ShiftEntry, moves *at
 			break
 		}
 		if !moved {
-			moves.Add(1)
+			StoreU32(moves, moves.Load()+1)
 			moved = true
 		}
 		src, dst := t.At(idx+uint32(entries[pick].off)), t.At(idx+uint32(hole))
@@ -327,7 +371,7 @@ func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]ShiftEntry, moves *at
 		hole, entries[pick].off = entries[pick].off, hole
 	}
 	if moved {
-		moves.Add(1)
+		StoreU32(moves, moves.Load()+1)
 	}
 
 	// Back to slot order. Only the moved entries are out of place, so this is a few swaps.
@@ -423,7 +467,7 @@ func (r *StorageProxy[K, V]) Find(node QNode) (*Item[K, V], uint32, bool) {
 	return r.storage.Load().Find(node)
 }
 
-// Locate is FlatHashMap.Locate on the current table. Called under the shard mutex.
-func (r *StorageProxy[K, V]) Locate(node QNode) (*Item[K, V], uint32, bool) {
-	return r.storage.Load().Locate(node)
+// FindExact is FlatHashMap.FindExact on the current table. Called under the shard mutex.
+func (r *StorageProxy[K, V]) FindExact(node QNode) (*Item[K, V], uint32, bool) {
+	return r.storage.Load().FindExact(node)
 }

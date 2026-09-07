@@ -11,45 +11,54 @@ const queueChunkSize = 127
 // item's weight when it was enqueued. Items may move between slots (deletion shifts their neighbors toward home),
 // so a node never remembers a position; it is resolved through Items.Find whenever the policy needs the item.
 //
-// The weight is kept to 24 bits with a small floating-point encoding: exact below 2 MiB, 2^-19 relative error above.
+// The weight is kept to 20 bits with a small floating-point encoding: exact below 128 Ki, 2^-14 relative error above.
 // It only balances S3-FIFO's small queue and W-TinyLFU's window, so that precision is plenty; it may drift after an
 // overwrite anyway - the global accounting is recomputed from the live value.
 type QNode struct {
 	home    uint32 // keyHash >> 32, the input of FlatHashMap.Home
-	tagCost uint32 // keyHash bits 14..21 in the top byte, the encoded weight below
+	tagCost uint32 // keyHash bits 14..25 in the top twelve bits - the tag as the meta word keeps it - the encoded weight below
 }
+
+// nodeTagShift is where the tag sits in tagCost; the weight has the bits below it.
+const nodeTagShift = 20
 
 // NewQNode builds the node for an item with the given key hash and weight.
 func NewQNode(keyHash uint64, cost uint32) QNode {
-	return QNode{home: uint32(keyHash >> 32), tagCost: uint32(uint8(keyHash>>14))<<24 | encodeCost(cost)}
+	return QNode{home: uint32(keyHash >> 32), tagCost: uint32(keyHash>>14)&(1<<12-1)<<nodeTagShift | encodeCost(cost)}
 }
 
 // Cost is the item's weight when it was enqueued, decoded.
-func (n QNode) Cost() uint32 { return decodeCost(n.tagCost & (1<<24 - 1)) }
+func (n QNode) Cost() uint32 { return decodeCost(n.tagCost & (1<<nodeTagShift - 1)) }
 
 // Hash lays the node's 40 identity bits out where the key hash carried them, so a frequency sketch or a ghost table
 // keyed by the hash sees the same key across the item's residencies.
-func (n QNode) Hash() uint64 { return uint64(n.home)<<32 | uint64(n.tag())<<14 }
+func (n QNode) Hash() uint64 { return uint64(n.home)<<32 | uint64(n.tag12())<<14 }
 
-func (n QNode) tag() uint8 { return uint8(n.tagCost >> 24) }
+func (n QNode) tag12() uint32 { return n.tagCost >> nodeTagShift }
 
-// The weight encoding: 3 exponent bits over a 21-bit mantissa, the value being mantissa << 2*exponent.
+// tagBits is the node's tag as the meta word carries it: what TagOf gives for the node's key.
+func (n QNode) tagBits() uint64 { return uint64(n.tag12())<<TagShift | TagForced }
+
+// bucket is the node's OverflowBucket: the low three tag bits.
+func (n QNode) bucket() uint32 { return n.tag12() & (overflowBuckets - 1) }
+
+// The weight encoding: 3 exponent bits over a 17-bit mantissa, the value being mantissa << 3*exponent.
 const (
-	costMantissaBits = 21
+	costMantissaBits = 17
 	costMantissaMax  = 1<<costMantissaBits - 1
 )
 
 func encodeCost(cost uint32) uint32 {
 	exp := uint32(0)
-	for cost>>(2*exp) > costMantissaMax {
+	for cost>>(3*exp) > costMantissaMax {
 		exp++
 	}
-	return exp<<costMantissaBits | cost>>(2*exp)
+	return exp<<costMantissaBits | cost>>(3*exp)
 }
 
 func decodeCost(encoded uint32) uint32 {
 	exp := encoded >> costMantissaBits
-	return (encoded & costMantissaMax) << (2 * exp)
+	return (encoded & costMantissaMax) << (3 * exp)
 }
 
 // queueChunk is a single link of the unrolled queue.
@@ -135,9 +144,15 @@ func SweepStep[K comparable, V any](q *EvictQueue, items *StorageProxy[K, V], li
 			q.sweepLeft = 0
 			break
 		}
-		// Exactly, not by tag: dropping a twin's node would leave that item with none, and nothing would evict it.
 		item, _, found := items.Find(node)
-		if !found || QueuedIn(item.Metadata(), parity) {
+		if found && QueuedIn(item.Metadata(), parity) {
+			// A node was kept for this item already - or for a twin of the node's own item, which Find cannot tell
+			// apart. Dropping on a twin would leave the item without a node, so only an exact match is a duplicate.
+			if item, _, found = items.FindExact(node); found && QueuedIn(item.Metadata(), parity) {
+				found = false
+			}
+		}
+		if !found {
 			if onDrop != nil {
 				onDrop(node)
 			}

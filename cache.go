@@ -9,7 +9,6 @@ package memstash
 import (
 	"context"
 	"fmt"
-	"hash/maphash"
 	"iter"
 	"math"
 	"sync"
@@ -101,7 +100,7 @@ type Cache[K comparable, V any] struct {
 	// onDeletion sits with the fields the write path already touches: every removal site tests it, so a cache without
 	// a handler pays one predicted branch off a hot cache line.
 	onDeletion func(key K, value V, cause DeletionCause)
-	seed       maphash.Seed
+	hasher     itemstore.Hasher[K]
 
 	// Coarse clock for cheap TTL checks: nowOff is the time since epoch in expireUnit steps, refreshed by a background
 	// ticker (started only when TTL > 0). Offsets are 18-bit values on a wrapping scale, so the unit adapts to the
@@ -220,7 +219,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		shardMask:         uint32(numShards - 1),
 		preallocated:      cfg.PreallocateMap,
 		growthNum:         int(math.Round(cfg.growthThreshold() * (1 << growthShift))),
-		seed:              maphash.MakeSeed(),
+		hasher:            itemstore.NewHasher[K](),
 		epoch:             time.Now(),
 		ttl:               cfg.TTL,
 		l2Cache:           cfg.L2Cache,
@@ -249,7 +248,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		if cfg.PreallocateMap {
 			slots = preallocSlots(sh.cap, cfg.preallocRatio())
 		}
-		sh.items.Store(itemstore.NewFlatHashMap[K, V](slots, c.seed))
+		sh.items.Store(itemstore.NewFlatHashMap[K, V](slots, c.hasher))
 		if cfg.CustomPolicy != nil {
 			sh.policy = cfg.CustomPolicy(&sh.items, sh.cap)
 			if sh.policy == nil {
@@ -340,12 +339,12 @@ func (c *Cache[K, V]) Wait() {
 // shardAndHash returns the key's shard and hash: the low bits pick the shard, the high bits seed the table probe,
 // so one hash serves both.
 func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
-	keyHash := maphash.Comparable(c.seed, key)
+	keyHash := c.hasher.Hash(key)
 	return &c.shards[uint32(keyHash)&c.shardMask], keyHash
 }
 
 func (c *Cache[K, V]) keyHash(key K) uint64 {
-	return maphash.Comparable(c.seed, key)
+	return c.hasher.Hash(key)
 }
 
 // writeQueueOf returns the write-back worker for the key, to spread across any worker count.
@@ -402,7 +401,7 @@ func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 // hit as it stands. A miss is trusted only if no reclaim moved items during the walk (moveSeq even and unchanged);
 // otherwise getMoved walks again.
 func (c *Cache[K, V]) getMemory(key K) (V, bool) {
-	keyHash := maphash.Comparable(c.seed, key)
+	keyHash := c.hasher.Hash(key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
 	tagged := itemstore.TagOf(keyHash)
 	seq := sh.moveSeq.Load()
@@ -620,13 +619,10 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 		}
 		break
 	}
-	// An overwrite of the same weight - the common one - leaves the total alone, and a plain load spares every
-	// reader of this shard the invalidation a locked add would cost them.
-	total := sh.weight.Load()
-	if weightDelta != 0 {
-		total = sh.weight.Add(weightDelta)
+	if weightDelta != 0 { // an overwrite of the same weight - the common one - leaves the total alone
+		itemstore.StoreI64(&sh.weight, sh.weight.Load()+weightDelta)
 	}
-	if total > sh.cap {
+	if sh.weight.Load() > sh.cap {
 		c.evictShard(sh, &deletions)
 	}
 	sh.mu.Unlock()
@@ -647,11 +643,11 @@ func (c *Cache[K, V]) maybeGrow(sh *shard[K, V], t *itemstore.FlatHashMap[K, V])
 	if c.preallocated || sh.live<<growthShift < t.Len()*c.growthNum || int64(t.Len()) >= maxTableSlots {
 		return
 	}
-	fresh := itemstore.NewFlatHashMap[K, V](min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), c.seed)
+	fresh := itemstore.NewFlatHashMap[K, V](min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), c.hasher)
 	for pos := uint32(0); int(pos) < t.Len(); pos++ {
 		item := t.At(pos)
 		if metaWord := item.Metadata(); !itemstore.Empty(metaWord) && metaWord&itemstore.Dead == 0 {
-			fresh.InsertFresh(maphash.Comparable(c.seed, item.Entry().Key), item)
+			fresh.InsertFresh(c.hasher.Hash(item.Entry().Key), item)
 		}
 	}
 	sh.items.Store(fresh)
@@ -675,7 +671,7 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 		if itemstore.Expired(item.Metadata(), nowOff) {
 			cause = CauseExpiration
 		}
-		c.killAt(sh, maphash.Comparable(c.seed, item.Entry().Key), victimIdx, item, cause, deletions)
+		c.killAt(sh, victimIdx, item, cause, deletions)
 	}
 }
 
@@ -687,7 +683,7 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K) {
 	// Recheck under the lock: the TTL may have been refreshed, and a reclaim may have moved the item.
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	if ok && itemstore.Expired(item.Metadata(), c.nowOff.Load()) {
-		c.killAt(sh, h, idx, item, CauseExpiration, &deletions)
+		c.killAt(sh, idx, item, CauseExpiration, &deletions)
 	}
 	c.noteStale(sh)
 	sh.mu.Unlock()
@@ -743,17 +739,18 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 // killAt kills the item in its slot, subtracts its weight and reclaims the slot on the spot: the run it sat in is
 // compacted (FlatHashMap.Reclaim), so the table holds live items and nothing else, and no purge is ever needed. The
 // reclaim brackets its moves on moveSeq, which is what lets a lock-free probe tell a miss that overlapped them from
-// a real one. Called under the shard mutex.
-func (c *Cache[K, V]) killAt(sh *shard[K, V], keyHash uint64, idx uint32, item *itemstore.Item[K, V],
-	cause DeletionCause, deletions *[]deletion[K, V]) {
+// a real one. The item's home and bucket come from its meta word, so nothing here hashes a key. Called under the
+// shard mutex.
+func (c *Cache[K, V]) killAt(sh *shard[K, V], idx uint32, item *itemstore.Item[K, V], cause DeletionCause,
+	deletions *[]deletion[K, V]) {
 	entry := item.Entry()
-	sh.weight.Add(-c.rawCost(entry.Key, entry.Value))
+	itemstore.StoreI64(&sh.weight, sh.weight.Load()-c.rawCost(entry.Key, entry.Value))
 	if c.onDeletion != nil {
 		c.addDeletion(deletions, entry.Key, entry.Value, cause)
 	}
-	item.Kill()
 	storage := sh.items.GetStorage()
-	storage.ForgetDisplaced(keyHash, idx)
+	storage.ForgetDisplacedOf(idx, item)
+	item.Kill()
 	sh.live--
 	storage.Reclaim(idx, &sh.scratch, &sh.moveSeq)
 }
@@ -815,7 +812,7 @@ func (c *Cache[K, V]) noteStale(sh *shard[K, V]) {
 func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K, cause DeletionCause,
 	deletions *[]deletion[K, V]) {
 	if idx, item, ok := c.findSlot(sh, keyHash, key); ok {
-		c.killAt(sh, keyHash, idx, item, cause, deletions)
+		c.killAt(sh, idx, item, cause, deletions)
 	}
 	c.noteStale(sh)
 }
@@ -956,7 +953,7 @@ func (c *Cache[K, V]) iterateWithLife(yield func(K, V, time.Duration) bool) {
 			}
 		}
 		wrapped := func(pos uint32) bool {
-			return pos < lead && storage.Home(maphash.Comparable(c.seed, entry.Key)) > pos
+			return pos < lead && storage.Home(c.hasher.Hash(entry.Key)) > pos
 		}
 		for pos := uint32(0); pos < size; pos++ {
 			item := storage.At(pos)

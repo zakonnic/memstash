@@ -2,7 +2,6 @@ package memstash
 
 import (
 	"context"
-	"hash/maphash"
 
 	"github.com/zakonnic/memstash/internal/itemstore"
 )
@@ -117,7 +116,7 @@ func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {
 // peekMemory is getMemory without the TTL rules: an expired value is returned instead of reclaimed and the reference
 // counter is left alone. A miss that overlapped a reclaim is probed again, the third time under the mutex.
 func (c *Cache[K, V]) peekMemory(key K) (V, bool) {
-	keyHash := maphash.Comparable(c.seed, key)
+	keyHash := c.hasher.Hash(key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
 	tagged := itemstore.TagOf(keyHash)
 	var entry itemstore.Entry[K, V]

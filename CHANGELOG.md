@@ -19,9 +19,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **No same-size rebuilds.** With nothing to purge, a preallocated table is never allocated again after `New`, and a
   non-preallocated one only grows; the transient second table of a purge is gone. `Stats.TablePurges` is always 0
   and will be removed with the next stats revision.
-- **Queue nodes address keys, not slots.** `QNode` carries 40 bits of the key's hash and the weight (`Cost()`,
-  24-bit float encoding, exact below 2 MiB), and a policy resolves a node to its item with `Items.Find` (exact) or
-  `Items.Locate` (by tag, for read-only questions); growth no longer walks the queues. `EvictionPolicy` loses
+- **Queue nodes address keys, not slots.** `QNode` carries 44 bits of the key's hash and the weight (`Cost()`,
+  20-bit float encoding, exact below 128 Ki), and a policy resolves a node to its item with `Items.Find`, which
+  reads no key: the home slot, twelve tag bits and the distance kept in the meta word identify the item, and only a
+  candidate with a reference bit set, or a second candidate, is confirmed by its hash. `Items.FindExact` confirms
+  every candidate and is for the one decision a twin pair (same home slot, same twelve bits: once in ~4096 such
+  keys) would corrupt - dropping a node as a duplicate. Growth no longer walks the queues. `EvictionPolicy` loses
   `Rebuild`, `Sweep` becomes `Sweep(limit int, parity bool) (more bool)` and works in slices driven by the removals,
   and `Evict` must skip the nodes `Find` cannot resolve. A custom policy written against `Items.At` and `Rebuild` has
   to be updated.
@@ -45,12 +48,23 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   documentation already claims for concurrent writes - and never yield a key twice.
 - `WithPreallocationRatio` is now a pure memory-for-latency dial, and `WithGrowthThreshold` only means growth; the
   rule that the ratio must stay below the threshold is gone.
-- **What the compaction costs.** Reads and mixed workloads are ahead of the tombstone design (`Mixed90_10` -37%,
-  parallel throughput -30 to -37%, `GetMiss` and `DeleteMiss` level, `GetHit` +7% for the move sequence a lock-free
-  miss re-checks). Writes that remove pay for it: an eviction resolves its victim by key instead of by index, and a
-  delete-then-set of the same key is a full removal plus a full insertion where the old design resurrected the item
-  and its node in place. `Set` at capacity costs +51% and the `Delete`+`Set` pair +138% on the micro-benchmarks;
-  both are the price of a table that never carries a tombstone and never rebuilds.
+- **Meta words are written plainly under the shard mutex on amd64.** One writer holds the mutex, so a meta write
+  needs release ordering, not a locked instruction, and on amd64 a plain aligned store is release-ordered; five
+  locked writes measure 18.5 ns against 1.5 ns plain, and an insert that evicts issues a dozen. Readers keep their
+  atomic loads and compare-and-swaps; the race detector, which cannot see the ordering argument, builds the atomic
+  variant (`internal/itemstore/write_generic.go`).
+- **8-byte keys are hashed in place.** A key of 8 bytes without floats is mixed inline (two multiplies); everything
+  else stays on `maphash`, whose 8-byte path is a runtime call that costs 2.3 ns to the mixer's 0.9. The seed is
+  per cache, as before.
+- **What the compaction costs, measured against the tombstone design in one session.** Reads are ahead (`GetHit`
+  -13%, `Get` -21%, `GetMiss` -9%, `DeleteMiss` -19%) and so is every mixed workload (`Mixed90_10` -41%, parallel
+  throughput -11% at 100% reads to -38% at 75%: the shard read line no longer bounces on every `Set`). Writes that
+  remove still pay: an eviction resolves its victim through the table instead of by index and compacts the run it
+  leaves, and a delete-then-set of the same key is a full removal, a full insertion and a sweep step where the old
+  design resurrected the item and its node in place. `Set` at capacity costs +17% (serial +20%) and the
+  `Delete`+`Set` pair +124% on the micro-benchmarks - the latter a lock convoy on one Zipf-hot shard, where the pair
+  serially costs 25% less than before; both are the price of a table that never carries a tombstone and never
+  rebuilds.
 
 ## [0.9.8] - 2026-08-13
 

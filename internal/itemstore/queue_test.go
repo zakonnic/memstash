@@ -1,7 +1,6 @@
 package itemstore
 
 import (
-	"hash/maphash"
 	"testing"
 	"unsafe"
 
@@ -119,5 +118,4 @@ func TestFindResolvesByIdentity(t *testing.T) {
 		require.False(t, ok, "key %d is gone but Find still resolves its node", key)
 	}
 	m.check(t)
-	_ = maphash.MakeSeed
 }

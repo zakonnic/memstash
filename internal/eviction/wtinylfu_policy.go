@@ -123,7 +123,7 @@ func (p *WTinyLFUPolicy[K, V]) admit(candidate itemstore.QNode) bool {
 	if !ok {
 		return true
 	}
-	if _, _, found := p.items.Locate(victim); !found {
+	if _, _, found := p.items.Find(victim); !found {
 		return true
 	}
 	return p.sketch.estimate(mixHash(candidate.Hash())) > p.sketch.estimate(mixHash(victim.Hash()))
