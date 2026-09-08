@@ -34,7 +34,7 @@ type walk struct {
 
 // walkCost walks the probe chain on HasNext alone, then asks what the group-edge filter would have done to it.
 func walkCost(c *Cache[uint64, uint64], key uint64) walk {
-	keyHash := c.hasher.Hash(key)
+	keyHash := c.keyHash(key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
 	storage := sh.items.GetStorage()
 	tagged := itemstore.TagOf(keyHash)
@@ -140,7 +140,7 @@ func displacedShare(c *Cache[uint64, uint64]) (live, displaced int) {
 				continue
 			}
 			live++
-			home := storage.Home(c.hasher.Hash(item.Entry().Key))
+			home := storage.Home(c.keyHash(item.Entry().Key))
 			if home>>3 != pos>>3 {
 				displaced++
 			}

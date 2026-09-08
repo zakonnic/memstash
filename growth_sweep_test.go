@@ -290,7 +290,7 @@ func gbLatency[K comparable, V any](c *Cache[K, V], keys []K) float64 {
 
 // gbWalk replays the lock-free probe and counts the slots it touches.
 func gbWalk[K comparable, V any](c *Cache[K, V], key K) (probes int, hit bool) {
-	keyHash := c.hasher.Hash(key)
+	keyHash := c.keyHash(key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
 	storage := sh.items.GetStorage()
 	tagged := itemstore.TagOf(keyHash)
@@ -324,7 +324,7 @@ func gbScan[K comparable, V any](c *Cache[K, V], facts *gbFacts) {
 				continue
 			}
 			facts.live++
-			home := storage.Home(c.hasher.Hash(item.Entry().Key))
+			home := storage.Home(c.keyHash(item.Entry().Key))
 			chain := int(storage.Dist(home, uint32(pos))) + 1
 			facts.chainSum += int64(chain)
 			facts.chainHist[min(chain, gbHistMax)]++

@@ -1,6 +1,7 @@
 package itemstore
 
 import (
+	"hash/maphash"
 	"math/rand/v2"
 	"sync/atomic"
 	"testing"
@@ -12,19 +13,19 @@ import (
 // plain map as the oracle.
 type model struct {
 	t     *FlatHashMap[uint64, uint64]
-	h     Hasher[uint64]
+	h     maphash.Seed
 	live  map[uint64]uint64
 	rng   *rand.Rand
 	moves atomic.Uint32
 }
 
 func newModel(slots int, seed uint64) *model {
-	h := NewHasher[uint64]()
+	h := maphash.MakeSeed()
 	return &model{t: NewFlatHashMap[uint64, uint64](slots, h), h: h, live: map[uint64]uint64{},
 		rng: rand.New(rand.NewPCG(seed, seed^0x9E37))}
 }
 
-func (m *model) hash(key uint64) uint64 { return m.h.Hash(key) }
+func (m *model) hash(key uint64) uint64 { return maphash.Comparable(m.h, key) }
 
 // insert mirrors Cache.setMemory for a key known to be absent.
 func (m *model) insert(key, value uint64) uint32 {
@@ -236,7 +237,7 @@ func TestReclaimUncoveredHoleIsCheap(t *testing.T) {
 // TestClearAdvancesGeneration: a slot cleared and refilled must not validate a snapshot of its previous occupant,
 // even when the new one carries the same tag.
 func TestClearAdvancesGeneration(t *testing.T) {
-	item := NewFlatHashMap[uint64, uint64](64, NewHasher[uint64]()).At(0)
+	item := NewFlatHashMap[uint64, uint64](64, maphash.MakeSeed()).At(0)
 	item.Publish(Entry[uint64, uint64]{Key: 1, Value: 1}, TagForced, 0, 0, false)
 	before := item.Metadata()
 	item.Kill()

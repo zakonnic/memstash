@@ -22,12 +22,3 @@ func dispOf(metaWord uint64) uint32                        { return itemstore.Di
 func newQNode(keyHash uint64, cost uint32) itemstore.QNode { return itemstore.NewQNode(keyHash, cost) }
 func storeI64(p *atomic.Int64, v int64)                    { itemstore.StoreI64(p, v) }
 func storeU32(p *atomic.Uint32, v uint32)                  { itemstore.StoreU32(p, v) }
-
-// hash is the key's hash: the word mixer for a word key type, maphash otherwise. The branch lives here, in an
-// inlinable method, rather than in Hasher.Hash, whose two paths together exceed the inlining budget.
-func (c *Cache[K, V]) hash(key K) uint64 {
-	if c.wordKeys {
-		return c.hasher.HashWord(key)
-	}
-	return c.hasher.HashSlow(key)
-}

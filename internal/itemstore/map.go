@@ -1,6 +1,7 @@
 package itemstore
 
 import (
+	"hash/maphash"
 	"sync/atomic"
 	"unsafe"
 )
@@ -35,15 +36,14 @@ type FlatHashMap[K comparable, V any] struct {
 	chunks    []*[chunkSlots]Item[K, V] // past that: the slot's high bits pick the chunk, the low ones the slot in it
 	base      unsafe.Pointer            // the array behind short, or behind chunks: what At steps through
 	overflows *atomic.Uint32            // per group: how many keys homed in it live past its edge (SwissTable/f14)
-	hasher    Hasher[K]                 // the cache's key hash, for the few places a key must be hashed again
+	seed      maphash.Seed              // the cache's hash seed, for the few places a key must be hashed again
 	size      uint32                    // slot count, as TableSlots and GrowSlots size it
 }
 
-// NewFlatHashMap allocates a table of itemCount slots: a whole number of chunks, or a power of two below one chunk,
-// where the table is one flat run of exactly that many slots and a small shard costs no more than it used to. hasher
-// is the cache's key hash.
-func NewFlatHashMap[K comparable, V any](itemCount int, hasher Hasher[K]) *FlatHashMap[K, V] {
-	t := &FlatHashMap[K, V]{size: uint32(itemCount), hasher: hasher}
+// NewFlatHashMap allocates a table of itemCount slots, a size TableSlots or GrowSlots returned. Up to one chunk the
+// table is a single flat array.
+func NewFlatHashMap[K comparable, V any](itemCount int, seed maphash.Seed) *FlatHashMap[K, V] {
+	t := &FlatHashMap[K, V]{size: uint32(itemCount), seed: seed}
 	if itemCount <= chunkSlots {
 		t.short = make([]Item[K, V], itemCount)
 		t.base = unsafe.Pointer(&t.short[0])
@@ -83,7 +83,7 @@ func (t *FlatHashMap[K, V]) homeOfHigh(high uint32) uint32 {
 	return uint32(uint64(high) * uint64(t.size) >> 32)
 }
 
-func (t *FlatHashMap[K, V]) hashOf(key K) uint64 { return t.hasher.Hash(key) }
+func (t *FlatHashMap[K, V]) hashOf(key K) uint64 { return maphash.Comparable(t.seed, key) }
 
 // Wrap normalizes a probe position into a slot index.
 func (t *FlatHashMap[K, V]) Wrap(pos uint32) uint32 {

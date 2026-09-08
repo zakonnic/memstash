@@ -1,6 +1,7 @@
 package eviction
 
 import (
+	"hash/maphash"
 	"sync/atomic"
 
 	"github.com/zakonnic/memstash/internal/itemstore"
@@ -11,18 +12,18 @@ import (
 // when a run is compacted, so the helpers address them by key.
 type arena struct {
 	items   itemstore.StorageProxy[string, string]
-	h       itemstore.Hasher[string]
+	h       maphash.Seed
 	scratch []itemstore.ShiftEntry
 	moves   atomic.Uint32
 }
 
 func newArena() *arena {
-	a := &arena{h: itemstore.NewHasher[string]()}
+	a := &arena{h: maphash.MakeSeed()}
 	a.items.Store(itemstore.NewFlatHashMap[string, string](1<<10, a.h))
 	return a
 }
 
-func (a *arena) hash(key string) uint64 { return a.h.Hash(key) }
+func (a *arena) hash(key string) uint64 { return maphash.Comparable(a.h, key) }
 
 // node is the queue node Cache.setMemory would register for the key.
 func (a *arena) node(key string) itemstore.QNode { return itemstore.NewQNode(a.hash(key), 1) }

@@ -9,6 +9,7 @@ package memstash
 import (
 	"context"
 	"fmt"
+	"hash/maphash"
 	"iter"
 	"math"
 	"sync"
@@ -100,8 +101,7 @@ type Cache[K comparable, V any] struct {
 	// onDeletion sits with the fields the write path already touches: every removal site tests it, so a cache without
 	// a handler pays one predicted branch off a hot cache line.
 	onDeletion func(key K, value V, cause DeletionCause)
-	hasher     itemstore.Hasher[K]
-	wordKeys   bool // the key type takes Hasher.HashWord: chosen once, so the hot paths branch on a field
+	seed       maphash.Seed
 
 	// Coarse clock for cheap TTL checks: nowOff is the time since epoch in expireUnit steps, refreshed by a background
 	// ticker (started only when TTL > 0). Offsets are 18-bit values on a wrapping scale, so the unit adapts to the
@@ -220,7 +220,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		shardMask:         uint32(numShards - 1),
 		preallocated:      cfg.PreallocateMap,
 		growthNum:         int(math.Round(cfg.growthThreshold() * (1 << growthShift))),
-		hasher:            itemstore.NewHasher[K](),
+		seed:              maphash.MakeSeed(),
 		epoch:             time.Now(),
 		ttl:               cfg.TTL,
 		l2Cache:           cfg.L2Cache,
@@ -233,7 +233,6 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		stop:              make(chan struct{}),
 		batchedGets:       getWorkerPool[K, V]{size: cfg.getBatchedBuffer(), workers: cfg.getBatchedWorkers()},
 	}
-	c.wordKeys = c.hasher.WordKeys()
 	if c.l2Cache == nil {
 		c.l2WritePolicy = WriteDisabled
 	}
@@ -250,7 +249,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		if cfg.PreallocateMap {
 			slots = preallocSlots(sh.cap, cfg.preallocRatio())
 		}
-		sh.items.Store(itemstore.NewFlatHashMap[K, V](slots, c.hasher))
+		sh.items.Store(itemstore.NewFlatHashMap[K, V](slots, c.seed))
 		if cfg.CustomPolicy != nil {
 			sh.policy = cfg.CustomPolicy(&sh.items, sh.cap)
 			if sh.policy == nil {
@@ -341,12 +340,12 @@ func (c *Cache[K, V]) Wait() {
 // shardAndHash returns the key's shard and hash: the low bits pick the shard, the high bits seed the table probe,
 // so one hash serves both.
 func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
-	keyHash := c.hash(key)
+	keyHash := maphash.Comparable(c.seed, key)
 	return &c.shards[uint32(keyHash)&c.shardMask], keyHash
 }
 
 func (c *Cache[K, V]) keyHash(key K) uint64 {
-	return c.hash(key)
+	return maphash.Comparable(c.seed, key)
 }
 
 // writeQueueOf returns the write-back worker for the key, to spread across any worker count.
@@ -403,14 +402,7 @@ func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 // hit as it stands. A miss is trusted only if no reclaim moved items during the walk (moveSeq even and unchanged);
 // otherwise getMoved walks again.
 func (c *Cache[K, V]) getMemory(key K) (V, bool) {
-	// The hash branch is written out here rather than taken from hash: this body is never inlined, so the branch
-	// costs nothing, and the word mixer inlines into the probe where a call to hash would not.
-	var keyHash uint64
-	if c.wordKeys {
-		keyHash = c.hasher.HashWord(key)
-	} else {
-		keyHash = c.hasher.HashSlow(key)
-	}
+	keyHash := maphash.Comparable(c.seed, key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
 	tagged := tagOf(keyHash)
 	seq := sh.moveSeq.Load()
@@ -652,11 +644,11 @@ func (c *Cache[K, V]) maybeGrow(sh *shard[K, V], t *itemstore.FlatHashMap[K, V])
 	if c.preallocated || sh.live<<growthShift < t.Len()*c.growthNum || int64(t.Len()) >= maxTableSlots {
 		return
 	}
-	fresh := itemstore.NewFlatHashMap[K, V](min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), c.hasher)
+	fresh := itemstore.NewFlatHashMap[K, V](min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), c.seed)
 	for pos := uint32(0); int(pos) < t.Len(); pos++ {
 		item := t.At(pos)
 		if metaWord := item.Metadata(); !empty(metaWord) && metaWord&itemstore.Dead == 0 {
-			fresh.InsertFresh(c.hash(item.Entry().Key), item)
+			fresh.InsertFresh(c.keyHash(item.Entry().Key), item)
 		}
 	}
 	sh.items.Store(fresh)
@@ -962,7 +954,7 @@ func (c *Cache[K, V]) iterateWithLife(yield func(K, V, time.Duration) bool) {
 			}
 		}
 		wrapped := func(pos uint32) bool {
-			return pos < lead && storage.Home(c.hash(entry.Key)) > pos
+			return pos < lead && storage.Home(c.keyHash(entry.Key)) > pos
 		}
 		for pos := uint32(0); pos < size; pos++ {
 			item := storage.At(pos)
