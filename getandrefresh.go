@@ -116,9 +116,9 @@ func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {
 // peekMemory is getMemory without the TTL rules: an expired value is returned instead of reclaimed and the reference
 // counter is left alone. A miss that overlapped a reclaim is probed again, the third time under the mutex.
 func (c *Cache[K, V]) peekMemory(key K) (V, bool) {
-	keyHash := c.hasher.Hash(key)
+	keyHash := c.hash(key)
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
-	tagged := itemstore.TagOf(keyHash)
+	tagged := tagOf(keyHash)
 	var entry itemstore.Entry[K, V]
 	var zero V
 	for attempt := 0; ; attempt++ {
@@ -128,7 +128,7 @@ func (c *Cache[K, V]) peekMemory(key K) (V, bool) {
 		groupEnd := (home | 7) + 1
 	probe:
 		for pos := home; ; pos++ {
-			if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+			if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
 				break probe
 			}
 			item := storage.At(pos)

@@ -56,6 +56,13 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **8-byte keys are hashed in place.** A key of 8 bytes without floats is mixed inline (two multiplies); everything
   else stays on `maphash`, whose 8-byte path is a runtime call that costs 2.3 ns to the mixer's 0.9. The seed is
   per cache, as before.
+- **The hot paths inline in user programs too.** A generic method of this package is compiled where it is
+  instantiated - in the user's module - and there the compiler could inline a helper from `internal/itemstore` only
+  if its body had reached the user through this package's export data, which a generic body does not carry. The tag,
+  the overflow bucket, the empty test, the queue node and the weight store were calls on every operation in every
+  program but this repository's own tests; `bridge.go` references each from an inlinable function of this package,
+  and the hash is chosen per key type in the probe body, where a branch is free. `GetHit` -16% on the benchmarks
+  module, which builds the way a user does.
 - **What the compaction costs, measured against the tombstone design in one session.** Reads are ahead (`GetHit`
   -13%, `Get` -21%, `GetMiss` -9%, `DeleteMiss` -19%) and so is every mixed workload (`Mixed90_10` -41%, parallel
   throughput -11% at 100% reads to -38% at 75%: the shard read line no longer bounces on every `Set`). Writes that

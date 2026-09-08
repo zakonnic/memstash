@@ -101,6 +101,7 @@ type Cache[K comparable, V any] struct {
 	// a handler pays one predicted branch off a hot cache line.
 	onDeletion func(key K, value V, cause DeletionCause)
 	hasher     itemstore.Hasher[K]
+	wordKeys   bool // the key type takes Hasher.HashWord: chosen once, so the hot paths branch on a field
 
 	// Coarse clock for cheap TTL checks: nowOff is the time since epoch in expireUnit steps, refreshed by a background
 	// ticker (started only when TTL > 0). Offsets are 18-bit values on a wrapping scale, so the unit adapts to the
@@ -232,6 +233,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		stop:              make(chan struct{}),
 		batchedGets:       getWorkerPool[K, V]{size: cfg.getBatchedBuffer(), workers: cfg.getBatchedWorkers()},
 	}
+	c.wordKeys = c.hasher.WordKeys()
 	if c.l2Cache == nil {
 		c.l2WritePolicy = WriteDisabled
 	}
@@ -339,12 +341,12 @@ func (c *Cache[K, V]) Wait() {
 // shardAndHash returns the key's shard and hash: the low bits pick the shard, the high bits seed the table probe,
 // so one hash serves both.
 func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
-	keyHash := c.hasher.Hash(key)
+	keyHash := c.hash(key)
 	return &c.shards[uint32(keyHash)&c.shardMask], keyHash
 }
 
 func (c *Cache[K, V]) keyHash(key K) uint64 {
-	return c.hasher.Hash(key)
+	return c.hash(key)
 }
 
 // writeQueueOf returns the write-back worker for the key, to spread across any worker count.
@@ -401,9 +403,16 @@ func (c *Cache[K, V]) GetFromMemory(key K) (V, bool) {
 // hit as it stands. A miss is trusted only if no reclaim moved items during the walk (moveSeq even and unchanged);
 // otherwise getMoved walks again.
 func (c *Cache[K, V]) getMemory(key K) (V, bool) {
-	keyHash := c.hasher.Hash(key)
+	// The hash branch is written out here rather than taken from hash: this body is never inlined, so the branch
+	// costs nothing, and the word mixer inlines into the probe where a call to hash would not.
+	var keyHash uint64
+	if c.wordKeys {
+		keyHash = c.hasher.HashWord(key)
+	} else {
+		keyHash = c.hasher.HashSlow(key)
+	}
 	sh := &c.shards[uint32(keyHash)&c.shardMask]
-	tagged := itemstore.TagOf(keyHash)
+	tagged := tagOf(keyHash)
 	seq := sh.moveSeq.Load()
 	storage := sh.items.GetStorage()
 	home := storage.Home(keyHash)
@@ -411,7 +420,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 	var entry itemstore.Entry[K, V]
 	var zero V
 	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+		if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
 			break // no key with this tag left the group: absent
 		}
 		item := storage.At(pos)
@@ -428,7 +437,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 				break // tag collision or a recycled slot
 			}
 			nowOff := c.nowOff.Load()
-			if !itemstore.Expired(metaWord, nowOff) {
+			if !expired(metaWord, nowOff) {
 				if c.refreshOnGet {
 					expireOff := uint32(metaWord & itemstore.ExpireMask >> itemstore.ExpireShift)
 					if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && item.TouchAndRefreshExpire(metaWord, newOff) {
@@ -455,7 +464,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 // getMoved settles a miss that overlapped a reclaim. It walks once more and, if the shard is still compacting, reads
 // under the mutex. It lives apart so getMemory stays one pass.
 func (c *Cache[K, V]) getMoved(sh *shard[K, V], keyHash uint64, key K) (V, bool) {
-	tagged := itemstore.TagOf(keyHash)
+	tagged := tagOf(keyHash)
 	var entry itemstore.Entry[K, V]
 	var zero V
 	seq := sh.moveSeq.Load()
@@ -463,7 +472,7 @@ func (c *Cache[K, V]) getMoved(sh *shard[K, V], keyHash uint64, key K) (V, bool)
 	home := storage.Home(keyHash)
 	groupEnd := (home | 7) + 1
 	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+		if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
 			break
 		}
 		item := storage.At(pos)
@@ -480,7 +489,7 @@ func (c *Cache[K, V]) getMoved(sh *shard[K, V], keyHash uint64, key K) (V, bool)
 				break
 			}
 			nowOff := c.nowOff.Load()
-			if !itemstore.Expired(metaWord, nowOff) {
+			if !expired(metaWord, nowOff) {
 				item.TouchWith(metaWord)
 				return entry.Value, true
 			}
@@ -508,7 +517,7 @@ func (c *Cache[K, V]) getLocked(sh *shard[K, V], keyHash uint64, key K) (V, bool
 		return zero, false
 	}
 	metaWord := item.Metadata()
-	if itemstore.Expired(metaWord, c.nowOff.Load()) {
+	if expired(metaWord, c.nowOff.Load()) {
 		return zero, false
 	}
 	item.TouchWith(metaWord)
@@ -585,19 +594,19 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 
 	sh.mu.Lock()
 	storage := sh.items.GetStorage()
-	tagged := itemstore.TagOf(keyHash)
+	tagged := tagOf(keyHash)
 	home := storage.Home(keyHash)
 	weightDelta := weight
 	for pos := home; ; pos++ {
 		item := storage.At(pos)
 		metaWord := item.Metadata()
-		if itemstore.Empty(metaWord) {
+		if empty(metaWord) { // deletions compact their runs, so the key cannot live past an empty slot
 			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff,
 				storage.Dist(home, storage.Wrap(pos)), sh.sweepParity)
 			storage.NoteDisplaced(keyHash, pos)
 			storage.MarkChain(home, storage.Wrap(pos))
 			sh.live++
-			sh.policy.Add(itemstore.NewQNode(keyHash, uint32(weight)))
+			sh.policy.Add(newQNode(keyHash, uint32(weight)))
 			c.maybeGrow(sh, storage)
 			break
 		}
@@ -620,7 +629,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 		break
 	}
 	if weightDelta != 0 { // an overwrite of the same weight - the common one - leaves the total alone
-		itemstore.StoreI64(&sh.weight, sh.weight.Load()+weightDelta)
+		storeI64(&sh.weight, sh.weight.Load()+weightDelta)
 	}
 	if sh.weight.Load() > sh.cap {
 		c.evictShard(sh, &deletions)
@@ -646,8 +655,8 @@ func (c *Cache[K, V]) maybeGrow(sh *shard[K, V], t *itemstore.FlatHashMap[K, V])
 	fresh := itemstore.NewFlatHashMap[K, V](min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), c.hasher)
 	for pos := uint32(0); int(pos) < t.Len(); pos++ {
 		item := t.At(pos)
-		if metaWord := item.Metadata(); !itemstore.Empty(metaWord) && metaWord&itemstore.Dead == 0 {
-			fresh.InsertFresh(c.hasher.Hash(item.Entry().Key), item)
+		if metaWord := item.Metadata(); !empty(metaWord) && metaWord&itemstore.Dead == 0 {
+			fresh.InsertFresh(c.hash(item.Entry().Key), item)
 		}
 	}
 	sh.items.Store(fresh)
@@ -668,7 +677,7 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 		item := storage.At(victimIdx)
 		// The policy hands over expired items too; the meta word says which of the two it was.
 		cause := CauseEviction
-		if itemstore.Expired(item.Metadata(), nowOff) {
+		if expired(item.Metadata(), nowOff) {
 			cause = CauseExpiration
 		}
 		c.killAt(sh, victimIdx, item, cause, deletions)
@@ -682,7 +691,7 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K) {
 	idx, item, ok := c.findSlot(sh, h, key)
 	// Recheck under the lock: the TTL may have been refreshed, and a reclaim may have moved the item.
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
-	if ok && itemstore.Expired(item.Metadata(), c.nowOff.Load()) {
+	if ok && expired(item.Metadata(), c.nowOff.Load()) {
 		c.killAt(sh, idx, item, CauseExpiration, &deletions)
 	}
 	c.noteStale(sh)
@@ -696,7 +705,7 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K) {
 // behind the shard's writers. A Set racing the probe is the Get-racing-Set window: the delete lands before it. A miss
 // that overlapped a reclaim is retried; after three the answer is "present", and the locked path settles it.
 func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
-	tagged := itemstore.TagOf(keyHash)
+	tagged := tagOf(keyHash)
 	var entry itemstore.Entry[K, V]
 	for attempt := 0; ; attempt++ {
 		seq := sh.moveSeq.Load()
@@ -705,7 +714,7 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 		groupEnd := (home | 7) + 1
 	probe:
 		for pos := home; ; pos++ {
-			if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+			if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
 				break probe
 			}
 			item := storage.At(pos)
@@ -744,7 +753,7 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 func (c *Cache[K, V]) killAt(sh *shard[K, V], idx uint32, item *itemstore.Item[K, V], cause DeletionCause,
 	deletions *[]deletion[K, V]) {
 	entry := item.Entry()
-	itemstore.StoreI64(&sh.weight, sh.weight.Load()-c.rawCost(entry.Key, entry.Value))
+	storeI64(&sh.weight, sh.weight.Load()-c.rawCost(entry.Key, entry.Value))
 	if c.onDeletion != nil {
 		c.addDeletion(deletions, entry.Key, entry.Value, cause)
 	}
@@ -759,11 +768,11 @@ func (c *Cache[K, V]) killAt(sh *shard[K, V], idx uint32, item *itemstore.Item[K
 // under the shard mutex.
 func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, *itemstore.Item[K, V], bool) {
 	storage := sh.items.GetStorage()
-	tagged := itemstore.TagOf(keyHash)
+	tagged := tagOf(keyHash)
 	home := storage.Home(keyHash)
 	groupEnd := (home | 7) + 1
 	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.OverflowedTag(home, itemstore.OverflowBucket(keyHash)) {
+		if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
 			return 0, nil, false
 		}
 		item := storage.At(pos)
@@ -947,18 +956,18 @@ func (c *Cache[K, V]) iterateWithLife(yield func(K, V, time.Duration) bool) {
 		// The leading run ends at the first empty slot; no item past it can be homed past its slot.
 		lead := size
 		for pos := uint32(0); pos < size; pos++ {
-			if itemstore.Empty(storage.At(pos).Metadata()) {
+			if empty(storage.At(pos).Metadata()) {
 				lead = pos
 				break
 			}
 		}
 		wrapped := func(pos uint32) bool {
-			return pos < lead && storage.Home(c.hasher.Hash(entry.Key)) > pos
+			return pos < lead && storage.Home(c.hash(entry.Key)) > pos
 		}
 		for pos := uint32(0); pos < size; pos++ {
 			item := storage.At(pos)
 			metaWord := item.Metadata()
-			if itemstore.Empty(metaWord) || metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff) {
+			if empty(metaWord) || metaWord&itemstore.Dead != 0 || expired(metaWord, nowOff) {
 				continue
 			}
 			if !item.SnapshotInto(&entry, metaWord) || wrapped(pos) {
@@ -971,10 +980,10 @@ func (c *Cache[K, V]) iterateWithLife(yield func(K, V, time.Duration) bool) {
 		for pos := uint32(0); pos < lead; pos++ {
 			item := storage.At(pos)
 			metaWord := item.Metadata()
-			if itemstore.Empty(metaWord) {
+			if empty(metaWord) {
 				break
 			}
-			if metaWord&itemstore.Dead != 0 || itemstore.Expired(metaWord, nowOff) {
+			if metaWord&itemstore.Dead != 0 || expired(metaWord, nowOff) {
 				continue
 			}
 			if !item.SnapshotInto(&entry, metaWord) || !wrapped(pos) {

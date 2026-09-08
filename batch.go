@@ -145,12 +145,12 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 	// walk already loaded the line the validation stage needs.
 	for i := range keys {
 		t := g.table[i]
-		tagged := itemstore.TagOf(g.keyHash[i])
+		tagged := tagOf(g.keyHash[i])
 		home := g.pos[i]
 		groupEnd := (home | 7) + 1
 		metaWord, pos := g.meta[i], home
 		for {
-			if pos == groupEnd && !t.OverflowedTag(home, itemstore.OverflowBucket(g.keyHash[i])) {
+			if pos == groupEnd && !t.OverflowedTag(home, overflowBucket(g.keyHash[i])) {
 				g.item[i] = nil // end of the probe chain: a definite miss
 				break
 			}
@@ -187,7 +187,7 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 			continue
 		}
 		nowOff := c.nowOff.Load()
-		if itemstore.Expired(metaWord, nowOff) {
+		if expired(metaWord, nowOff) {
 			c.dropExpired(g.sh[i], g.keyHash[i], keys[i])
 			g.hit[i] = false
 			continue
