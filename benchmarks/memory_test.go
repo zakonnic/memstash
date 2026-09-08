@@ -51,7 +51,7 @@ func measureFootprint(b *testing.B, capacity int64) *memstash.Cache[uint64, uint
 
 	c, err := memstash.New[uint64, uint64](
 		memstash.WithMemoryCapacity(capacity),
-		// memstash.WithPreallocatedSize(),
+		memstash.WithPreallocatedSize(),
 	)
 	if err != nil {
 		b.Fatal(err)
