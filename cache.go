@@ -60,6 +60,11 @@ const (
 	maxTableSlots = int64(1) << 32
 )
 
+// requires64BitPlatform is what a 32-bit build fails on: table sizes and the shard layout assume 64-bit words.
+const requires64BitPlatform = 1 << 63
+
+const _ uint = requires64BitPlatform
+
 // shard is an independent segment of the first level: a key is always served by the same shard (by hash), and all
 // mutations for that key are serialized by the shard mutex. Readers never take it: they probe the atomically
 // published table and verify candidates against the items themselves.

@@ -76,9 +76,9 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 go get github.com/zakonnic/memstash
 ```
 
-Memstash requires Go 1.24+ and has a single core dependency
+Memstash requires Go 1.24+ on a 64-bit platform and has a single core dependency
 ([xsync](https://github.com/puzpuzpuz/xsync)). Client SDKs are pulled in only by the specific L2
-adapter module you import.
+adapter module you import. A 32-bit build (386, arm, mips) stops with a compile error on purpose.
 
 ## Usage
 

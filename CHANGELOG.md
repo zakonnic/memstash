@@ -9,6 +9,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 
 ### Changed
 
+- **64-bit platforms only.** A build for 386, arm or mips now stops with a compile error naming
+  `requires64BitPlatform`. Up to 0.9.8 the package compiled there, but not safely: an in-place overwrite of an 8-byte
+  value - a string, an interface, an int64 - skipped the generation bracket as if it were one machine word, so a
+  lock-free read could see it half-written, and for a string or an interface that pairs one value's pointer with the
+  other's length or type. Table sizes and the shard layout were only ever written for 64-bit words.
 - **The first level never holds a tombstone.** A deletion - `Delete`, an eviction, a lazy TTL removal - compacts its
   probe run on the spot with backward-shift deletion (Knuth's Algorithm R, taking the farthest eligible item first,
   which halves the moves), so the table always holds exactly what inserting the live keys into a fresh table would:

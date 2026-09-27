@@ -12,6 +12,9 @@ import (
 
 // TestItemSize pins the item footprints: the meta word plus the Entry and nothing else.
 func TestItemSize(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) != 8 {
+		t.Skip("64-bit footprints; this package builds on 386 only to run item_other.go")
+	}
 	assert.EqualValues(t, 24, unsafe.Sizeof(Item[uint64, uint64]{}))
 	assert.EqualValues(t, 48, unsafe.Sizeof(Item[string, []byte]{}))
 }
@@ -31,8 +34,8 @@ func TestSnapshotSeqlock(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "new", entry.Value)
 
-	word := NewFlatHashMap[uint64, uint64](64, maphash.MakeSeed()).At(0)
-	word.Publish(Entry[uint64, uint64]{Key: 1, Value: 10}, 0, 0, 0, false)
+	word := NewFlatHashMap[uint64, int](64, maphash.MakeSeed()).At(0)
+	word.Publish(Entry[uint64, int]{Key: 1, Value: 10}, 0, 0, 0, false)
 	wordBefore := word.Metadata()
 	word.SetValue(20)
 	assert.Equal(t, wordBefore, word.Metadata(), "a single-word overwrite must not disturb the meta word")
