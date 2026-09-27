@@ -2,120 +2,129 @@ package itemstore
 
 import (
 	"testing"
-	"unsafe"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestEvictQueueBytes verifies the queue's byte accounting through a full grow/drain cycle: one chunk per
-// queueChunkSize pushes, and on drain the first consumed chunk stays as the spare while the last one is reused from
-// the beginning (see Pop's doc comment).
-func TestEvictQueueBytes(t *testing.T) {
-	var q EvictQueue
-	assert.Zero(t, q.Bytes(), "an empty queue has no chunks")
-
-	chunkBytes := int64(unsafe.Sizeof(queueChunk{}))
-
-	for i := 0; i < queueChunkSize; i++ {
-		q.Push(QNode{})
+func (m *model) queued(queue uint) []uint64 {
+	var keys []uint64
+	for idx, ok := m.t.Oldest(queue); ok; idx, ok = m.t.Newer(idx) {
+		keys = append(keys, m.t.At(idx).Entry().Key)
 	}
-	assert.Equal(t, chunkBytes, q.Bytes(), "exactly one chunk after queueChunkSize pushes")
-
-	q.Push(QNode{})
-	assert.Equal(t, 2*chunkBytes, q.Bytes(), "a push beyond queueChunkSize allocates a second chunk")
-
-	for i := 0; i < queueChunkSize+1; i++ {
-		_, ok := q.Pop()
-		require.True(t, ok)
-	}
-	assert.Equal(t, 2*chunkBytes, q.Bytes(), "the drained chunk is kept as the spare, the last one for reuse")
+	return keys
 }
 
-// TestSweepStep verifies that a sweep pass drops exactly the nodes whose keys are gone, preserves the FIFO order of
-// the survivors, hands every dropped node to onDrop, and spreads over calls when given a budget.
-func TestSweepStep(t *testing.T) {
-	m := newModel(64, 11)
-	var items StorageProxy[uint64, uint64]
-	items.Store(m.t)
-	var q EvictQueue
-	var scratch []ShiftEntry
-	for key := uint64(1); key <= 10; key++ {
-		m.insert(key, key)
-		q.Push(NewQNode(m.hash(key), 1))
-	}
-	for key := uint64(2); key <= 10; key += 2 {
-		m.remove(key, &scratch)
-	}
-
-	var dropped []uint64
-	onDrop := func(node QNode) {
-		for key := uint64(1); key <= 10; key++ {
-			if NewQNode(m.hash(key), 1) == node {
-				dropped = append(dropped, key)
-			}
+func (m *model) slotOf(key uint64) uint32 {
+	for idx := range uint32(m.t.Len()) {
+		if item := m.t.At(idx); !Empty(item.Metadata()) && item.Entry().Key == key {
+			return idx
 		}
 	}
-	// A budget of 3 needs four calls for ten nodes; the pass reports more work until the last one.
-	q.BeginSweep()
-	calls := 0
-	for more := true; more; calls++ {
-		more = SweepStep(&q, &items, 3, true, onDrop)
-	}
-	assert.Equal(t, 4, calls, "ten nodes at three per call")
-	assert.Equal(t, []uint64{2, 4, 6, 8, 10}, dropped, "every node of a gone key is dropped, in order")
-
-	survivors := make([]uint64, 0, q.Len())
-	for {
-		node, ok := q.Pop()
-		if !ok {
-			break
-		}
-		item, _, found := items.Find(node)
-		require.True(t, found)
-		survivors = append(survivors, item.Entry().Key)
-	}
-	assert.Equal(t, []uint64{1, 3, 5, 7, 9}, survivors, "live nodes keep their FIFO order")
+	panic("key not in the table")
 }
 
-// TestEvictQueueRange verifies that Range visits every queued node in FIFO order without disturbing the queue,
-// across chunk boundaries and after partial drains.
-func TestEvictQueueRange(t *testing.T) {
-	var q EvictQueue
-	total := queueChunkSize + 10
-	for i := 0; i < total; i++ {
-		q.Push(NewQNode(uint64(i)<<32, 1))
+func (m *model) handKey() uint64 {
+	idx, ok := m.t.Hand()
+	if !ok {
+		return 0
 	}
-	for i := 0; i < 5; i++ { // shift the head into the chunk
-		_, ok := q.Pop()
-		assert.True(t, ok)
-	}
-
-	var seen []uint32
-	q.Range(func(node QNode) { seen = append(seen, node.home) })
-	assert.Len(t, seen, total-5)
-	assert.EqualValues(t, 5, seen[0], "Range must start at the queue head")
-	assert.EqualValues(t, total-1, seen[len(seen)-1], "Range must end at the queue tail")
-	assert.Equal(t, total-5, q.Len(), "Range must not consume the queue")
+	return m.t.At(idx).Entry().Key
 }
 
-// TestFindResolvesByIdentity pins Find: a node resolves its own key wherever the item sits, and a node of a key that
-// left resolves nothing - even when another key with the same tag byte sits on its walk.
-func TestFindResolvesByIdentity(t *testing.T) {
-	m := newModel(64, 5)
-	var scratch []ShiftEntry
-	for key := uint64(1); key <= 40; key++ {
+func TestRequeueBetweenQueues(t *testing.T) {
+	m := newModel(64, 1)
+	for key := uint64(1); key <= 5; key++ {
 		m.insert(key, key)
 	}
-	for key := uint64(1); key <= 40; key++ {
-		item, _, ok := m.t.Find(NewQNode(m.hash(key), 1))
-		require.True(t, ok, "key %d", key)
-		require.Equal(t, key, item.Entry().Key)
+	m.t.Requeue(1, m.slotOf(2))
+	m.t.Requeue(1, m.slotOf(4))
+	m.t.Requeue(0, m.slotOf(1))
+	require.Equal(t, []uint64{3, 5, 1}, m.queued(0))
+	require.Equal(t, []uint64{2, 4}, m.queued(1))
+	for key := range m.live {
+		inMain := m.t.At(m.slotOf(key)).Metadata()&InMainQueue != 0
+		require.Equal(t, key == 2 || key == 4, inMain, "key %d: InMainQueue must follow the queue", key)
 	}
-	for key := uint64(1); key <= 40; key += 3 {
-		m.remove(key, &scratch)
-		_, _, ok := m.t.Find(NewQNode(m.hash(key), 1))
-		require.False(t, ok, "key %d is gone but Find still resolves its node", key)
+	m.t.Requeue(0, m.slotOf(4))
+	require.Zero(t, m.t.At(m.slotOf(4)).Metadata()&InMainQueue, "back in queue 0, the bit goes")
+}
+
+// TestHandFollowsItsItem: the hand starts at the front, wraps past the back, steps on when its item is removed and
+// moves along when a compaction moves its item.
+func TestHandFollowsItsItem(t *testing.T) {
+	m := newModel(64, 2)
+	var scratch []ShiftEntry
+	for key := uint64(1); key <= 3; key++ {
+		m.insert(key, key)
 	}
+	require.EqualValues(t, 1, m.handKey())
+	m.t.AdvanceHand()
+	m.t.AdvanceHand()
+	require.EqualValues(t, 3, m.handKey())
+	m.t.AdvanceHand()
+	require.EqualValues(t, 1, m.handKey(), "past the back the hand wraps to the front")
+
+	m.t.AdvanceHand()
+	m.remove(2, &scratch)
+	require.EqualValues(t, 3, m.handKey(), "the hand steps off a removed item onto the next one")
+
+	// Park the hand on a key displaced by a neighbor homed at the same slot, then delete the neighbor: the key moves
+	// home and the hand must move with it.
+	var near, far uint64
+	for key := uint64(100); far == 0; key++ {
+		if home := m.t.Home(m.hash(key)); home > 40 && home < 50 && m.t.Home(m.hash(key+1<<32)) == home {
+			near, far = key, key+1<<32
+		}
+	}
+	m.insert(near, near)
+	m.insert(far, far)
+	for m.handKey() != far {
+		m.t.AdvanceHand()
+	}
+	moved := m.slotOf(far)
+	m.remove(near, &scratch)
+	require.NotEqual(t, moved, m.slotOf(far), "the delete must have moved the displaced key home")
+	require.Equal(t, far, m.handKey())
 	m.check(t)
+}
+
+func TestGrowKeepsQueuesAndHand(t *testing.T) {
+	m := newModel(64, 3)
+	for key := uint64(1); key <= 40; key++ {
+		m.insert(key, key)
+	}
+	for key := uint64(2); key <= 40; key += 3 {
+		m.t.Requeue(1, m.slotOf(key))
+	}
+	for m.handKey() != 7 {
+		m.t.AdvanceHand()
+	}
+	queues := [][]uint64{m.queued(0), m.queued(1)}
+
+	m.t = m.t.Grow(256, true)
+	require.Equal(t, queues, [][]uint64{m.queued(0), m.queued(1)})
+	require.EqualValues(t, 7, m.handKey())
+	for key := range m.live {
+		_, _, ok := m.lookup(key)
+		require.True(t, ok, "key %d lost in the growth", key)
+	}
+}
+
+// TestGrowOutOfOrderKeepsMembership: a growth that does not keep the order still keeps every item in its queue.
+func TestGrowOutOfOrderKeepsMembership(t *testing.T) {
+	m := newModel(64, 4)
+	for key := uint64(1); key <= 40; key++ {
+		m.insert(key, key)
+	}
+	for key := uint64(2); key <= 40; key += 3 {
+		m.t.Requeue(1, m.slotOf(key))
+	}
+	queues := [][]uint64{m.queued(0), m.queued(1)}
+
+	m.t = m.t.Grow(256, false)
+	require.ElementsMatch(t, queues[0], m.queued(0))
+	require.ElementsMatch(t, queues[1], m.queued(1))
+	for _, key := range queues[1] {
+		require.NotZero(t, m.t.At(m.slotOf(key)).Metadata()&InMainQueue, "key %d", key)
+	}
 }

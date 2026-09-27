@@ -7,54 +7,64 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
-// TestS3FIFOPolicyBytes verifies that Bytes is the sum of its parts (the fixed struct, small, main and the ghost
-// table) by comparing it against those unexported fields directly.
 func TestS3FIFOPolicyBytes(t *testing.T) {
 	pool := newArena()
 	p := NewS3FIFO(&pool.items, 1000, 100)
-	structBytes := int64(unsafe.Sizeof(*p))
-	// The ghost table pre-allocates all of its slots at construction (unlike the queues, which grow chunks lazily),
-	// so a freshly built policy already reports its ghost size, not zero.
-	assert.Equal(t, structBytes+p.ghost.bytes(), p.Bytes(),
-		"empty policy: only the struct itself and the pre-allocated ghost table count")
-
-	for i := 0; i < 200; i++ {
-		addFromPool(p, pool, fmt.Sprintf("k%d", i))
-	}
-	for i := 0; i < 150; i++ {
-		_, ok := p.Evict(0)
-		require.True(t, ok, "eviction %d: small must still have items to evict", i)
-	}
-
-	assert.Equal(t, structBytes+p.small.Bytes()+p.main.Bytes()+p.ghost.bytes(), p.Bytes(),
-		"S3FIFOPolicy.Bytes must be the sum of the struct, small, main and ghost")
-	assert.Positive(t, p.Bytes())
+	assert.Equal(t, int64(unsafe.Sizeof(*p))+p.ghost.bytes(), p.Bytes())
+	assert.Positive(t, p.ghost.bytes(), "the ghost table is allocated up front")
 }
 
 // TestS3FIFOGhostPromotion verifies the ghost path end to end: a key evicted from small (untouched, so it becomes a
-// victim) is remembered by ghost, and re-adding it sends the new node straight to main.
+// victim) is remembered by ghost, and re-adding it sends it straight to main.
 func TestS3FIFOGhostPromotion(t *testing.T) {
 	pool := newArena()
 	p := NewS3FIFO(&pool.items, 10, 100)
 
-	// Fill small past its capacity (10/10 = 1) and evict: the untouched head becomes a victim and goes to ghost.
-	addFromPool(p, pool, "victim")
-	addFromPool(p, pool, "other")
-	idx, ok := p.Evict(0)
+	// Fill small past its capacity (10/10 = 1) and evict: the untouched front becomes a victim and goes to ghost.
+	pool.add(p, "victim")
+	pool.add(p, "other")
+	key, ok := pool.evict(p)
 	require.True(t, ok)
-	require.Equal(t, "victim", pool.keyAt(idx), "the untouched head of small must be the victim")
-	pool.release(idx)
+	require.Equal(t, "victim", key, "the untouched front of small must be the victim")
 
-	mainBefore := p.main.Len()
-	addFromPool(p, pool, "victim")
-	assert.Equal(t, mainBefore+1, p.main.Len(), "a ghost hit must route the key straight to main")
+	pool.add(p, "victim")
+	assert.Equal(t, []string{"victim"}, pool.queued(mainQueue), "a ghost hit must route the key straight to main")
+	assert.EqualValues(t, 1, p.weight, "an item sent to main never weighs on small")
 
-	// The hit consumed the ghost entry: the next add of the same key goes to small again.
-	smallBefore := p.small.Len()
-	addFromPool(p, pool, "victim")
-	assert.Equal(t, smallBefore+1, p.small.Len(), "a ghost entry is removed on hit")
+	// The hit consumed the ghost entry: the next insert of the key goes to small again.
+	victimIdx, _ := pool.slotOf("victim")
+	pool.release(p, victimIdx)
+	pool.add(p, "victim")
+	assert.Equal(t, []string{"other", "victim"}, pool.queued(0), "a ghost entry is removed on hit")
+}
+
+// TestS3FIFOSmallWeight follows small's weight through every way an item leaves it: promotion, eviction, removal.
+func TestS3FIFOSmallWeight(t *testing.T) {
+	pool := newArena()
+	p := NewS3FIFO(&pool.items, 50, 100) // smallCap = 5
+	for i := range 8 {
+		pool.add(p, fmt.Sprintf("k%d", i))
+	}
+	require.EqualValues(t, 8, p.weight)
+
+	pool.touch("k0")
+	key, ok := pool.evict(p)
+	require.True(t, ok)
+	assert.Equal(t, "k1", key, "the touched front is promoted, the next one evicted")
+	assert.Equal(t, []string{"k0"}, pool.queued(mainQueue))
+	assert.EqualValues(t, 6, p.weight)
+
+	idx, _ := pool.slotOf("k0")
+	p.Reweigh(idx, 3)
+	assert.EqualValues(t, 6, p.weight, "reweighing a main item leaves small alone")
+	idx, _ = pool.slotOf("k5")
+	p.Reweigh(idx, 3)
+	assert.EqualValues(t, 9, p.weight)
+	p.Remove(itemstore.QNode{Idx: idx, Cost: 4}) // the cache hands over the weight it accounts the item with
+	assert.EqualValues(t, 5, p.weight)
 }
 
 // TestGhostTable exercises the fingerprint table directly: push/hit round trip, remove-on-hit, aging past the

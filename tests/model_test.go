@@ -103,8 +103,7 @@ func TestTombstoneChurnBounded(t *testing.T) {
 				require.True(t, ok, "live key %d lost", i)
 				require.Equal(t, i, value)
 			}
-			// The structures may hold slack (pool freelist, queue chunks, tombstones between rebuilds), but must not
-			// grow in proportion to the 60k operations.
+			// The structures must not grow in proportion to the 60k operations.
 			require.Less(t, c.TotalSize(), baseline*8+1<<20,
 				"first-level structures grew unboundedly under delete churn (baseline %d, now %d)", baseline, c.TotalSize())
 		})

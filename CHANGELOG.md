@@ -24,21 +24,22 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **No same-size rebuilds.** With nothing to purge, a preallocated table is never allocated again after `New`, and a
   non-preallocated one only grows; the transient second table of a purge is gone. `Stats.TablePurges` is always 0
   and will be removed with the next stats revision.
-- **Queue nodes address keys, not slots.** `QNode` carries 44 bits of the key's hash and the weight (`Cost()`,
-  20-bit float encoding, exact below 128 Ki), and a policy resolves a node to its item with `Items.Find`, which
-  reads no key: the home slot, twelve tag bits and the distance kept in the meta word identify the item, and only a
-  candidate with a reference bit set, or a second candidate, is confirmed by its hash. `Items.FindExact` confirms
-  every candidate and is for the one decision a twin pair (same home slot, same twelve bits: once in ~4096 such
-  keys) would corrupt - dropping a node as a duplicate. Growth no longer walks the queues. `EvictionPolicy` loses
-  `Rebuild`, `Sweep` becomes `Sweep(limit int, parity bool) (more bool)` and works in slices driven by the removals,
-  and `Evict` must skip the nodes `Find` cannot resolve. A custom policy written against `Items.At` and `Rebuild` has
-  to be updated.
-- **A removal leaves its node behind, and the sweep is what collects it.** Nothing links an item back to its node, so
-  `Delete` cannot take it out, and the reinsertion of a deleted key pushes a second one. The sweep now keeps the one
-  node each item is entitled to and drops the rest - stale and duplicate alike - which bounds the queues at twice the
-  live count on the invalidate-then-reload pattern that would otherwise grow them without end. It starts on the queue
-  length rather than a count of removals, so a cache at capacity, where eviction already drops what it pops, sweeps
-  not at all.
+- **The eviction queues run through the table.** Every slot carries its place in its eviction queue - `prev`/`next`,
+  8 bytes in an array beside the items - and a compaction that moves an item moves its place along, so a policy
+  names its victim by slot index and the cache reads it directly, with no lookup. The cache enqueues every new item
+  at the back of queue 0 and removes every departing one on the spot: nothing is left behind for a sweep, a
+  delete-then-set leaves no duplicate, and no item can drop out of the queues and become unevictable. A policy moves
+  items between the `EvictionQueues` queues (`Items.Oldest`, `Newer`, `Requeue`, the `ItemInMainQueue` bit, and a
+  scan `Hand` that follows its item through moves and removals). `EvictionPolicy` is
+  `Add`/`Remove`/`Reweigh`/`Evict`/`Bytes`: `QNode{Idx, Cost}`, `Add` and `Evict` are as in 0.9.8; `Len`, `Sweep`
+  and `Rebuild` are gone; `Remove` hears of every departing item while it is still queued and `Reweigh` of every
+  overwrite that changes a weight, so S3-FIFO's small and W-TinyLFU's window weigh exactly what they hold. `Items`
+  also gives `Cost` and `Fingerprint` - a key's home slot and tag bits, which S3-FIFO's ghost table keys on without
+  hashing the key; W-TinyLFU's sketch hashes the key as in 0.9.8, since
+  a fingerprint changes when the table grows and the sketch's history must not. The links take 8 bytes per slot: a
+  preallocated 100M-item `uint64` cache measures 43.7 bytes per item instead of 41.0 (heap 4.1 GiB instead of 3.9);
+  a table that is not preallocated runs at a lower load and pays ~8 bytes per item more (+12-14% at 1M items), except
+  under SIEVE, which drops its own 16-byte node array and comes out ~3% smaller.
 - **The item's meta word carries its distance from its home slot**, so a compaction reads the run it moves instead of
   rehashing every key it passes - the difference between 1.0 us and 0.6 us per delete on 100M string keys. It costs
   the six generation bits the seqlock had to spare (22 left, 2M writes to one slot before a stalled reader could
@@ -68,15 +69,14 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   155 calls left go to functions that are not inlinable anywhere. The instance adds nothing to a program's binary and
   ~0.15 s to this package's compile. On the benchmarks module, which builds the way a user does: `GetHit` -16%, `Set`
   and `Delete` -4% to -6%, the reads and writes of `Mixed90_10` unchanged.
-- **What the compaction costs, measured against the tombstone design in one session.** Reads are ahead (`GetHit`
-  -13%, `Get` -21%, `GetMiss` -9%, `DeleteMiss` -19%) and so is every mixed workload (`Mixed90_10` -41%, parallel
-  throughput -11% at 100% reads to -38% at 75%: the shard read line no longer bounces on every `Set`). Writes that
-  remove still pay: an eviction resolves its victim through the table instead of by index and compacts the run it
-  leaves, and a delete-then-set of the same key is a full removal, a full insertion and a sweep step where the old
-  design resurrected the item and its node in place. `Set` at capacity costs +17% (serial +20%) and the
-  `Delete`+`Set` pair +124% on the micro-benchmarks - the latter a lock convoy on one Zipf-hot shard, where the pair
-  serially costs 25% less than before; both are the price of a table that never carries a tombstone and never
-  rebuilds.
+- **What the compaction costs.** Measured against the tombstone design: reads are ahead (`GetHit` -13%, `Get` -21%,
+  `GetMiss` -9%, `DeleteMiss` -19%) and so is every mixed workload (`Mixed90_10` -41%, parallel throughput -11% at
+  100% reads to -38% at 75%: the shard read line no longer bounces on every `Set`). Writes that remove still pay for a
+  table that never holds a tombstone: `Set` at capacity costs +17%, and the `Delete`+`Set` pair of one hot key 48 ns
+  against 34 ns, where the old design resurrected the item in place. Filling a cache that is not preallocated costs
+  more too: 8M items into one shard +8% on the inserts alone and +11% with the table growing under them. A growth
+  after the first eviction carries the eviction queues over in order; one before it, while the queues hold nothing
+  but insertion order, queues the items in their new slot order and spares that pass. Hit rates are unchanged.
 
 ### Fixed
 

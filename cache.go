@@ -75,22 +75,19 @@ type shard[K comparable, V any] struct {
 	// moveSeq is odd while a reclaim moves items. A lock-free probe that misses checks it was even and unchanged;
 	// otherwise a key may have crossed the probe, and the miss is not trusted.
 	moveSeq atomic.Uint32
-	_       [52]byte
+	_       [44]byte
 
-	mu       sync.Mutex
-	policy   EvictionPolicy[K, V]
-	weight   atomic.Int64
-	cap      int64
-	live     int  // alive items; guarded by mu
-	sweeping bool // a sweep pass is in progress: every removal advances it by sweepBudget nodes
-	removals int  // removals since the last look at the queue length; guarded by mu
-	// sweepParity alternates with each pass and is what an item is stamped with when a pass keeps its node (see
-	// EvictionPolicy.Sweep). An insert stamps the current one, so a key inserted between passes reads as unaccounted
-	// in the next.
-	sweepParity bool
-	scratch     []itemstore.ShiftEntry // Reclaim's buffer for the run it compacts; guarded by mu
+	mu      sync.Mutex
+	policy  EvictionPolicy[K, V]
+	weight  atomic.Int64
+	cap     int64
+	live    int                    // alive items; guarded by mu
+	scratch []itemstore.ShiftEntry // Reclaim's buffer for the run it compacts; guarded by mu
+	// evicted is set once the policy has picked a victim. From then on its queues carry more than insertion order,
+	// and growth must keep the queue order. Guarded by mu.
+	evicted bool
 
-	_ [32]byte
+	_ [55]byte
 }
 
 // Cache is a two-level cache.
@@ -255,6 +252,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 			slots = preallocSlots(sh.cap, cfg.preallocRatio())
 		}
 		sh.items.Store(itemstore.NewFlatHashMap[K, V](slots, c.seed))
+		sh.items.SetCostFunc(cfg.CostFunc)
 		if cfg.CustomPolicy != nil {
 			sh.policy = cfg.CustomPolicy(&sh.items, sh.cap)
 			if sh.policy == nil {
@@ -598,12 +596,13 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 		item := storage.At(pos)
 		metaWord := item.Metadata()
 		if empty(metaWord) { // deletions compact their runs, so the key cannot live past an empty slot
-			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff,
-				storage.Dist(home, storage.Wrap(pos)), sh.sweepParity)
+			idx := storage.Wrap(pos)
+			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff, storage.Dist(home, idx))
 			storage.NoteDisplaced(keyHash, pos)
-			storage.MarkChain(home, storage.Wrap(pos))
+			storage.MarkChain(home, idx)
+			storage.Enqueue(0, idx)
 			sh.live++
-			sh.policy.Add(newQNode(keyHash, uint32(weight)))
+			sh.policy.Add(itemstore.QNode{Idx: idx, Cost: uint32(weight)})
 			c.maybeGrow(sh, storage)
 			break
 		}
@@ -615,7 +614,9 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 			continue
 		}
 		// Overwrite in place; the old value is read for the weight delta before the store lands.
-		weightDelta = weight - c.rawCost(key, entry.Value)
+		if weightDelta = weight - c.rawCost(key, entry.Value); weightDelta != 0 {
+			sh.policy.Reweigh(storage.Wrap(pos), weightDelta)
+		}
 		if c.onDeletion != nil {
 			c.addDeletion(&deletions, key, entry.Value, CauseReplacement)
 		}
@@ -637,35 +638,26 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	}
 }
 
-// maybeGrow replaces the shard's table with a bigger one once live items pass the growth threshold - the table
-// holds nothing else, since a deletion compacts its run on the spot. Items are re-inserted in table order into a
-// table nobody reads yet; readers finish on the superseded one, and a probe racing the swap may return a value as of
-// the copy moment - the documented Get-racing-Set window. The queues need no attention: nodes address keys, not
-// slots. Called under the shard mutex.
+// maybeGrow replaces the shard's table with a bigger one once the live items pass the growth threshold. The items
+// are copied into a table nobody reads yet, then the pointer is swapped: a probe still on the old table sees the
+// cache as of the copy, the Get-racing-Set window.
 //
-// A preallocated cache never grows: its table already holds the whole capacity, so a live count past the line would
-// mean the capacity itself was exceeded, and growing would silently double a footprint the caller asked for up front.
+// A preallocated table never grows: it already fits the whole capacity, and growing would double a footprint the
+// caller sized up front.
 func (c *Cache[K, V]) maybeGrow(sh *shard[K, V], t *itemstore.FlatHashMap[K, V]) {
 	if c.preallocated || sh.live<<growthShift < t.Len()*c.growthNum || int64(t.Len()) >= maxTableSlots {
 		return
 	}
-	fresh := itemstore.NewFlatHashMap[K, V](min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), c.seed)
-	for pos := uint32(0); int(pos) < t.Len(); pos++ {
-		item := t.At(pos)
-		if metaWord := item.Metadata(); !empty(metaWord) && metaWord&itemstore.Dead == 0 {
-			fresh.InsertFresh(c.keyHash(item.Entry().Key), item)
-		}
-	}
-	sh.items.Store(fresh)
+	sh.items.Store(t.Grow(min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), sh.evicted))
 	c.stats.addTableGrowths(1)
 }
 
-// evictShard evicts items from the shard while its weight exceeds the capacity. The policy only picks and dequeues
-// the victim - a live item, resolved through Items.Find - and the alive -> dead transition, the weight accounting
-// and the reclaim of the slot happen here. Called under the shard mutex.
+// evictShard evicts items while the shard's weight exceeds its capacity. The policy picks the victims; the removal
+// happens here.
 func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 	nowOff := c.nowOff.Load()
 	storage := sh.items.GetStorage()
+	sh.evicted = true
 	for sh.weight.Load() > sh.cap {
 		victimIdx, ok := sh.policy.Evict(nowOff)
 		if !ok {
@@ -681,8 +673,7 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 	}
 }
 
-// dropExpired lazily removes a TTL-expired item found by the Get path. Its queue node stays behind until the next
-// eviction pass or sweep drops it.
+// dropExpired lazily removes a TTL-expired item found by the Get path.
 func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K) {
 	sh.mu.Lock()
 	idx, item, ok := c.findSlot(sh, h, key)
@@ -691,7 +682,6 @@ func (c *Cache[K, V]) dropExpired(sh *shard[K, V], h uint64, key K) {
 	if ok && expired(item.Metadata(), c.nowOff.Load()) {
 		c.killAt(sh, idx, item, CauseExpiration, &deletions)
 	}
-	c.noteStale(sh)
 	sh.mu.Unlock()
 	if len(deletions) > 0 {
 		c.callOnDeletion(deletions)
@@ -742,19 +732,19 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 	}
 }
 
-// killAt kills the item in its slot, subtracts its weight and reclaims the slot on the spot: the run it sat in is
-// compacted (FlatHashMap.Reclaim), so the table holds live items and nothing else, and no purge is ever needed. The
-// reclaim brackets its moves on moveSeq, which is what lets a lock-free probe tell a miss that overlapped them from
-// a real one. The item's home and bucket come from its meta word, so nothing here hashes a key. Called under the
-// shard mutex.
+// killAt removes the item at idx: out of its eviction queue, killed, its weight subtracted and its slot reclaimed on
+// the spot. It leaves its queue before it dies, so a policy never meets a dead item.
 func (c *Cache[K, V]) killAt(sh *shard[K, V], idx uint32, item *itemstore.Item[K, V], cause DeletionCause,
 	deletions *[]deletion[K, V]) {
 	entry := item.Entry()
-	storeI64(&sh.weight, sh.weight.Load()-c.rawCost(entry.Key, entry.Value))
+	weight := c.rawCost(entry.Key, entry.Value)
+	storeI64(&sh.weight, sh.weight.Load()-weight)
 	if c.onDeletion != nil {
 		c.addDeletion(deletions, entry.Key, entry.Value, cause)
 	}
+	sh.policy.Remove(itemstore.QNode{Idx: idx, Cost: uint32(weight)})
 	storage := sh.items.GetStorage()
+	storage.Remove(idx)
 	storage.ForgetDisplacedOf(idx, item)
 	item.Kill()
 	sh.live--
@@ -783,48 +773,15 @@ func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, 
 	}
 }
 
-// sweepMinStale is the smallest pile of extra queue nodes worth a pass; below it the walk costs more than the nodes.
-const sweepMinStale = 128
-
-// sweepBudget is how many queue nodes one write examines while a sweep pass runs: a pass over millions of nodes
-// completes within a few hundred thousand writes, and a write holds the shard mutex for well under a microsecond
-// more - the cap matters, since every reader that missed under an open move bracket ends up waiting on that mutex.
-const sweepBudget = 4
-
-// sweepCheckMask gates how often a removal asks the policy how long its queues are: the answer moves by one per
-// removal and the trigger sits thousands away, so asking on every 64th is as good and costs an interface call
-// instead of sixty-four.
-const sweepCheckMask = 63
-
-// noteStale carries the sweep: it advances a running pass by one budget, or starts one once the queues hold enough
-// nodes beyond the live items to be worth the walk. A removal leaves the key's node behind and a reinsertion pushes
-// another, so without this a delete-heavy workload below capacity would grow the queues without bound - eviction,
-// the other reclaimer, never runs there. Two things keep it off the hot paths: only removals carry a pass, which is
-// what lengthens the queues in the first place, and the trigger reads the queue length rather than counting
-// removals, so the evictions that already drop nodes count for something and a workload at capacity sweeps not at
-// all. Called under the shard mutex.
-func (c *Cache[K, V]) noteStale(sh *shard[K, V]) {
-	if sh.sweeping {
-		sh.sweeping = sh.policy.Sweep(sweepBudget, sh.sweepParity)
-		return
-	}
-	sh.removals++
-	if sh.removals&sweepCheckMask == 0 && sh.policy.Len() >= 2*sh.live+sweepMinStale {
-		sh.sweeping, sh.sweepParity = true, !sh.sweepParity
-	}
-}
-
 // deleteLocked removes the key if memory holds it.
 func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K, cause DeletionCause,
 	deletions *[]deletion[K, V]) {
 	if idx, item, ok := c.findSlot(sh, keyHash, key); ok {
 		c.killAt(sh, idx, item, cause, deletions)
 	}
-	c.noteStale(sh)
 }
 
 // Delete removes the key from memory and forwards the deletion to L2 according to WritePolicy (async for WriteBack).
-// The slot is reclaimed on the spot; the queue node the item leaves behind goes with the next eviction pass or sweep.
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	sh, keyHash := c.shardAndHash(key)
 	if c.livePresent(sh, keyHash, key) {

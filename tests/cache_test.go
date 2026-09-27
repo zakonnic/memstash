@@ -257,10 +257,10 @@ func TestTotalSize(t *testing.T) {
 			empty := c.TotalSize()
 			assert.GreaterOrEqual(t, empty, c.Weight(), "TotalSize must be at least the logical Weight")
 
-			for i := 0; i < 50; i++ {
+			for i := 0; i < 900; i++ { // enough to grow the tables
 				require.NoError(t, c.Set(ctx, fmt.Sprintf("k%d", i), "v"))
 			}
-			assert.Greater(t, c.TotalSize(), empty, "TotalSize must grow as items are added")
+			assert.Greater(t, c.TotalSize(), empty, "TotalSize must grow with the tables")
 			assert.GreaterOrEqual(t, c.TotalSize(), c.Weight(), "TotalSize must stay at least the logical Weight")
 		})
 	}

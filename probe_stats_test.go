@@ -28,7 +28,7 @@ const (
 
 type tableStats struct {
 	slots, live, dead, hasNext int
-	shLive, shStale            int // live items, and the queue nodes beyond them
+	shLive                     int
 	probeSum                   int64
 	probeMax                   int
 	hotLive, coldLive          int
@@ -51,7 +51,7 @@ func scanTables(c *Cache[uint64, uint64], collect bool) tableStats {
 	st := tableStats{hist: make([]int, histMax+1)}
 	for i := range c.shards {
 		sh := &c.shards[i]
-		st.shLive, st.shStale = st.shLive+sh.live, st.shStale+sh.policy.Len()-sh.live
+		st.shLive += sh.live
 		storage := sh.items.GetStorage()
 		slots := uint32(storage.Len())
 		st.slots += int(slots)
@@ -252,7 +252,7 @@ func runChurn(t *testing.T, opts []Option) {
 				t.Logf("  ops=%d inserts=%d deletes=%d (%.0f%% of inserts) hot mean accesses=%.0f",
 					ops, inserts, deletes, 100*float64(deletes)/float64(inserts), float64(hotOps)/statsHotKeys)
 				t.Logf("  evictions=%d other removals=%d", evicted, invalidated)
-				t.Logf("  shard counters: live=%d stale nodes=%d | scanned dead=%d", st.shLive, st.shStale, st.dead)
+				t.Logf("  shard counters: live=%d | scanned dead=%d", st.shLive, st.dead)
 				require.Zero(t, st.dead, "a deletion reclaims its slot on the spot: no dead slot may survive")
 				require.Zero(t, s.TablePurges(), "nothing is ever purged")
 				t.Logf("  hasNext set on %d slots (%.1f%%)", st.hasNext, 100*float64(st.hasNext)/float64(st.slots))

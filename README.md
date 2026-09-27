@@ -351,14 +351,16 @@ order — the simplest, with an S3-FIFO-class hit rate). All share the same lock
 read only sets a 2-bit reference counter on the item's meta word.
 
 **Custom eviction policy** — implement the `memstash.EvictionPolicy` interface (the same contract
-the built-ins use: `Add`/`Evict`/`Len`/`Sweep`/`Bytes`, all called under the shard mutex; a queue
-node is a claim on a key, resolved to its item with `Items.Find`, or `Items.FindExact` before a node is
-dropped as a duplicate) and plug its per-shard factory in:
+the built-ins use: `Add`/`Remove`/`Reweigh`/`Evict`/`Bytes`, all called under the shard mutex). The
+cache enqueues every new item at the back of queue 0 and removes every departing one; the policy
+moves items between the `EvictionQueues` queues threaded through the shard's table
+(`Items.Oldest`/`Newer`/`Requeue`, a scan `Hand`) and names the victim by its slot index. Plug its
+per-shard factory in:
 
 ```go
 c, err := memstash.New[string, User](
 	memstash.WithCustomEvictionPolicy(func(items memstash.Items[string, User], shardCap int64) memstash.EvictionPolicy[string, User] {
-		return newMyPolicy(items, shardCap) // items resolves queue nodes to the cached items
+		return newMyPolicy(items, shardCap) // items is the shard's table: its items and eviction queues
 	}),
 )
 ```
@@ -376,7 +378,7 @@ Affects the hit rate — you control which items stay and which get evicted, for
 | `WithRefreshTTLOnGet()` | Sliding expiration: every L1 hit extends the item by a full `WithTTL` lifetime — including entries written with `SetWithTTL`. |
 | `WithPolicy(p)` | `PolicyS3FIFO` (default), `PolicyClock`, `PolicyWTinyLFU`, or `PolicySIEVE`. |
 | `WithCustomEvictionPolicy(fn)` | Plug in your own eviction policy: a per-shard factory returning a `memstash.EvictionPolicy` implementation. |
-| `WithPreallocatedSize()` | Allocate every shard's item table up front, at the size filling to capacity would grow it to anyway. Such a table never grows afterwards. Not available with `WithCostFunc` / `WithMemoryBudget`. |
+| `WithPreallocatedSize()` | Allocate every shard's item table up front, at the size filling to capacity would grow it to anyway. Such a table never grows afterwards. Recommended for large caches: a table grown from empty copies every item about five times on its way to capacity. Not available with `WithCostFunc` / `WithMemoryBudget`. |
 | `WithPreallocationRatio(r)` | How full a preallocated table sits at capacity, `0 < r < 1` (default `DefaultPreallocationRatio`, 0.75). Preallocates on its own. Denser packs tighter and walks further: (1 + 1/(1-r))/2 slots per hit, 2.5 at 0.75. The table holds live items only, so that is the walk the cache keeps. |
 | `WithGrowthThreshold(t)` | Occupancy (live items over slots) a non-preallocated shard table grows at, `0 < t < 1` (default `DefaultGrowthThreshold`, 5/6). A preallocated table never grows. |
 | `WithShardsCount(n)` | Number of eviction shards (default: auto by GOMAXPROCS). |

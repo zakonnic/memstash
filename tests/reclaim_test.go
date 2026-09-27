@@ -17,10 +17,9 @@ func heapAlloc() int64 {
 	return int64(ms.HeapAlloc)
 }
 
-// TestDeleteBelowCapacityDoesNotLeak reproduces the tombstone-accumulation scenario: a delete-heavy workload that
-// never reaches the capacity, so eviction passes (the original reclamation mechanism) never run. Without the
-// tombstone sweep the pool and the queues grow without bound - ~33 bytes per cycle; with the sweep the footprint
-// must stay flat. The subtests measure process heap, so they cannot run in parallel with each other.
+// TestDeleteBelowCapacityDoesNotLeak runs a delete-heavy workload that never reaches the capacity, so eviction never
+// runs: whatever a deletion leaves behind stays for good, and the footprint must stay flat. The subtests measure
+// process heap, so they cannot run in parallel with each other.
 func TestDeleteBelowCapacityDoesNotLeak(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range policies {
@@ -57,9 +56,9 @@ func TestDeleteBelowCapacityDoesNotLeak(t *testing.T) {
 	}
 }
 
-// TestSweepKeepsLiveItems verifies that tombstone sweeps do not disturb live items: hot keys survive a delete-heavy
-// churn of other keys and keep their values.
-func TestSweepKeepsLiveItems(t *testing.T) {
+// TestChurnKeepsLiveItems verifies that a delete-heavy churn of other keys, and the compactions it causes, leave the
+// hot keys and their values alone.
+func TestChurnKeepsLiveItems(t *testing.T) {
 	ctx := context.Background()
 	c, err := memstash.New[int, int](
 		memstash.WithMemoryCapacity(1024),
@@ -68,8 +67,7 @@ func TestSweepKeepsLiveItems(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close()
 
-	// 100 long-lived keys, then a churn of 100k short-lived ones interleaved with reads of the hot set: many sweeps
-	// happen while the live nodes are rotated through the queues.
+	// 100 long-lived keys, then a churn of 100k short-lived ones interleaved with reads of the hot set.
 	for i := 0; i < 100; i++ {
 		require.NoError(t, c.Set(ctx, i, i*7))
 	}
@@ -84,8 +82,8 @@ func TestSweepKeepsLiveItems(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		v, ok := c.GetFromMemory(i)
-		require.True(t, ok, "live key %d lost after sweeps", i)
-		assert.Equal(t, i*7, v, "live key %d corrupted after sweeps", i)
+		require.True(t, ok, "live key %d lost after the churn", i)
+		assert.Equal(t, i*7, v, "live key %d corrupted after the churn", i)
 	}
 	// Every churn key was deleted right away - only the hot set remains.
 	assert.EqualValues(t, 100, c.Weight())

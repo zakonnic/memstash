@@ -2,6 +2,7 @@ package eviction
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"unsafe"
 
@@ -60,24 +61,19 @@ func TestWTinyLFUAdmission(t *testing.T) {
 	pool := newArena()
 	p := NewWTinyLFU(&pool.items, 300, 1024) // windowCap = 3
 
-	addFromPool(p, pool, "resident")
-	touch(pool, "resident") // reused in the window: will be admitted to main outright
-	for i := 0; i < 4; i++ {
-		addFromPool(p, pool, fmt.Sprintf("one-hit-%d", i))
+	pool.add(p, "resident")
+	pool.touch("resident") // reused in the window: will be admitted to main outright
+	for i := range 4 {
+		pool.add(p, fmt.Sprintf("one-hit-%d", i))
 	}
 
 	// windowWeight 5 > 3: Evict promotes the touched resident to main (recording its reuse in the sketch), then the
 	// next candidate "one-hit-0" (frequency 1) loses the admission duel against the resident (frequency 2).
-	idx, ok := p.Evict(0)
+	key, ok := pool.evict(p)
 	require.True(t, ok)
-	assert.Equal(t, "one-hit-0", pool.keyAt(idx), "the rejected candidate must be the victim")
-	pool.release(idx)
-
-	assert.Equal(t, 1, p.main.Len(), "main must hold exactly the admitted resident")
-	victim, ok := p.main.Peek()
-	require.True(t, ok)
-	assert.Equal(t, "resident", pool.keyOf(victim))
-	assert.True(t, pool.alive("resident"), "the protected resident must stay alive")
+	assert.Equal(t, "one-hit-0", key, "the rejected candidate must be the victim")
+	assert.Equal(t, []string{"resident"}, pool.queued(mainQueue), "main must hold exactly the admitted resident")
+	assert.EqualValues(t, 3, p.weight)
 }
 
 // TestWTinyLFUAdmitsFrequentKey verifies the other side of the filter: a candidate whose key was seen more often
@@ -88,48 +84,33 @@ func TestWTinyLFUAdmitsFrequentKey(t *testing.T) {
 
 	// Seat a low-frequency resident in main: the first window overflow admits it (main is empty), and the untouched
 	// filler behind it loses the 1-vs-1 duel and is evicted.
-	addFromPool(p, pool, "seat")
-	for i := 0; i < 4; i++ { // enough that the window stays over budget after the seat's own pop
-		addFromPool(p, pool, fmt.Sprintf("filler-%d", i))
+	pool.add(p, "seat")
+	for i := range 4 { // enough that the window stays over budget after the seat's own promotion
+		pool.add(p, fmt.Sprintf("filler-%d", i))
 	}
-	idx, ok := p.Evict(0)
+	key, ok := pool.evict(p)
 	require.True(t, ok)
-	assert.Equal(t, "filler-0", pool.keyAt(idx), "the 1-vs-1 admission duel must keep the seated resident")
-	pool.release(idx)
-	require.Equal(t, 1, p.main.Len())
+	assert.Equal(t, "filler-0", key, "the 1-vs-1 admission duel must keep the seated resident")
+	require.Equal(t, []string{"seat"}, pool.queued(mainQueue))
 
 	// Pump the hot key's frequency and push it through the window under sustained pressure: low-frequency chaff is
 	// rejected at admission, the hot key must pass into main.
-	for i := 0; i < 4; i++ {
-		p.sketch.increment(mixHash(pool.node("hot").Hash()))
+	hot := pool.claim("hot")
+	for range 4 {
+		p.sketch.increment(p.keyHash(hot))
 	}
-	addFromPool(p, pool, "hot")
-	inMain := func(key string) bool {
-		found := false
-		p.main.Range(func(node itemstore.QNode) { found = found || pool.keyOf(node) == key })
-		return found
-	}
-	for i := 0; i < 20 && !inMain("hot"); i++ {
-		addFromPool(p, pool, fmt.Sprintf("chaff-%d", i)) // keeps the window over budget
-		idx, ok := p.Evict(0)
+	p.Add(itemstore.QNode{Idx: hot, Cost: 1})
+	for i := 0; i < 20 && !slices.Contains(pool.queued(mainQueue), "hot"); i++ {
+		pool.add(p, fmt.Sprintf("chaff-%d", i)) // keeps the window over budget
+		_, ok := pool.evict(p)
 		require.True(t, ok, "pressure eviction %d", i)
-		pool.release(idx)
 	}
-	assert.True(t, inMain("hot"), "the frequent candidate must be admitted to main")
-	assert.True(t, pool.alive("hot"), "the admitted key must stay alive")
+	assert.Contains(t, pool.queued(mainQueue), "hot", "the frequent candidate must be admitted to main")
 }
 
-// TestWTinyLFUBytes verifies Bytes is the sum of its parts, sketch included.
 func TestWTinyLFUBytes(t *testing.T) {
 	pool := newArena()
 	p := NewWTinyLFU(&pool.items, 1000, 1024)
-	structBytes := int64(unsafe.Sizeof(*p))
-	// The sketch pre-allocates at construction, like the S3-FIFO ghost table.
-	assert.Equal(t, structBytes+p.sketch.bytes(), p.Bytes())
-	assert.Positive(t, p.sketch.bytes())
-
-	for i := 0; i < 200; i++ {
-		addFromPool(p, pool, fmt.Sprintf("k%d", i))
-	}
-	assert.Equal(t, structBytes+p.window.Bytes()+p.main.Bytes()+p.sketch.bytes(), p.Bytes())
+	assert.Equal(t, int64(unsafe.Sizeof(*p))+p.sketch.bytes(), p.Bytes())
+	assert.Positive(t, p.sketch.bytes(), "the sketch is allocated up front")
 }

@@ -7,16 +7,16 @@ import (
 
 // Layout of an item's 64-bit meta word:
 //
-//	[dead:1][secondChance:1][thirdChance:1][spare:1][expireOff:18][hasNext:1][tag:13][disp:6][gen:22]
+//	[dead:1][secondChance:1][thirdChance:1][main:1][expireOff:18][hasNext:1][tag:13][disp:6][gen:22]
 //
 // dead marks a killed item during the moment between its kill and the reclaim of its slot (see FlatHashMap.Reclaim);
-// the two chance bits form a unary reference counter; expireOff is the expiration time in expireUnit steps on a
-// wrapping scale (0 = no TTL); hasNext says a key homed at or before this slot lives past it, so a probe must keep
-// walking; tag prefilters candidates without touching the key - only items sharing a home slot are compared
-// against it, so 13 bits stay ample (12 of them carrying hash, see TagOf); disp is how far the item sits from its
-// home slot, which is what lets a deletion compact a run without rehashing the keys it passes (see DispOf); gen
-// counts the slot's occupancies and in-place value writes, and lock-free readers validate their Entry snapshot
-// against it (see Snapshot).
+// the two chance bits form a unary reference counter; main says which eviction queue the item is in; expireOff is the
+// expiration time in expireUnit steps on a wrapping scale (0 = no TTL); hasNext says a key homed at or before this
+// slot lives past it, so a probe must keep walking; tag prefilters candidates without touching the key - only items
+// sharing a home slot are compared against it, so 13 bits stay ample (12 of them carrying hash, see TagOf); disp is
+// how far the item sits from its home slot, which is what lets a deletion compact a run without rehashing the keys
+// it passes (see DispOf); gen counts the slot's occupancies and in-place value writes, and lock-free readers validate
+// their Entry snapshot against it (see Snapshot).
 //
 // An empty slot carries nothing but its gen (Empty): a never-occupied slot is all zero, a cleared one keeps counting
 // so that no snapshot taken of a previous occupant can validate against the next. Gen 0 is reserved and TagOf never
@@ -33,12 +33,8 @@ const (
 	// ChanceMask isolates the unary reference counter (states 00, 10 and 11).
 	ChanceMask uint64 = SecondChance | ThirdChance
 
-	// Queued marks an item a running sweep pass has already accounted for, in the parity that pass carries: a second
-	// node reaching the same item is a duplicate - a delete left the first one behind and the reinsertion pushed
-	// another - and the pass drops it. Publish stamps the parity of the last pass, which is the opposite of the next
-	// one's, so an item inserted between passes reads as unaccounted; one inserted during a pass reads as accounted,
-	// which is right, because the node it just pushed is the one that survives.
-	Queued uint64 = 1 << 60
+	// InMainQueue is set while the item sits in eviction queue 1.
+	InMainQueue uint64 = 1 << 60
 
 	ExpireShift        = 42
 	ExpireMask  uint64 = (1<<18 - 1) << ExpireShift
@@ -90,17 +86,6 @@ func BucketOf(metaWord uint64) uint32 { return uint32(metaWord>>TagShift) & (ove
 
 func dispBits(disp uint32) uint64 { return uint64(min(disp, DispMax)) << DispShift }
 
-// QueuedIn reports whether a sweep pass of this parity has already accounted for the item - see Queued.
-func QueuedIn(metaWord uint64, parity bool) bool { return (metaWord&Queued != 0) == parity }
-
-// queuedBits stamps a parity into a fresh meta word.
-func queuedBits(parity bool) uint64 {
-	if parity {
-		return Queued
-	}
-	return 0
-}
-
 // Empty reports whether the slot holds no item: never occupied, or cleared since.
 func Empty(metaWord uint64) bool { return metaWord&^GenMask == 0 }
 
@@ -144,20 +129,18 @@ func (s *Item[K, V]) Snapshot(metaWord uint64) (Entry[K, V], bool) {
 
 // Publish fills an empty slot. The Entry lands before the meta word goes live, so a reader that sees the item alive
 // finds the pair in place. HasNext is kept: the slot may lie on another key's probe chain.
-func (s *Item[K, V]) Publish(entry Entry[K, V], tag uint64, expireOff, disp uint32, sweepParity bool) {
+func (s *Item[K, V]) Publish(entry Entry[K, V], tag uint64, expireOff, disp uint32) {
 	s.entry = entry
 	prev := s.meta.Load()
-	storeMeta(&s.meta, prev&HasNext|uint64(expireOff)<<ExpireShift|tag|dispBits(disp)|
-		queuedBits(sweepParity)|liveGen((prev+2)&^1))
+	storeMeta(&s.meta, prev&HasNext|uint64(expireOff)<<ExpireShift|tag|dispBits(disp)|liveGen((prev+2)&^1))
 }
 
-// SetQueued marks the item as accounted for by a sweep pass of this parity. Called under the shard mutex.
-func (s *Item[K, V]) SetQueued(parity bool) {
-	if parity {
-		orMeta(&s.meta, Queued)
+func (s *Item[K, V]) setMain(set bool) {
+	if set {
+		orMeta(&s.meta, InMainQueue)
 		return
 	}
-	andMeta(&s.meta, ^Queued)
+	andMeta(&s.meta, ^InMainQueue)
 }
 
 // PublishMoved fills an empty slot with the item at src, as Publish does, carrying over src's tag, TTL and reference
@@ -167,7 +150,7 @@ func (s *Item[K, V]) PublishMoved(src *Item[K, V], disp uint32) {
 	s.entry = src.entry
 	prev := s.meta.Load()
 	srcMeta := src.meta.Load()
-	storeMeta(&s.meta, prev&HasNext|srcMeta&(ChanceMask|ExpireMask|TagMask|Queued)|dispBits(disp)|
+	storeMeta(&s.meta, prev&HasNext|srcMeta&(ChanceMask|ExpireMask|TagMask|InMainQueue)|dispBits(disp)|
 		liveGen((prev+2)&^1))
 }
 

@@ -10,53 +10,27 @@ import (
 	"github.com/zakonnic/memstash"
 )
 
-// fifoPolicy is a minimal custom eviction policy built purely on the public contract: plain FIFO, no second chances.
-// It doubles as the compile-time proof that memstash.EvictionPolicy is implementable outside the module.
+// fifoPolicy is a minimal custom eviction policy built purely on the public contract: plain FIFO over the queue the
+// cache queues new items on, no second chances. It doubles as the compile-time proof that memstash.EvictionPolicy is
+// implementable outside the module.
 type fifoPolicy[K comparable, V any] struct {
 	items memstash.Items[K, V]
-	nodes []memstash.QNode
-	head  int
 }
 
 var _ memstash.EvictionPolicy[string, int] = (*fifoPolicy[string, int])(nil)
 
-func (p *fifoPolicy[K, V]) Add(node memstash.QNode) { p.nodes = append(p.nodes, node) }
-
-func (p *fifoPolicy[K, V]) Len() int { return len(p.nodes) - p.head }
-
-func (p *fifoPolicy[K, V]) Bytes() int64 { return int64(cap(p.nodes) * 8) }
-
-func (p *fifoPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
-	for p.head < len(p.nodes) {
-		node := p.nodes[p.head]
-		p.head++
-		if _, idx, ok := p.items.Find(node); ok {
-			return idx, true // the cache kills and accounts the victim
-		}
-		// a stale node: its key was deleted; drop it and keep looking
-	}
-	return 0, false
-}
-
-// Sweep ignores the budget and the parity: the whole queue in one go is fine for a test policy, and it keeps every
-// node whose key is still there - duplicates included, which only costs it an extra pop later.
-func (p *fifoPolicy[K, V]) Sweep(int, bool) bool {
-	kept := p.nodes[:0]
-	for _, node := range p.nodes[p.head:] {
-		if _, _, ok := p.items.Find(node); ok {
-			kept = append(kept, node)
-		}
-	}
-	p.nodes, p.head = kept, 0
-	return false
-}
+func (p *fifoPolicy[K, V]) Add(memstash.QNode)          {}
+func (p *fifoPolicy[K, V]) Remove(memstash.QNode)       {}
+func (p *fifoPolicy[K, V]) Reweigh(uint32, int64)       {}
+func (p *fifoPolicy[K, V]) Bytes() int64                { return 0 }
+func (p *fifoPolicy[K, V]) Evict(uint32) (uint32, bool) { return p.items.Oldest(0) }
 
 func newFIFOPolicy[K comparable, V any](items memstash.Items[K, V], _ int64) memstash.EvictionPolicy[K, V] {
 	return &fifoPolicy[K, V]{items: items}
 }
 
 // TestCustomEvictionPolicy runs the cache on the FIFO policy above: strict FIFO order with one shard, capacity
-// respected, deletes swept through the custom Sweep, and the shard tables staying consistent.
+// respected, and the shard tables staying consistent through delete-heavy churn.
 func TestCustomEvictionPolicy(t *testing.T) {
 	ctx := context.Background()
 	c, err := memstash.New[string, int](
@@ -81,7 +55,6 @@ func TestCustomEvictionPolicy(t *testing.T) {
 		assert.Equal(t, i, v)
 	}
 
-	// Delete-heavy churn below capacity exercises the custom Sweep through the cache's stale-node reclamation.
 	for i := 0; i < 10_000; i++ {
 		key := fmt.Sprintf("churn-%d", i)
 		require.NoError(t, c.Set(ctx, key, i))

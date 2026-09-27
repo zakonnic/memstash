@@ -21,16 +21,20 @@ const (
 // MaxItems caps the item count: 5/6 (the default growth load factor) of the 2^32 slot positions.
 const MaxItems = int64(1) << 32 * 5 / 6
 
-// FlatHashMap is one shard's memory storage: an open-addressing (https://en.wikipedia.org/wiki/Linear_probing) linear
-// hash table whose slots are the items themselves, so a probe that lands has meta, key and value right there, with no
-// second lookup. Queue nodes address items by key hash (see QNode) and are resolved with Find, so items are free to
-// move: a deletion compacts its run in place (Reclaim) and the table never holds a tombstone.
+// FlatHashMap is one shard's item table: linear probing (https://en.wikipedia.org/wiki/Linear_probing) over slots
+// that are the items themselves, so a probe that lands has meta, key and value right there. At load 0.75 a hit walks
+// ~2.5 slots.
 //
-// No buckets: the hash picks the starting slot, and a taken slot just means stepping forward with pos++ until the key
-// or an empty slot turns up. The load factor keeps the walk short - ~2.5 slots on a hit at 0.75.
-// Readers probe lock-free against atomically published meta words; all mutations happen under the shard mutex.
-// A growth swaps the whole table: readers mid-probe finish on the superseded one and may miss a write that landed
-// after the swap - indistinguishable from the Get racing the Set.
+// A probe steps forward from the key's home slot until it finds the key or the early-exit predicates (HasNext, the
+// per-group overflow counters) prove it absent. Those may claim "present" falsely, which costs a key compare, but
+// never "absent": that would lose a live key.
+//
+// A deletion compacts its run in place (Reclaim), so the table never holds a tombstone, and items move. The eviction
+// queues run through the slots (queue.go); an item that moves takes its queue position along.
+//
+// Readers probe lock-free against atomically published meta words; every mutation happens under the shard mutex.
+// Growth builds a new table and swaps it in whole. A reader mid-probe finishes on the old one and may miss a write
+// that landed after the swap, which is indistinguishable from a Get racing the Set.
 type FlatHashMap[K comparable, V any] struct {
 	short     []Item[K, V]              // the whole table while it fits one chunk - most tables do
 	chunks    []*[chunkSlots]Item[K, V] // past that: the slot's high bits pick the chunk, the low ones the slot in it
@@ -38,6 +42,12 @@ type FlatHashMap[K comparable, V any] struct {
 	overflows *atomic.Uint32            // per group: how many keys homed in it live past its edge (SwissTable/f14)
 	seed      maphash.Seed              // the cache's hash seed, for the few places a key must be hashed again
 	size      uint32                    // slot count, as TableSlots and GrowSlots size it
+
+	// The eviction queues, laid out like the items. Readers never touch them.
+	queueLinks      []queueLink
+	queueLinkChunks []*[chunkSlots]queueLink
+	queueHeads      [EvictionQueues]queueLink
+	hand            uint32
 }
 
 // NewFlatHashMap allocates a table of itemCount slots, a size TableSlots or GrowSlots returned. Up to one chunk the
@@ -47,15 +57,23 @@ func NewFlatHashMap[K comparable, V any](itemCount int, seed maphash.Seed) *Flat
 	if itemCount <= chunkSlots {
 		t.short = make([]Item[K, V], itemCount)
 		t.base = unsafe.Pointer(&t.short[0])
+		t.queueLinks = make([]queueLink, itemCount)
 	} else {
 		t.chunks = make([]*[chunkSlots]Item[K, V], itemCount>>chunkShift)
+		t.queueLinkChunks = make([]*[chunkSlots]queueLink, len(t.chunks))
 		for i := range t.chunks {
 			t.chunks[i] = new([chunkSlots]Item[K, V])
+			t.queueLinkChunks[i] = new([chunkSlots]queueLink)
 		}
 		t.base = unsafe.Pointer(&t.chunks[0])
 	}
 	over := make([]atomic.Uint32, itemCount>>groupShift)
 	t.overflows = &over[0]
+	for queue := range uint(EvictionQueues) {
+		head := t.headOf(queue)
+		t.queueHeads[queue] = queueLink{prev: head, next: head}
+	}
+	t.hand = t.headOf(0)
 	return t
 }
 
@@ -75,12 +93,7 @@ func (t *FlatHashMap[K, V]) At(pos uint32) *Item[K, V] {
 // Home returns a key hash's home slot: the high 32 hash bits scaled into the slot range, so it stays independent of
 // the tag and of the shard bits. Multiply-shift rather than a mask, because the slot count is not a power of two.
 func (t *FlatHashMap[K, V]) Home(hash uint64) uint32 {
-	return t.homeOfHigh(uint32(hash >> 32))
-}
-
-// homeOfHigh is Home for the high hash word alone - what a queue node carries.
-func (t *FlatHashMap[K, V]) homeOfHigh(high uint32) uint32 {
-	return uint32(uint64(high) * uint64(t.size) >> 32)
+	return uint32((hash >> 32) * uint64(t.size) >> 32)
 }
 
 func (t *FlatHashMap[K, V]) hashOf(key K) uint64 { return maphash.Comparable(t.seed, key) }
@@ -166,17 +179,24 @@ func (t *FlatHashMap[K, V]) ForgetDisplacedAt(home, pos, bucket uint32) {
 	}
 }
 
-// ForgetDisplacedOf is ForgetDisplaced for the item at idx, its home and bucket read from its meta word: the caller
-// holds the item, not its hash. A saturated distance sends it to the hash.
+// ForgetDisplacedOf is ForgetDisplaced for the item at idx, its home and bucket read from its meta word.
 func (t *FlatHashMap[K, V]) ForgetDisplacedOf(idx uint32, item *Item[K, V]) {
-	metaWord := item.Metadata()
-	home, disp := uint32(0), DispOf(metaWord)
-	if disp == DispMax {
-		home = t.Home(t.hashOf(item.Entry().Key))
-	} else {
-		home = t.back(idx, disp)
+	t.ForgetDisplacedAt(t.homeOf(idx, item), idx, BucketOf(item.Metadata()))
+}
+
+// homeOf reads the home of the item at idx back from its distance; a saturated one sends it to the hash.
+func (t *FlatHashMap[K, V]) homeOf(idx uint32, item *Item[K, V]) uint32 {
+	if disp := DispOf(item.Metadata()); disp != DispMax {
+		return t.back(idx, disp)
 	}
-	t.ForgetDisplacedAt(home, idx, BucketOf(metaWord))
+	return t.Home(t.hashOf(item.Entry().Key))
+}
+
+// Fingerprint identifies the key at idx without hashing it: its home slot and twelve tag bits. It changes when the
+// table grows.
+func (t *FlatHashMap[K, V]) Fingerprint(idx uint32) uint64 {
+	item := t.At(idx)
+	return uint64(t.homeOf(idx, item))<<32 | item.Metadata()>>TagShift&(1<<12-1)
 }
 
 // overflowAt takes a home that Home already reduced into range.
@@ -216,76 +236,6 @@ func GrowSlots(size int) int {
 	default:
 		return (size*5/4/chunkSlots + 1) * chunkSlots
 	}
-}
-
-// Find resolves a queue node to the item it was enqueued for: the item and its current slot; false means the key has
-// left the cache. A candidate is a live item on the node's probe path carrying the node's twelve tag bits at the
-// node's home slot - the distance in its meta word says so. The node's item, if it is anywhere, is a candidate, so a
-// cold candidate whose run ends within findLookahead slots is the answer without its key being read; one with a
-// reference bit set, a second one, or one whose run goes on is confirmed by rehashing its key, so a hot key is only
-// ever examined through its own node, and the walk never reads further than the old exact walk did. What is left is
-// a stale node meeting a lone cold twin (a key homed at the same slot with the same twelve bits: once in ~4096) and
-// evicting it a little early. Under the shard mutex.
-func (t *FlatHashMap[K, V]) Find(node QNode) (*Item[K, V], uint32, bool) { return t.find(node, false) }
-
-// FindExact is Find with every candidate confirmed by its key. It is for the one decision a twin would corrupt:
-// dropping a node as a duplicate in a sweep, which would leave the twin's item without a node.
-func (t *FlatHashMap[K, V]) FindExact(node QNode) (*Item[K, V], uint32, bool) {
-	return t.find(node, true)
-}
-
-// findLookahead is how many slots past a cold candidate Find reads for a second one before it settles the first by
-// its hash instead: about one cache line of items, which most runs end within.
-const findLookahead = 2
-
-func (t *FlatHashMap[K, V]) find(node QNode, exact bool) (*Item[K, V], uint32, bool) {
-	home := t.homeOfHigh(node.home)
-	tagged := node.tagBits()
-	bucket := node.bucket()
-	groupEnd := (home | 7) + 1
-	var first *Item[K, V] // a cold candidate, trusted if it stays the only one until its run ends
-	firstPos, ahead, seen := uint32(0), 0, 0
-	for pos, d := home, uint32(0); ; pos, d = pos+1, d+1 {
-		if pos == groupEnd && !t.OverflowedTag(home, bucket) {
-			break
-		}
-		item := t.At(pos)
-		metaWord := item.Metadata()
-		if metaWord&DeadOrTag == tagged {
-			// Same home slot when the stored distance says so; a saturated distance leaves it to the hash.
-			if disp := DispOf(metaWord); disp == d || disp == DispMax && d >= DispMax {
-				seen++
-				if seen == 1 && !exact && metaWord&ChanceMask == 0 && disp != DispMax {
-					first, firstPos, ahead = item, t.Wrap(pos), findLookahead
-				} else if t.holdsKeyOf(item, node) {
-					return item, t.Wrap(pos), true
-				}
-			}
-		}
-		if metaWord&HasNext == 0 {
-			break
-		}
-		if first != nil {
-			if ahead == 0 { // the run outlasts the lookahead: settle the candidate by its hash, not by reading on
-				if t.holdsKeyOf(first, node) {
-					return first, firstPos, true
-				}
-				first = nil
-			} else {
-				ahead--
-			}
-		}
-	}
-	if first != nil && (seen == 1 || t.holdsKeyOf(first, node)) {
-		return first, firstPos, true
-	}
-	return nil, 0, false
-}
-
-// holdsKeyOf rehashes the item's key and checks it against the 44 hash bits the node carries.
-func (t *FlatHashMap[K, V]) holdsKeyOf(item *Item[K, V], node QNode) bool {
-	hash := t.hashOf(item.Entry().Key)
-	return uint32(hash>>32) == node.home && uint32(hash>>14)&(1<<12-1) == node.tag12()
 }
 
 // ShiftEntry is Reclaim's record of one live slot in the run it compacts: where the slot is and where its key is
@@ -358,15 +308,16 @@ func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]ShiftEntry, moves *at
 			StoreU32(moves, moves.Load()+1)
 			moved = true
 		}
-		src, dst := t.At(idx+uint32(entries[pick].off)), t.At(idx+uint32(hole))
-		disp := uint32(entries[pick].off - entries[pick].homeOff)
-		itemHome := t.back(t.Wrap(idx+uint32(entries[pick].off)), disp)
+		srcIdx, dstIdx := t.Wrap(idx+uint32(entries[pick].off)), t.Wrap(idx+uint32(hole))
+		src, dst := t.At(srcIdx), t.At(dstIdx)
+		itemHome := t.back(srcIdx, uint32(entries[pick].off-entries[pick].homeOff))
 		bucket := BucketOf(src.Metadata())
 		// Counted at the new slot before it is forgotten at the old one, so a reader never sees the group
 		// under-counted.
 		dst.PublishMoved(src, uint32(hole-entries[pick].homeOff))
-		t.NoteDisplacedAt(itemHome, idx+uint32(hole), bucket)
-		t.ForgetDisplacedAt(itemHome, idx+uint32(entries[pick].off), bucket)
+		t.relink(srcIdx, dstIdx)
+		t.NoteDisplacedAt(itemHome, dstIdx, bucket)
+		t.ForgetDisplacedAt(itemHome, srcIdx, bucket)
 		src.Kill()
 		hole, entries[pick].off = entries[pick].off, hole
 	}
@@ -426,8 +377,8 @@ func (t *FlatHashMap[K, V]) Release(idx uint32) {
 	}
 }
 
-// InsertFresh copies a live item into a table nobody reads yet (growth) and returns its slot index.
-func (t *FlatHashMap[K, V]) InsertFresh(keyHash uint64, src *Item[K, V]) uint32 {
+// insertFresh copies a live item into a table nobody reads yet (growth) and returns its slot index.
+func (t *FlatHashMap[K, V]) insertFresh(keyHash uint64, src *Item[K, V]) uint32 {
 	home := t.Home(keyHash)
 	for pos := home; ; pos++ {
 		dst := t.At(pos)
@@ -442,32 +393,99 @@ func (t *FlatHashMap[K, V]) InsertFresh(keyHash uint64, src *Item[K, V]) uint32 
 	}
 }
 
+// Grow moves the items into a fresh table of the given size. With keepOrder every queue keeps its order: both passes
+// walk the slots in order, and the second one resolves its random loads a batch at a time, so their misses overlap.
+// Without it the items are queued in their new slot order, which saves the second pass.
+func (t *FlatHashMap[K, V]) Grow(slots int, keepOrder bool) *FlatHashMap[K, V] {
+	fresh := NewFlatHashMap[K, V](slots, t.seed)
+	for idx := range t.size {
+		item := t.At(idx)
+		metaWord := item.Metadata()
+		if Empty(metaWord) {
+			continue
+		}
+		moved := fresh.insertFresh(t.hashOf(item.Entry().Key), item)
+		switch {
+		case keepOrder:
+			t.queueLinkAt(idx).prev = moved // prev is rebuilt from next
+		case metaWord&InMainQueue != 0:
+			fresh.Enqueue(1, moved)
+		default:
+			fresh.Enqueue(0, moved)
+		}
+	}
+	if !keepOrder {
+		return fresh
+	}
+	moved := func(idx uint32) uint32 {
+		if idx >= t.size {
+			return fresh.headOf(uint(idx - t.size))
+		}
+		return t.queueLinkAt(idx).prev
+	}
+	var from, to [64]uint32
+	n := 0
+	relinkBatch := func() {
+		for i := range n {
+			to[i] = moved(to[i])
+		}
+		for i := range n {
+			fresh.queueLinkAt(from[i]).next = to[i]
+			fresh.queueLinkAt(to[i]).prev = from[i]
+		}
+		n = 0
+	}
+	for idx := range t.size + EvictionQueues {
+		if idx < t.size && Empty(t.At(idx).Metadata()) {
+			continue
+		}
+		from[n], to[n] = moved(idx), t.queueLinkAt(idx).next
+		if n++; n == len(from) {
+			relinkBatch()
+		}
+	}
+	relinkBatch()
+	fresh.hand = moved(t.hand)
+	return fresh
+}
+
 func (t *FlatHashMap[K, V]) Len() int { return int(t.size) }
 
 func (t *FlatHashMap[K, V]) Bytes() int64 {
 	length := int64(t.Len())
-	chunkPtrs := int64(len(t.chunks)) * int64(unsafe.Sizeof(uintptr(0)))
-	return int64(unsafe.Sizeof(*t)) + chunkPtrs + length*int64(unsafe.Sizeof(Item[K, V]{})) + (length>>groupShift)*4
+	chunkPtrs := int64(len(t.chunks)+len(t.queueLinkChunks)) * int64(unsafe.Sizeof(uintptr(0)))
+	slot := int64(unsafe.Sizeof(Item[K, V]{}) + unsafe.Sizeof(queueLink{}))
+	return int64(unsafe.Sizeof(*t)) + chunkPtrs + length*slot + (length>>groupShift)*4
 }
 
 // StorageProxy is a shard's stable handle to its current FlatHashMap: growth swaps the table underneath while the
-// shard's policy keeps the ref. Implements the public Items resolver.
+// shard's policy keeps the ref. Implements the public Items.
 type StorageProxy[K comparable, V any] struct {
 	storage atomic.Pointer[FlatHashMap[K, V]]
+	cost    func(key K, value V) uint32
 }
 
 func (r *StorageProxy[K, V]) GetStorage() *FlatHashMap[K, V] { return r.storage.Load() }
 func (r *StorageProxy[K, V]) Store(t *FlatHashMap[K, V])     { r.storage.Store(t) }
 
+// SetCostFunc sets what Cost weighs an item with; nil weighs every item 1.
+func (r *StorageProxy[K, V]) SetCostFunc(cost func(key K, value V) uint32) { r.cost = cost }
+
 // At resolves a slot index into its item via the current table.
 func (r *StorageProxy[K, V]) At(idx uint32) *Item[K, V] { return r.storage.Load().At(idx) }
 
-// Find resolves a queue node into its item and current slot via the current table. Called under the shard mutex.
-func (r *StorageProxy[K, V]) Find(node QNode) (*Item[K, V], uint32, bool) {
-	return r.storage.Load().Find(node)
+// Cost is the weight of the item at idx, as the cache accounts it.
+func (r *StorageProxy[K, V]) Cost(idx uint32) uint32 {
+	if r.cost == nil {
+		return 1
+	}
+	entry := r.At(idx).Entry()
+	return max(r.cost(entry.Key, entry.Value), 1)
 }
 
-// FindExact is FlatHashMap.FindExact on the current table. Called under the shard mutex.
-func (r *StorageProxy[K, V]) FindExact(node QNode) (*Item[K, V], uint32, bool) {
-	return r.storage.Load().FindExact(node)
-}
+func (r *StorageProxy[K, V]) Oldest(queue uint) (uint32, bool) { return r.storage.Load().Oldest(queue) }
+func (r *StorageProxy[K, V]) Newer(idx uint32) (uint32, bool)  { return r.storage.Load().Newer(idx) }
+func (r *StorageProxy[K, V]) Requeue(queue uint, idx uint32)   { r.storage.Load().Requeue(queue, idx) }
+func (r *StorageProxy[K, V]) Hand() (uint32, bool)             { return r.storage.Load().Hand() }
+func (r *StorageProxy[K, V]) AdvanceHand()                     { r.storage.Load().AdvanceHand() }
+func (r *StorageProxy[K, V]) Fingerprint(idx uint32) uint64    { return r.storage.Load().Fingerprint(idx) }

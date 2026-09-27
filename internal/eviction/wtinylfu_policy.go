@@ -1,151 +1,83 @@
 package eviction
 
 import (
+	"hash/maphash"
 	"math/bits"
 	"unsafe"
 
 	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
-// WTinyLFUPolicy is W-TinyLFU adapted to lock-free reads: a small admission window (~1% of the shard capacity) in
-// front of a protected main queue run as GCLOCK, gated by a Count-Min frequency sketch. Reads cannot move queue
-// nodes here (they only set the item's reference counter), so the classic LRU segments are approximated the same
-// way ClockPolicy approximates LRU, and access frequency is fed into the sketch at the points the policy does see:
-// every insert, and the reference counters observed during eviction scans. The sketch outlives evictions, so a key's
-// frequency history survives its residency - the property TinyLFU's admission filter relies on.
+// WTinyLFUPolicy is W-TinyLFU adapted to lock-free reads: an admission window of ~1% of the shard capacity in front
+// of a main queue run as GCLOCK, gated by a Count-Min frequency sketch. Reads only set the reference counter and
+// cannot move items, so the LRU segments are approximated as ClockPolicy approximates LRU. The sketch hears of an
+// access on every insert and whenever an eviction scan finds a set counter. It outlives evictions, so a key's
+// frequency history survives its residency, which is what TinyLFU's admission filter relies on.
 //
-// Eviction drains the window first: a candidate touched while in the window is admitted to main outright; an
-// untouched one must beat the frequency estimate of main's next victim, otherwise it is evicted on the spot and
-// main stays intact (scan resistance).
+// Eviction drains the window first. A candidate touched in the window enters main outright. An untouched one must
+// beat the frequency estimate of main's next victim; otherwise it is evicted and main stays intact (scan resistance).
 type WTinyLFUPolicy[K comparable, V any] struct {
-	items  *itemstore.StorageProxy[K, V]
-	window itemstore.EvictQueue
-	main   itemstore.EvictQueue
-	sketch freqSketch
-
-	windowWeight int64 // total weight of nodes in window (including nodes of keys already gone)
-	windowCap    int64 // target weight of window: ~1% of the shard capacity
+	admission[K, V] // the window
+	sketch          freqSketch
+	seed            maphash.Seed
 }
 
 // NewWTinyLFU creates a W-TinyLFU policy for a shard with the given capacity; sketchKeys sizes the frequency sketch
 // (in keys, like the S3-FIFO ghost size).
 func NewWTinyLFU[K comparable, V any](items *itemstore.StorageProxy[K, V], shardCap int64, sketchKeys int) *WTinyLFUPolicy[K, V] {
-	windowCap := shardCap / 100
-	if windowCap < 1 {
-		windowCap = 1
-	}
 	return &WTinyLFUPolicy[K, V]{
-		items:     items,
+		admission: admission[K, V]{items: items, cap: max(shardCap/100, 1)},
 		sketch:    newFreqSketch(sketchKeys),
-		windowCap: windowCap,
+		seed:      maphash.MakeSeed(),
 	}
+}
+
+// keyHash is what the sketch counts a key by: its own hash, since its history must outlive the table growing under
+// it (a table fingerprint would not).
+func (p *WTinyLFUPolicy[K, V]) keyHash(idx uint32) uint64 {
+	return maphash.Comparable(p.seed, p.items.At(idx).Entry().Key)
 }
 
 func (p *WTinyLFUPolicy[K, V]) Add(node itemstore.QNode) {
-	p.sketch.increment(mixHash(node.Hash()))
-	p.window.Push(node)
-	p.windowWeight += int64(node.Cost())
+	p.sketch.increment(p.keyHash(node.Idx))
+	p.admission.Add(node)
 }
 
-func (p *WTinyLFUPolicy[K, V]) Len() int { return p.window.Len() + p.main.Len() }
-
-func (p *WTinyLFUPolicy[K, V]) Bytes() int64 {
-	return int64(unsafe.Sizeof(*p)) + p.window.Bytes() + p.main.Bytes() + p.sketch.bytes()
-}
-
-func (p *WTinyLFUPolicy[K, V]) Sweep(limit int, parity bool) bool {
-	if !p.window.Sweeping() && !p.main.Sweeping() {
-		p.window.BeginSweep()
-		p.main.BeginSweep()
-	}
-	// Nodes leaving window give their weight back, as in evictWindowOnce.
-	more := itemstore.SweepStep(&p.window, p.items, limit, parity,
-		func(node itemstore.QNode) { p.windowWeight -= int64(node.Cost()) })
-	return itemstore.SweepStep(&p.main, p.items, limit, parity, nil) || more
-}
+func (p *WTinyLFUPolicy[K, V]) Bytes() int64 { return int64(unsafe.Sizeof(*p)) + p.sketch.bytes() }
 
 func (p *WTinyLFUPolicy[K, V]) Evict(nowOff uint32) (uint32, bool) {
+	t := p.items.GetStorage()
 	for {
-		fromWindow := p.windowWeight > p.windowCap && p.window.Len() > 0
-		if !fromWindow && p.main.Len() == 0 {
-			if p.window.Len() == 0 {
-				return 0, false
+		idx, fromWindow, ok := p.next(t)
+		if !ok {
+			return 0, false
+		}
+		item := t.At(idx)
+		metaWord := item.Metadata()
+		switch {
+		case chanced(metaWord, nowOff):
+			// Reused: record it in the sketch; a window candidate is admitted without consulting the filter.
+			p.sketch.increment(p.keyHash(idx))
+			if fromWindow {
+				item.ResetChances()
+				p.promote(t, idx)
+			} else {
+				item.RevokeChance(metaWord)
+				t.Requeue(mainQueue, idx)
 			}
-			fromWindow = true
-		}
-		var (
-			victim uint32
-			found  bool
-		)
-		if fromWindow {
-			victim, found = p.evictWindowOnce(nowOff)
-		} else {
-			victim, found = p.evictMainOnce(nowOff)
-		}
-		if found {
-			return victim, true
+		case fromWindow && !itemstore.Expired(metaWord, nowOff) && p.admits(t, idx):
+			p.promote(t, idx)
+		default:
+			return idx, true
 		}
 	}
 }
 
-// evictWindowOnce processes the head of window: (idx, true) means the item is the victim, (0, false) means the
-// node was dropped or the candidate was admitted to main.
-func (p *WTinyLFUPolicy[K, V]) evictWindowOnce(nowOff uint32) (uint32, bool) {
-	candidate, ok := p.window.Pop()
-	if !ok {
-		return 0, false
-	}
-	p.windowWeight -= int64(candidate.Cost())
-
-	item, idx, found := p.items.Find(candidate)
-	if !found {
-		return 0, false // the key left the cache; its node goes with it
-	}
-	if chanced(item.Metadata(), nowOff) {
-		// Touched while in the window: record the reuse and admit without consulting the filter.
-		p.sketch.increment(mixHash(candidate.Hash()))
-		item.ResetChances()
-		p.main.Push(candidate)
-		return 0, false
-	}
-	if !itemstore.Expired(item.Metadata(), nowOff) && p.admit(candidate) {
-		p.main.Push(candidate)
-		return 0, false
-	}
-	return idx, true
-}
-
-// admit is the TinyLFU admission filter: the candidate enters main only when its frequency estimate beats the next
-// main victim's. An empty main, or a head node whose key is already gone, admits freely - nothing of value is
-// displaced. Both estimates come from the nodes' own hash bits: no item is read.
-func (p *WTinyLFUPolicy[K, V]) admit(candidate itemstore.QNode) bool {
-	victim, ok := p.main.Peek()
-	if !ok {
-		return true
-	}
-	if _, _, found := p.items.Find(victim); !found {
-		return true
-	}
-	return p.sketch.estimate(mixHash(candidate.Hash())) > p.sketch.estimate(mixHash(victim.Hash()))
-}
-
-// evictMainOnce performs a single GCLOCK step over main, feeding observed reuse into the sketch.
-func (p *WTinyLFUPolicy[K, V]) evictMainOnce(nowOff uint32) (uint32, bool) {
-	candidate, ok := p.main.Pop()
-	if !ok {
-		return 0, false
-	}
-	item, idx, found := p.items.Find(candidate)
-	if !found {
-		return 0, false
-	}
-	if metaWord := item.Metadata(); chanced(metaWord, nowOff) {
-		item.RevokeChance(metaWord)
-		p.sketch.increment(mixHash(candidate.Hash()))
-		p.main.Push(candidate)
-		return 0, false
-	}
-	return idx, true
+// admits is the TinyLFU admission filter: the candidate enters main only when its frequency estimate beats that of
+// main's next victim. An empty main admits freely.
+func (p *WTinyLFUPolicy[K, V]) admits(t *itemstore.FlatHashMap[K, V], candidate uint32) bool {
+	victim, ok := t.Oldest(mainQueue)
+	return !ok || p.sketch.estimate(p.keyHash(candidate)) > p.sketch.estimate(p.keyHash(victim))
 }
 
 // freqSketch is a Count-Min sketch with 4-bit saturating counters, 16 to a uint64 word, and periodic aging: after

@@ -2,39 +2,54 @@ package memstash
 
 import "github.com/zakonnic/memstash/internal/itemstore"
 
-// QNode is an eviction-queue element: a claim on a cached key - 40 bits of its hash - plus the item's weight at
-// enqueue time (Cost). A node never names a slot: items move when a deletion compacts their run, so a policy resolves
-// a node to its item through Items.Find whenever it needs one. The weight may drift after an overwrite - only queue
-// selection depends on it, the global accounting is recomputed from the live value.
+// QNode is an item as the eviction policy hears of it: its slot index in the shard's table and its weight.
 type QNode = itemstore.QNode
 
 // Item is one cached item: its key/value Entry alongside eviction metadata (a 2-bit reference counter set by
-// lock-free reads, the expiration offset and an occupancy generation). See Metadata/Entry/TouchWith/RevokeChance/
-// ResetChances for what a policy may do with it; killing is the cache's job, after Evict names the victim.
+// lock-free reads, the expiration offset, the eviction queue it is in and an occupancy generation). See
+// Metadata/Entry/TouchWith/RevokeChance/ResetChances for what a policy may do with it; killing is the cache's job,
+// after Evict names the victim.
 type Item[K comparable, V any] = itemstore.Item[K, V]
 
-// Items resolves queue nodes into the items themselves; the cache hands one to a custom eviction policy's factory.
+// Items is the shard's table as its eviction policy sees it; the cache hands one to a custom policy's factory. The
+// cache enqueues every new item at the back of queue 0 and removes every departing one, so each live item sits in
+// exactly one of the EvictionQueues queues threaded through the table; the policy moves items between the queues and
+// picks victims. An index is good until the policy method returns: a deletion compacts its run and moves items. Call
+// under the shard mutex only, which is where every policy method already runs.
 type Items[K comparable, V any] interface {
-	// Find returns the item a node was enqueued for and its current slot index, or false when that key has since
-	// left the cache - the node is stale then and the policy drops it. It reads no key: the match is the home slot
-	// and twelve hash bits, and two live keys sharing both - a twin pair, once in ~4096 keys homed together - look
-	// alike to it. That is harmless for eviction: the twins' nodes serve either item, so evicting one for the
-	// other's node leaves the class with as many nodes as items, and nothing ends up unevictable. Call under the
-	// shard mutex only, which is where every policy method already runs.
-	Find(node QNode) (item *Item[K, V], idx uint32, ok bool)
-	// FindExact is Find with the candidate's key rehashed against the node's hash bits, so a twin is passed over.
-	// It is for the one decision a twin would corrupt: dropping a node as a duplicate in Sweep, which would leave
-	// the twin's item without a node. Eviction has no use for it - see Find.
-	FindExact(node QNode) (item *Item[K, V], idx uint32, ok bool)
+	// At resolves a slot index into its item.
+	At(idx uint32) *Item[K, V]
+	// Cost is the item's weight as the cache accounts it.
+	Cost(idx uint32) uint32
+	// Oldest returns the item at the front of a queue, false when the queue is empty.
+	Oldest(queue uint) (uint32, bool)
+	// Newer returns the item queued after idx, false at the back of its queue.
+	Newer(idx uint32) (uint32, bool)
+	// Requeue moves the item to the back of a queue, its own or the other one; ItemInMainQueue follows.
+	Requeue(queue uint, idx uint32)
+	// Hand returns where a scan over queue 0 stands: the oldest item until it starts, and again once it passes the
+	// back. The hand follows its item when that moves and steps on to the next one when that leaves.
+	Hand() (uint32, bool)
+	// AdvanceHand moves the hand to the next item of queue 0.
+	AdvanceHand()
+	// Fingerprint identifies the item's key without hashing it - its home slot and twelve tag bits - for a policy
+	// that keeps history across residencies. It changes when the table grows.
+	Fingerprint(idx uint32) uint64
 }
 
+// EvictionQueues is how many eviction queues a shard's table carries: queue 0, where every new item is enqueued, and
+// queue 1.
+const EvictionQueues = itemstore.EvictionQueues
+
 const (
-	// ItemDead is the meta-word bit of a killed item. A policy never meets one: Find hands out live items only, and
-	// the kill happens after Evict returns; the bit is exported for tooling that reads meta words directly.
+	// ItemDead is the meta-word bit of a killed item. A policy never meets one: the cache removes an item from its
+	// queue before it kills it; the bit is exported for tooling that reads meta words directly.
 	ItemDead = itemstore.Dead
 	// ItemChanceMask isolates the meta word's reference counter: non-zero means the item was read since the counter
 	// was last cleared.
 	ItemChanceMask = itemstore.ChanceMask
+	// ItemInMainQueue is the meta-word bit of an item in queue 1.
+	ItemInMainQueue = itemstore.InMainQueue
 
 	// --- DeletionCause ---
 
@@ -56,45 +71,28 @@ const (
 // EvictionPolicy.Evict).
 func ItemExpired(metaWord uint64, nowOff uint32) bool { return itemstore.Expired(metaWord, nowOff) }
 
-// ItemQueuedIn reports whether the running sweep pass has already kept a node for this item; MarkItemQueued records
-// that it has. Both take the parity handed to EvictionPolicy.Sweep, and both are for that method only.
-func ItemQueuedIn(metaWord uint64, parity bool) bool { return itemstore.QueuedIn(metaWord, parity) }
-
-// MarkItemQueued records that the running sweep pass has kept a node for this item. See ItemQueuedIn.
-func MarkItemQueued[K comparable, V any](item *Item[K, V], parity bool) { item.SetQueued(parity) }
-
 // EvictionPolicy is one shard's eviction policy: the contract the built-in policies (Clock, S3-FIFO, W-TinyLFU,
 // SIEVE) implement and a custom policy plugged in through WithCustomEvictionPolicy must satisfy. Every method is
 // called strictly under the owning shard's mutex, so implementations need no synchronization of their own - but
 // item reference counters are set concurrently by lock-free readers, so meta words must be read through
 // Item.Metadata.
 type EvictionPolicy[K comparable, V any] interface {
-	// Add registers the node of a newly inserted item. The item already carries its Entry; the node carries the
-	// key's hash (QNode.Hash) for a policy that keeps history across residencies.
+	// Add registers a newly inserted item, already enqueued at the back of queue 0.
 	Add(node QNode)
-	// Evict removes the next victim's node from the queues and returns the item's current slot index: the policy's
-	// chosen victim, or an expired item (ItemExpired). A node Find cannot resolve is stale - its key is gone - and
-	// the policy drops it and moves on. The cache kills the item and
-	// accounts its weight - the policy must not call Item.Kill. (0, false) means there is nothing to evict.
+	// Remove tells the policy an item is leaving - evicted, deleted, expired or overflowed - while it is still in its
+	// queue; the cache removes it from there right after. node.Cost is the weight the item is accounted with.
+	Remove(node QNode)
+	// Reweigh tells the policy an overwrite changed the weight of the item at idx by delta.
+	Reweigh(idx uint32, delta int64)
+	// Evict picks the next victim and returns its index: the policy's choice, or an expired item (ItemExpired). The
+	// cache removes and kills it - the policy must not call Item.Kill. (0, false) means there is nothing to evict.
 	Evict(nowOff uint32) (uint32, bool)
-	// Len returns the total number of queued nodes, stale ones included.
-	Len() int
-	// Sweep keeps the one node each live item is entitled to and drops the rest: the nodes Find cannot resolve, whose
-	// keys left the cache, and the duplicates a delete-then-set of one key leaves behind. It works in slices: each
-	// call examines up to limit nodes and reports whether the pass that began with the first call still has nodes to
-	// examine; the cache calls it from every write until it reports false.
-	//
-	// parity is the same for every call of one pass and the opposite of the last pass's: ItemQueuedIn tells whether
-	// the pass has already kept a node for that item, and MarkItemQueued records that it has. A policy that ignores
-	// parity still works - it just leaves the duplicates for the eviction path to pop.
-	Sweep(limit int, parity bool) (more bool)
 	// Bytes returns the footprint of the policy's own bookkeeping.
 	Bytes() int64
 }
 
-// EvictionPolicyFactory builds one shard's eviction policy: items resolves node indices to the cached items,
-// shardCap is the shard's capacity in weight units. The cache calls it once per shard, so per-shard state is
-// naturally private.
+// EvictionPolicyFactory builds one shard's eviction policy: items is the shard's table, shardCap the shard's
+// capacity in weight units. The cache calls it once per shard, so per-shard state is naturally private.
 type EvictionPolicyFactory[K comparable, V any] func(items Items[K, V], shardCap int64) EvictionPolicy[K, V]
 
 // DeletionCause tells why an item left the first level.
