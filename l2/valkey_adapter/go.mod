@@ -1,6 +1,6 @@
 module github.com/zakonnic/memstash/l2/valkey_adapter
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/valkey-io/valkey-go v1.0.76
@@ -9,5 +9,7 @@ require (
 
 require (
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	github.com/stretchr/testify v1.12.1 // indirect
+	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
