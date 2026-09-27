@@ -62,12 +62,15 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   else stays on `maphash`, whose 8-byte path is a runtime call that costs 2.3 ns to the mixer's 0.9. The seed is
   per cache, as before.
 - **The hot paths inline in user programs too.** A generic method of this package is compiled where it is
-  instantiated - in the user's module - and there the compiler could inline a helper from `internal/itemstore` only
-  if its body had reached the user through this package's export data, which a generic body does not carry. The tag,
-  the overflow bucket, the empty test, the queue node and the weight store were calls on every operation in every
-  program but this repository's own tests; `bridge.go` references each from an inlinable function of this package,
-  and the hash is chosen per key type in the probe body, where a branch is free. `GetHit` -16% on the benchmarks
-  module, which builds the way a user does.
+  instantiated - in the user's module - and there a plain helper from `internal/itemstore` or `internal/eviction`
+  inlines only if its body is in this package's export data, which the compiler writes only for helpers it inlined
+  in this package's own build. Every such helper was a call in every program but this repository's own tests: the
+  tag, the overflow bucket and the empty test on every read; the meta-word and weight stores, the generation and
+  distance encoders, the queue node accessors and the policies' own helpers on every write - 683 call sites in the
+  benchmarks module. `bridge.go` instantiates the cache once inside the package, which inlines them all there; the
+  155 calls left go to functions that are not inlinable anywhere. The instance adds nothing to a program's binary and
+  ~0.15 s to this package's compile. On the benchmarks module, which builds the way a user does: `GetHit` -16%, `Set`
+  and `Delete` -4% to -6%, the reads and writes of `Mixed90_10` unchanged.
 - **What the compaction costs, measured against the tombstone design in one session.** Reads are ahead (`GetHit`
   -13%, `Get` -21%, `GetMiss` -9%, `DeleteMiss` -19%) and so is every mixed workload (`Mixed90_10` -41%, parallel
   throughput -11% at 100% reads to -38% at 75%: the shard read line no longer bounces on every `Set`). Writes that
