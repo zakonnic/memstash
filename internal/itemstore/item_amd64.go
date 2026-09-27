@@ -9,3 +9,9 @@ package itemstore
 func (s *Item[K, V]) snapshotEntryInto(dst *Entry[K, V]) {
 	*dst = s.entry
 }
+
+// beginWrite makes the generation odd to signal a write in progress. TSO keeps the value stores after it.
+func (s *Item[K, V]) beginWrite() {
+	metaWord := s.meta.Load()
+	storeMeta(&s.meta, metaWord&^GenMask|(metaWord+1)&GenMask)
+}

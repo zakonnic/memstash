@@ -78,6 +78,15 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   serially costs 25% less than before; both are the price of a table that never carries a tombstone and never
   rebuilds.
 
+### Fixed
+
+- **A lock-free read could return a torn multi-word value on arm64 and other weakly ordered CPUs.** An in-place
+  overwrite of a value wider than a word marks the item's generation odd, writes the value, then marks it even; the
+  odd mark is an atomic store, which on arm64 is a release (`STLR`) and orders nothing after it, so the value stores
+  could become visible first, and a reader copying in that window validated against the old, even generation. The
+  odd mark is now followed by the same acquire+release pivot the read side already uses. amd64 is unaffected - its
+  stores never pass one another.
+
 ## [0.9.8] - 2026-08-13
 
 ### Fixed

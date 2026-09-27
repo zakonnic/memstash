@@ -8,12 +8,14 @@ import (
 )
 
 // Writer-side stores. The shard mutex admits one writer, so a meta write needs release ordering, not atomicity
-// against another writer - and on amd64 a plain aligned store is exactly that: stores become visible in program
-// order, and the compiler keeps memory operations in program order. The locked instruction an atomic Store or Or
-// compiles to costs several times the store itself (five of them: 18.5 ns locked, 1.5 ns plain), and an insert with
-// an eviction issues a dozen. Readers keep their atomic loads and CASes. The race detector cannot see the ordering
-// argument, so its builds take write_generic.go; the lost-update it would flag - a reader's touch CAS landing
-// between a writer's load and store - costs that item one reference bit, nothing more.
+// against another writer. On amd64 a plain aligned store gives that: stores become visible in program order, and the
+// compiler keeps memory operations in program order. The locked instruction an atomic Store or Or compiles to costs
+// several times the store itself (five of them: 18.5 ns locked, 1.5 ns plain), and an insert with an eviction issues
+// a dozen. Readers keep their atomic loads and CASes.
+//
+// The race detector cannot follow this argument, so -race builds take write_generic.go. The lost update it would
+// flag, a reader's CAS landing between a writer's load and store, costs that item one reference bit or one TTL
+// refresh.
 func storeMeta(p *atomic.Uint64, v uint64) { *(*uint64)(unsafe.Pointer(p)) = v }
 
 func orMeta(p *atomic.Uint64, bits uint64) uint64 {

@@ -219,14 +219,9 @@ func (s *Item[K, V]) SetValue(value V) {
 	s.entry.Value = value
 }
 
-// beginWrite makes the generation odd to signal a write in progress.
-func (s *Item[K, V]) beginWrite() {
-	metaWord := s.meta.Load()
-	storeMeta(&s.meta, metaWord&^GenMask|(metaWord+1)&GenMask)
-}
-
 // endWrite makes the generation even again; the store's release ordering keeps the value stores before it. A
-// concurrent touch may lose its chance bit here - harmless, as everywhere else.
+// concurrent touch may lose its chance bit here. The reread must stay atomic: gc would forward a plain one from
+// beginWrite's store, then delete that store as overwritten, and no reader would ever see the odd gen.
 func (s *Item[K, V]) endWrite() {
 	metaWord := s.meta.Load()
 	storeMeta(&s.meta, metaWord&^GenMask|liveGen(metaWord+1))

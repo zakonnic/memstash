@@ -15,3 +15,12 @@ func (s *Item[K, V]) snapshotEntryInto(dst *Entry[K, V]) {
 	var fence uint32
 	atomic.CompareAndSwapUint32(&fence, 0, 0)
 }
+
+// beginWrite makes the generation odd to signal a write in progress. The store is only a release (STLR on arm64) and
+// holds nothing after it, so the value stores could land first; the same pivot keeps them behind it.
+func (s *Item[K, V]) beginWrite() {
+	metaWord := s.meta.Load()
+	storeMeta(&s.meta, metaWord&^GenMask|(metaWord+1)&GenMask)
+	var fence uint32
+	atomic.CompareAndSwapUint32(&fence, 0, 0)
+}
