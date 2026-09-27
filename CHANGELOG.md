@@ -58,9 +58,6 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   locked writes measure 18.5 ns against 1.5 ns plain, and an insert that evicts issues a dozen. Readers keep their
   atomic loads and compare-and-swaps; the race detector, which cannot see the ordering argument, builds the atomic
   variant (`internal/itemstore/write_generic.go`).
-- **8-byte keys are hashed in place.** A key of 8 bytes without floats is mixed inline (two multiplies); everything
-  else stays on `maphash`, whose 8-byte path is a runtime call that costs 2.3 ns to the mixer's 0.9. The seed is
-  per cache, as before.
 - **The hot paths inline in user programs too.** A generic method of this package is compiled where it is
   instantiated - in the user's module - and there a plain helper from `internal/itemstore` or `internal/eviction`
   inlines only if its body is in this package's export data, which the compiler writes only for helpers it inlined
