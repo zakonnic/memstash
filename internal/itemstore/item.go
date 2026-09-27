@@ -143,9 +143,8 @@ func (s *Item[K, V]) setMain(set bool) {
 	andMeta(&s.meta, ^InMainQueue)
 }
 
-// PublishMoved fills an empty slot with the item at src, as Publish does, carrying over src's tag, TTL and reference
-// counter so the item keeps its identity and its standing with the policy. src stays live until the caller kills it,
-// so a reader finds the item at one slot or the other throughout. Called under the shard mutex.
+// PublishMoved fills an empty slot with the item at src, as Publish does. The item keeps its tag, TTL, reference
+// counter and queue bit.
 func (s *Item[K, V]) PublishMoved(src *Item[K, V], disp uint32) {
 	s.entry = src.entry
 	prev := s.meta.Load()

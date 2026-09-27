@@ -51,7 +51,7 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - Lock-free reads stay exact across the compaction: a miss that overlapped moves is re-probed (a per-shard move
   sequence on the line every read loads anyway), the third time under the shard mutex; hits are unchanged.
   `Iterator` and `SaveTo` may skip an item a concurrent deletion slid toward its home - the same weak consistency the
-  documentation already claims for concurrent writes - and never yield a key twice.
+  documentation already claims for concurrent writes - and never yield a key that stays in the cache twice.
 - `WithPreallocationRatio` is now a pure memory-for-latency dial, and `WithGrowthThreshold` only means growth; the
   rule that the ratio must stay below the threshold is gone.
 - **Meta words are written plainly under the shard mutex on amd64.** One writer holds the mutex, so a meta write

@@ -243,20 +243,18 @@ func GrowSlots(size int) int {
 // when the home lies before the reclaimed slot.
 type ShiftEntry struct{ off, homeOff int64 }
 
-// Reclaim closes the hole a kill left at idx (the item there is Dead, its weight and overflow count already
-// accounted). It is backward-shift deletion (Knuth, TAOCP 6.4, Algorithm R) with one twist: of the items to the
-// right whose probe chains run through the hole, the farthest one slides into it - not the nearest. Its old slot is
-// the hole now, and so on until no item to the right can cover the hole; that slot is cleared. The occupied slots come
-// out the same either way (linear probing's occupied set does not depend on order), but the farthest item is the most
-// displaced one, so this halves the moves per deletion (~1 instead of ~2 at load 0.75) and trims the long chains.
-// The run walked is then given exact HasNext bits, which also repairs the stale ones earlier churn left behind. The
-// table ends in the state the live keys alone would produce: never a tombstone.
+// Reclaim closes the hole a kill left at idx. The item there is dead, and its weight and overflow count are already
+// accounted. This is backward-shift deletion (Knuth, TAOCP 6.4, Algorithm R) with one twist: of the items to the
+// right whose probe chains run through the hole, the farthest one moves in, not the nearest. Its old slot becomes the
+// hole, and so on until nothing to the right covers the hole; that slot is cleared. The occupied set comes out the
+// same either way, but the farthest item is the most displaced one, so this halves the moves (~1 per deletion instead
+// of ~2 at load 0.75). The run then gets exact HasNext bits, which also repairs stale ones from earlier churn. The
+// table ends as the live keys alone would leave it.
 //
-// Called under the shard mutex. The moves - and only they - run inside a bracket on moves (odd while open): a reader
-// whose probe overlapped it and missed re-probes, since a key sliding toward its home can cross a probe. The scan and
-// the bit repass stay outside, so the bracket is a few tens of nanoseconds, and an uncovered hole opens none. Every
-// moved item is live in its new slot before its old one is killed, so a reader finds it at one or the other at every
-// instant. scratch is the caller's buffer, reused across calls.
+// Only the moves run inside the moves bracket (odd while open). A reader whose probe overlapped it and missed probes
+// again, because a key sliding toward its home can cross a probe. The scan and the bit repass stay outside, so the
+// bracket lasts tens of nanoseconds, and an uncovered hole opens none. A moved item dies in its old slot before it
+// goes live in the new one, so no walk meets it twice. scratch is the caller's buffer, reused across calls.
 func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]ShiftEntry, moves *atomic.Uint32) {
 	if t.At(idx).Metadata()&HasNext == 0 {
 		t.Release(idx) // uncovered: nothing to move
@@ -312,13 +310,13 @@ func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]ShiftEntry, moves *at
 		src, dst := t.At(srcIdx), t.At(dstIdx)
 		itemHome := t.back(srcIdx, uint32(entries[pick].off-entries[pick].homeOff))
 		bucket := BucketOf(src.Metadata())
-		// Counted at the new slot before it is forgotten at the old one, so a reader never sees the group
-		// under-counted.
+		src.Kill() // first: a moved item is never live in two slots
 		dst.PublishMoved(src, uint32(hole-entries[pick].homeOff))
 		t.relink(srcIdx, dstIdx)
+		// Counted at the new slot before it is forgotten at the old one, so a reader never sees the group
+		// under-counted.
 		t.NoteDisplacedAt(itemHome, dstIdx, bucket)
 		t.ForgetDisplacedAt(itemHome, srcIdx, bucket)
-		src.Kill()
 		hole, entries[pick].off = entries[pick].off, hole
 	}
 	if moved {

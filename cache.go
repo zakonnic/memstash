@@ -884,63 +884,57 @@ func (c *Cache[K, V]) storeLoaded(ctx context.Context, key K, value V) {
 	}
 }
 
-// Iterator returns an iterator over all live first-level entries (L2 is not scanned). The walk is lock-free and
-// weakly consistent, like sync.Map.Range: entries written or removed while iterating may or may not be seen, but a
-// yielded pair is never torn.
+// Iterator returns an iterator over the live first-level entries; L2 is not scanned. The walk is lock-free and weakly
+// consistent: an entry written, removed, or moved by a deletion during the walk may or may not be seen. A key that
+// stays in the cache throughout is yielded at most once, and a yielded pair is never torn.
 func (c *Cache[K, V]) Iterator() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		c.iterateWithLife(func(key K, value V, _ time.Duration) bool { return yield(key, value) })
 	}
 }
 
-// iterateWithLife is the Iterator walk, plus how much life each item has left (0 when it has no TTL). SaveTo needs
-// the lifetime, and one walk is easier to keep correct than two.
+// iterateWithLife is the Iterator walk, plus the life each item has left (0 when it has no TTL), which SaveTo needs.
 //
-// No key is yielded twice. A deletion slides items toward their homes, and the one move that could carry an item past
-// the walk a second time is a move across the table's end: out of the run that wraps onto the first slots, back to
-// the last ones. So the walk leaves the wrapped items of that leading run - those homed past their slot - for a final
-// pass over it; one that moved to the end meanwhile was seen there instead, and one that moves away later is simply
-// not seen, like any concurrent removal.
+// No key that stays is yielded twice. A moved item dies in its old slot before it goes live in the new one, and the
+// only move that can carry an item past the walk a second time crosses the table's end: out of the run that wraps
+// onto the first slots, back to the last ones. So the walk leaves the wrapped items, those homed past their slot, to
+// a final pass over that run. One that moved to the end meanwhile was seen there instead; one that moves away later
+// is not seen, like any concurrent removal.
 func (c *Cache[K, V]) iterateWithLife(yield func(K, V, time.Duration) bool) {
 	var entry itemstore.Entry[K, V]
 	for i := range c.shards {
 		storage := c.shards[i].items.GetStorage()
 		nowOff := c.nowOff.Load()
 		size := uint32(storage.Len())
-		// The leading run ends at the first empty slot; no item past it can be homed past its slot.
-		lead := size
-		for pos := uint32(0); pos < size; pos++ {
-			if empty(storage.At(pos).Metadata()) {
-				lead = pos
-				break
+		wrapped := func(pos uint32, metaWord uint64) bool {
+			if disp := itemstore.DispOf(metaWord); disp != itemstore.DispMax || pos < itemstore.DispMax {
+				return disp > pos
 			}
+			return storage.Home(c.keyHash(entry.Key)) > pos // the distance saturated: only the hash knows
 		}
-		wrapped := func(pos uint32) bool {
-			return pos < lead && storage.Home(c.keyHash(entry.Key)) > pos
-		}
-		for pos := uint32(0); pos < size; pos++ {
+		for pos := range size {
 			item := storage.At(pos)
 			metaWord := item.Metadata()
 			if empty(metaWord) || metaWord&itemstore.Dead != 0 || expired(metaWord, nowOff) {
 				continue
 			}
-			if !item.SnapshotInto(&entry, metaWord) || wrapped(pos) {
+			if !item.SnapshotInto(&entry, metaWord) || wrapped(pos, metaWord) {
 				continue
 			}
 			if !yield(entry.Key, entry.Value, c.lifeLeft(metaWord, nowOff)) {
 				return
 			}
 		}
-		for pos := uint32(0); pos < lead; pos++ {
+		for pos := range size {
 			item := storage.At(pos)
 			metaWord := item.Metadata()
 			if empty(metaWord) {
-				break
+				break // the wrapping run ends here
 			}
 			if metaWord&itemstore.Dead != 0 || expired(metaWord, nowOff) {
 				continue
 			}
-			if !item.SnapshotInto(&entry, metaWord) || !wrapped(pos) {
+			if !item.SnapshotInto(&entry, metaWord) || !wrapped(pos, metaWord) {
 				continue
 			}
 			if !yield(entry.Key, entry.Value, c.lifeLeft(metaWord, nowOff)) {
