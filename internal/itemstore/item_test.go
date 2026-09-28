@@ -19,8 +19,8 @@ func TestItemSize(t *testing.T) {
 	assert.EqualValues(t, 48, unsafe.Sizeof(Item[string, []byte]{}))
 }
 
-// TestSnapshotSeqlock: a multi-word overwrite must invalidate a snapshot taken against the pre-overwrite meta word,
-// a single-word one must not bump the generation at all.
+// TestSnapshotSeqlock: an overwrite of anything but a single scalar must invalidate a snapshot taken against the
+// pre-overwrite meta word, a single scalar's must not bump the generation at all.
 func TestSnapshotSeqlock(t *testing.T) {
 	item := NewFlatHashMap[string, string](64, maphash.MakeSeed()).At(0)
 	item.Publish(Entry[string, string]{Key: "k", Value: "old"}, 0, 0, 0)
@@ -42,6 +42,14 @@ func TestSnapshotSeqlock(t *testing.T) {
 	wordEntry, ok := word.Snapshot(wordBefore)
 	assert.True(t, ok)
 	assert.EqualValues(t, 20, wordEntry.Value)
+
+	// Word-sized, but two fields: must be bracketed.
+	type halves struct{ A, B uint32 }
+	pair := NewFlatHashMap[uint64, halves](64, maphash.MakeSeed()).At(0)
+	pair.Publish(Entry[uint64, halves]{Key: 1, Value: halves{1, 1}}, 0, 0, 0)
+	pairBefore := pair.Metadata()
+	pair.SetValue(halves{2, 2})
+	assert.Equal(t, pairBefore+2, pair.Metadata(), "a word-sized value of two fields must be bracketed")
 }
 
 // TestSnapshotRejectsWriteInProgress covers the reader that lives entirely inside one write window: an odd meta word

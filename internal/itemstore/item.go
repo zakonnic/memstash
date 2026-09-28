@@ -180,12 +180,11 @@ func (s *Item[K, V]) SetHasNext(set bool) {
 	}
 }
 
-// SetValue overwrites the value in place (the key stays). Called under the shard mutex. Word-sized values skip the
-// bracketing: the Go memory model forbids tearing reads up to one machine word, so a reader gets the old or the new.
+// SetValue overwrites the value in place. A value wider than a word, or made of several parts, is written between
+// beginWrite and endWrite; a single scalar of up to a word is one store, so a reader gets the old or the new.
 func (s *Item[K, V]) SetValue(value V) {
-	// unsafe.Sizeof is a compile-time constant; the branch disappears.
-	if unsafe.Sizeof(value) > unsafe.Sizeof(uintptr(0)) {
-		// protects against concurrent reads during writes with && metaWord&1
+	// Constant per instantiation. Alignof < Sizeof when the value has several parts.
+	if unsafe.Sizeof(value) > unsafe.Sizeof(uintptr(0)) || unsafe.Alignof(value) < unsafe.Sizeof(value) {
 		s.beginWrite()
 		s.entry.Value = value
 		s.endWrite()

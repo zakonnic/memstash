@@ -89,6 +89,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   could become visible first, and a reader copying in that window validated against the old, even generation. The
   odd mark is now followed by the same acquire+release pivot the read side already uses. amd64 is unaffected - its
   stores never pass one another.
+- **A lock-free read could return a torn value of up to 8 bytes made of several fields.** An in-place overwrite
+  skipped the generation bracket for any value no wider than a word, but gc stores a `struct{A, B uint32}` or a
+  `struct{X, Y float32}` one field at a time, so a reader could pair `A` of one write with `B` of another. Only a
+  single scalar - an integer, a float, a pointer - skips the bracket now; its code is unchanged.
 
 ## [0.9.8] - 2026-08-13
 
