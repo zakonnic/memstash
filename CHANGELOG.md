@@ -65,7 +65,7 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   in this package's own build. Every such helper was a call in every program but this repository's own tests: the
   tag, the overflow bucket and the empty test on every read; the meta-word and weight stores, the generation and
   distance encoders, the queue node accessors and the policies' own helpers on every write - 683 call sites in the
-  benchmarks module. `bridge.go` instantiates the cache once inside the package, which inlines them all there; the
+  benchmarks module. The package now instantiates the cache once inside itself, which inlines them all there; the
   155 calls left go to functions that are not inlinable anywhere. The instance adds nothing to a program's binary and
   ~0.15 s to this package's compile. On the benchmarks module, which builds the way a user does: `GetHit` -16%, `Set`
   and `Delete` -4% to -6%, the reads and writes of `Mixed90_10` unchanged.
