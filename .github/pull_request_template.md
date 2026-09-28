@@ -4,7 +4,7 @@
 
 ## Checklist
 
-- [ ] `make test` passes (`go test -race ./...`)
+- [ ] `make test` and `make test-race` pass
 - [ ] `make lint` is clean
 - [ ] New behaviour is covered by a test
 - [ ] Public API changes are reflected in the doc comments and the README option table

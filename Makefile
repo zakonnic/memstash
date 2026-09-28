@@ -44,8 +44,10 @@ lint: ## Run linter with settings from .golangci.yml (needs golangci-lint v2)
 lint-fix: ## Linter tries to fix issues automatically
 	golangci-lint run -v --fix
 
-.PHONY: test test-all test-all-race
+.PHONY: test test-race test-all test-all-race
 test: ## Run local tests
+	go test -v ./...
+test-race: ## Run local tests with -race flag
 	go test -v -race ./...
 test-load-generator: ## Run the load generator's own tests
 	go -C benchmarks/load_generator test -race ./...
