@@ -43,8 +43,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **The item's meta word carries its distance from its home slot**, so a compaction reads the run it moves instead of
   rehashing every key it passes - the difference between 1.0 us and 0.6 us per delete on 100M string keys. It costs
   the six generation bits the seqlock had to spare (22 left, 2M writes to one slot before a stalled reader could
-  validate against a stale word) and moves the forced tag bit to the top of the field, which leaves the three hash
-  bits the overflow counters are indexed by readable from the tag.
+  validate against a stale word).
+- **The slot tag carries all 13 hash bits.** A tag must never be 0, or an empty slot would pass the candidate compare;
+  that used to be a forced top bit, leaving 4096 distinct tags. Now only a zero tag is remapped, so 8191 stay distinct:
+  a foreign key in the probe path costs a key compare half as often, and S3-FIFO's ghost fingerprints collide half as
+  often.
 - **A shard's read line carries nothing a writer touches.** The table pointer and the move sequence share the first
   cache line and the mutex opens the second, where before a `Set` taking the mutex invalidated the line every reader
   loads on every probe. Worth 30-37% on every mixed read/write benchmark.

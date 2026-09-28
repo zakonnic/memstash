@@ -51,7 +51,7 @@ type Items[K comparable, V any] interface {
 	Hand() (uint32, bool)
 	// AdvanceHand moves the hand to the next item of queue 0.
 	AdvanceHand()
-	// Fingerprint identifies the item's key without hashing it - its home slot and twelve tag bits - for a policy
+	// Fingerprint identifies the item's key without hashing it - its home slot and 13 tag bits - for a policy
 	// that keeps history across residencies. It changes when the table grows.
 	Fingerprint(idx uint32) uint64
 }

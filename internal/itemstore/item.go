@@ -5,25 +5,15 @@ import (
 	"unsafe"
 )
 
-// Layout of an item's 64-bit meta word:
+// Layout of an item's 64-bit meta word, high bit first:
 //
 //	[dead:1][secondChance:1][thirdChance:1][main:1][expireOff:18][hasNext:1][tag:13][disp:6][gen:22]
 //
-// dead marks a killed item during the moment between its kill and the reclaim of its slot (see FlatHashMap.Reclaim);
-// the two chance bits form a unary reference counter; main says which eviction queue the item is in; expireOff is the
-// expiration time in expireUnit steps on a wrapping scale (0 = no TTL); hasNext says a key homed at or before this
-// slot lives past it, so a probe must keep walking; tag prefilters candidates without touching the key - only items
-// sharing a home slot are compared against it, so 13 bits stay ample (12 of them carrying hash, see TagOf); disp is
-// how far the item sits from its home slot, which is what lets a deletion compact a run without rehashing the keys
-// it passes (see DispOf); gen counts the slot's occupancies and in-place value writes, and lock-free readers validate
-// their Entry snapshot against it (see Snapshot).
+// An empty slot carries nothing but its gen. A never-occupied slot is all zero; a cleared one keeps counting, so no
+// snapshot of a previous occupant validates against the next.
 //
-// An empty slot carries nothing but its gen (Empty): a never-occupied slot is all zero, a cleared one keeps counting
-// so that no snapshot taken of a previous occupant can validate against the next. Gen 0 is reserved and TagOf never
-// yields 0, so no probe mistakes an empty slot for a candidate.
-//
-// The unary counter is deliberate: increment is an idempotent OR and decrement an AND, and a saturated counter
-// performs no writes at all, so hot keys never bounce the cache line between cores.
+// The reference counter is unary: increment is an OR, decrement an AND, and a saturated counter writes nothing. So hot
+// keys never bounce the cache line between cores.
 const (
 	// Dead marks a killed item whose slot has not been reclaimed yet.
 	Dead uint64 = 1 << 63
@@ -50,8 +40,8 @@ const (
 
 	TagShift        = 28
 	TagMask  uint64 = (1<<13 - 1) << TagShift
-	// TagForced is the tag's top bit, set on every live item and clear on every empty slot (see TagOf).
-	TagForced uint64 = 1 << (TagShift + 12)
+	// TagOfZero is what TagOf yields for a hash whose tag bits are all zero: the field's top bit alone.
+	TagOfZero uint64 = 1 << (TagShift + 12)
 	// DeadOrTag matches a probe candidate in one compare: alive and carrying the probed tag.
 	DeadOrTag = Dead | TagMask
 
@@ -68,15 +58,18 @@ const (
 	AliveGenMask = Dead | GenMask
 )
 
-// TagOf extracts a key hash's slot tag, positioned for direct meta-word compares. Hash bits 14..25 plus a forced top
-// bit: disjoint from the low bits picking the shard and the high bits picking the home slot.
+// TagOf returns a key hash's tag, positioned for meta-word compares. It takes hash bits 14..26, disjoint from the low
+// bits that pick the shard and the high bits that pick the home slot.
 //
-// The top bit is forced, so a tag is never 0. That is what lets probes drop the empty-slot test: an empty slot's meta
-// word can no longer pass the candidate compare, and the probe falls through to HasNext, which an empty slot has
-// clear. It costs the top bit's entropy - 12 distinct tags rather than 13 bits' worth, so a false candidate every
-// 4096 instead of every 8192, and a false candidate is one key compare on a line already read. Forcing the top bit
-// rather than the low one leaves hash bits 14..16 intact, which is what BucketOf reads back.
-func TagOf(hash uint64) uint64 { return hash>>14<<TagShift&TagMask | TagForced }
+// A tag is never 0, so an empty slot never passes the candidate compare and probes need no empty test. A zero tag maps
+// to TagOfZero, whose low bits are still the hash's, so BucketOf reads them back.
+func TagOf(hash uint64) uint64 {
+	tag := hash >> 14 << TagShift & TagMask
+	if tag == 0 {
+		tag = TagOfZero
+	}
+	return tag
+}
 
 // DispOf returns the item's distance from its home slot, or DispMax when it has to come from the key's hash.
 func DispOf(metaWord uint64) uint32 { return uint32(metaWord>>DispShift) & DispMax }
@@ -153,8 +146,8 @@ func (s *Item[K, V]) PublishMoved(src *Item[K, V], disp uint32) {
 		liveGen((prev+2)&^1))
 }
 
-// liveGen fits a generation into its field, skipping 0: that value marks a never-occupied slot, and an item with no
-// TTL and a zero tag would otherwise carry a meta word of 0 and cut probe chains short.
+// liveGen wraps a generation into its field, skipping 0: gen 0 belongs to never-occupied slots. Probes don't depend
+// on it, since a live word is non-zero through its tag.
 func liveGen(gen uint64) uint64 {
 	gen &= GenMask
 	if gen == 0 {

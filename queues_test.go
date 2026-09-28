@@ -77,7 +77,7 @@ func TestQueuesUnderChurn(t *testing.T) {
 }
 
 // TestDeletedTwinStaysEvictable is the scenario that orphaned an item while queue nodes named keys by hash: a key
-// replaced in its home slot by a new key with the same twelve tag bits, which then turns hot. Now the item's place in
+// replaced in its home slot by a new key with the same tag, which then turns hot. Now the item's place in
 // its queue is its own, so it is evicted like any other.
 func TestDeletedTwinStaysEvictable(t *testing.T) {
 	ctx := context.Background()

@@ -192,11 +192,10 @@ func (t *FlatHashMap[K, V]) homeOf(idx uint32, item *Item[K, V]) uint32 {
 	return t.Home(t.hashOf(item.Entry().Key))
 }
 
-// Fingerprint identifies the key at idx without hashing it: its home slot and twelve tag bits. It changes when the
-// table grows.
+// Fingerprint identifies the key at idx without hashing it: its home slot and tag. It changes when the table grows.
 func (t *FlatHashMap[K, V]) Fingerprint(idx uint32) uint64 {
 	item := t.At(idx)
-	return uint64(t.homeOf(idx, item))<<32 | item.Metadata()>>TagShift&(1<<12-1)
+	return uint64(t.homeOf(idx, item))<<32 | item.Metadata()&TagMask>>TagShift
 }
 
 // overflowAt takes a home that Home already reduced into range.

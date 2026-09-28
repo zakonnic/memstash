@@ -89,6 +89,10 @@ func TestTagNeverMatchesEmptySlot(t *testing.T) {
 		require.NotZero(t, tag, "hash %#016x yields a zero tag", hash)
 		require.Zero(t, tag&^TagMask, "hash %#016x puts bits outside the tag field", hash)
 		require.NotEqual(t, empty.Metadata()&DeadOrTag, tag, "hash %#016x matches an empty slot", hash)
+		require.Equal(t, OverflowBucket(hash), BucketOf(tag), "hash %#016x: the tag loses the overflow bucket", hash)
+		if raw := hash >> 14 & (TagMask >> TagShift); raw != 0 {
+			require.Equal(t, raw<<TagShift, tag, "hash %#016x: a non-zero tag must carry all 13 hash bits", hash)
+		}
 	}
 	check(0)
 	for shift := range 64 { // every single-bit hash, including those with no bits in the tag field at all

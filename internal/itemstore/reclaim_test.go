@@ -140,7 +140,7 @@ func (m *model) check(t *testing.T) {
 			"slot %d: the stored displacement disagrees with the key's home", pos)
 		require.Equal(t, OverflowBucket(hash), BucketOf(m.t.At(pos).Metadata()),
 			"slot %d: the overflow bucket is not recoverable from the tag", pos)
-		require.Equal(t, uint64(home)<<32|hash>>14&(1<<12-1), m.t.Fingerprint(pos), "slot %d: fingerprint", pos)
+		require.Equal(t, uint64(home)<<32|TagOf(hash)>>TagShift, m.t.Fingerprint(pos), "slot %d: fingerprint", pos)
 		for d := uint32(0); d < steps; d++ {
 			needBit[m.t.Wrap(home+d)] = true
 		}
@@ -248,12 +248,12 @@ func TestReclaimUncoveredHoleIsCheap(t *testing.T) {
 // even when the new one carries the same tag.
 func TestClearAdvancesGeneration(t *testing.T) {
 	item := NewFlatHashMap[uint64, uint64](64, maphash.MakeSeed()).At(0)
-	item.Publish(Entry[uint64, uint64]{Key: 1, Value: 1}, TagForced, 0, 0)
+	item.Publish(Entry[uint64, uint64]{Key: 1, Value: 1}, TagOfZero, 0, 0)
 	before := item.Metadata()
 	item.Kill()
 	item.Clear()
 	require.True(t, Empty(item.Metadata()))
-	item.Publish(Entry[uint64, uint64]{Key: 2, Value: 2}, TagForced, 0, 0)
+	item.Publish(Entry[uint64, uint64]{Key: 2, Value: 2}, TagOfZero, 0, 0)
 	_, ok := item.Snapshot(before)
 	require.False(t, ok, "a snapshot of the old occupant validated against the new one")
 }
