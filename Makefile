@@ -116,12 +116,24 @@ check-new-libs: ## Checks for new versions of libraries
 		echo "All dependencies are up to date"; \
 	fi
 
-.PHONY: tag
+.PHONY: require-core tag
+require-core: ## Make every l2 adapter require core v$(V): the release commit (make require-core V=1.2.3)
+	@test -n "$(V)" || { echo "V is required, e.g. make require-core V=1.2.3"; exit 1; }
+	$(foreach m, $(ADAPTERS), go -C $(m) mod edit -require=github.com/zakonnic/memstash@v$(V);)
+
 tag: ## Tag the root module and every l2 adapter module with the given version (make tag V=1.2.3), then 'make push'
 	@test -n "$(V)" || { echo "V is required, e.g. make tag V=1.2.3"; exit 1; }
 	@for t in $(TAGS); do \
 		if git rev-parse "$$t" >/dev/null 2>&1; then \
 			echo "Error: tag $$t already exists. Aborting."; \
+			exit 1; \
+		fi; \
+	done
+	@# An adapter left on an older core ships without that release's core fixes: the l2 helpers live in the core.
+	@for m in $(ADAPTERS); do \
+		got=$$(grep -m1 -h 'zakonnic/memstash v' $$m/go.mod | grep -o 'v[0-9][^ ]*'); \
+		if [ "$$got" != "v$(V)" ]; then \
+			echo "Error: $$m requires core $$got, not v$(V). Run 'make require-core V=$(V)' and commit. Aborting."; \
 			exit 1; \
 		fi; \
 	done
