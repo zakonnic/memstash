@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -90,5 +91,86 @@ func TestNewBatchLoadable(t *testing.T) {
 
 		_, err = failing.GetOrLoad(ctx, "z")
 		require.ErrorIs(t, err, boom)
+	})
+}
+
+// A key the source does not have is ErrKeyNotFound whichever loader shape says so, and it is cached in neither level:
+// a zero value written for it would outlive a restart in L2.
+func TestLoadersNotFound(t *testing.T) {
+	ctx := context.Background()
+	known := map[string]string{"a": "va"}
+
+	t.Run("batch loader behind GetOrLoad", func(t *testing.T) {
+		l2 := newL2Stub()
+		lc, err := memstash.NewBatchLoadable(
+			func(_ context.Context, keys []string) (memstash.List[string, string], error) {
+				found := memstash.List[string, string]{}
+				for _, key := range keys {
+					if v, ok := known[key]; ok {
+						found = append(found, memstash.KeyVal[string, string]{Key: key, Value: v})
+					}
+				}
+				return found, nil
+			},
+			memstash.WithL2Cache[string, string](l2), memstash.WithWritePolicy(memstash.WriteThrough),
+		)
+		require.NoError(t, err)
+		defer lc.Close()
+
+		_, err = lc.GetOrLoad(ctx, "ghost")
+		require.ErrorIs(t, err, memstash.ErrKeyNotFound)
+		_, ok := lc.GetFromMemory("ghost")
+		assert.False(t, ok, "a missing key must not be cached")
+		_, ok = l2.snapshot("ghost")
+		assert.False(t, ok, "a missing key must not be written to L2")
+	})
+
+	t.Run("single loader behind BatchGetOrLoad", func(t *testing.T) {
+		lc, err := memstash.NewLoadable(func(_ context.Context, key string) (string, error) {
+			if v, ok := known[key]; ok {
+				return v, nil
+			}
+			return "", memstash.ErrKeyNotFound
+		})
+		require.NoError(t, err)
+		defer lc.Close()
+
+		found, err := lc.BatchGetOrLoad(ctx, []string{"ghost", "a"})
+		require.NoError(t, err, "a missing key is absent from the result, not a failed batch")
+		assert.Equal(t, map[string]string{"a": "va"}, found.ToMap())
+		_, ok := lc.GetFromMemory("ghost")
+		assert.False(t, ok)
+	})
+
+	t.Run("GetOrLoad waiting on a batch that omits its key", func(t *testing.T) {
+		c, err := memstash.New[string, string](memstash.WithStats())
+		require.NoError(t, err)
+		defer c.Close()
+
+		entered, gate := make(chan struct{}), make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			_, err := c.BatchGetOrLoad(ctx, []string{"ghost"},
+				func(context.Context, []string) (memstash.List[string, string], error) {
+					close(entered)
+					<-gate
+					return nil, nil
+				})
+			done <- err
+		}()
+		<-entered
+		misses := func() int64 { stats := c.Stats(); return stats.MemoryMisses() }
+		base := misses()
+		waiter := make(chan error, 1)
+		go func() {
+			_, err := c.GetOrLoad(ctx, "ghost", func(context.Context, string) (string, error) {
+				return "", errors.New("a flight was running: this call had to join it")
+			})
+			waiter <- err
+		}()
+		require.Eventually(t, func() bool { return misses() > base }, 5*time.Second, time.Millisecond)
+		close(gate)
+		require.NoError(t, <-done)
+		assert.ErrorIs(t, <-waiter, memstash.ErrKeyNotFound)
 	})
 }

@@ -10,8 +10,8 @@ import (
 // GetAndRefresh returns what memory holds for key - a value past its TTL included, as long as no read has reclaimed it -
 // and reloads the key in the background, where the result replaces the cached value and follows WritePolicy into L2.
 //
-// ctx is used for its values only: the load outlives this call. A load error leaves the current value in place; a
-// GetOrLoad waiting on the same key receives it. Concurrent loads of one key are coalesced into one.
+// ctx is used for its values only: the load outlives this call. A load error, ErrKeyNotFound included, leaves the
+// current value in place; a GetOrLoad waiting on the same key receives it. Concurrent loads of one key are coalesced into one.
 func (c *Cache[K, V]) GetAndRefresh(ctx context.Context, key K, load LoaderFunc[K, V]) (V, bool) {
 	value, ok := c.peekMemory(key)
 	if ok {

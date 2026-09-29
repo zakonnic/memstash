@@ -132,6 +132,9 @@ user, err := c.GetOrLoad(ctx, "user:42", func(ctx context.Context, key string) (
 })
 ```
 
+A loader returns `memstash.ErrKeyNotFound` for a key the source does not have: nothing is cached, and `GetOrLoad`
+returns that error. A batch loader just leaves the key out.
+
 Prefer to fix the loader once at construction time? Use `NewLoadable`:
 
 ```go

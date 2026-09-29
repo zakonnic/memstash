@@ -222,8 +222,8 @@ func (fl *batchFlights[K, V]) claim(c *Cache[K, V], keys []K, i int, keyHash uin
 // ownedScanMax is the batch size above which an out-of-order answer gets an index instead of a rescan per item.
 const ownedScanMax = 32
 
-// assignLoaded hands the result to the owned flights; a key the loader skipped carries err, nil when it was simply
-// not found. Items this call does not own are skipped, and the owned ones are appended to found when it is non-nil.
+// assignLoaded hands the result to the owned flights; a key the loader skipped carries err, or ErrKeyNotFound when
+// there is none. Items this call does not own are skipped, and the owned ones are appended to found when it is non-nil.
 // Flights are matched by their own key: the loader may have reordered the owned keys it was handed.
 func assignLoaded[K comparable, V any](calls []flightCall[K, V], loaded List[K, V], err error, found *List[K, V]) {
 	var index map[K]int
@@ -241,6 +241,9 @@ func assignLoaded[K comparable, V any](calls []flightCall[K, V], loaded List[K, 
 		if found != nil {
 			*found = append(*found, item)
 		}
+	}
+	if err == nil {
+		err = ErrKeyNotFound
 	}
 	for i := range calls {
 		if !calls[i].ok {

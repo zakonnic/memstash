@@ -123,6 +123,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   `cluster-enabled yes`) has one node: the adapters then took the ordered-MGET and dedicated-pipeline paths, where
   the client panics on keys from different slots - in `BatchGet`, in every `BatchSet` with a TTL, and in large
   `BatchDelete`s. They now ask the client's `Mode()`.
+- **`NewBatchLoadable`'s `GetOrLoad` cached a zero value for a key the loader did not return.** Its single-key
+  loader turned "the batch loader omitted the key" into `(zero, nil)`, which `GetOrLoad` stored in memory and wrote
+  to L2, where it outlived restarts; `GetAndRefresh` did the same. The new `ErrKeyNotFound` is how a loader says the
+  source has no such key: nothing is cached and `GetOrLoad` returns it. `NewBatchLoadable` answers an omitted key
+  with it, `NewLoadable`'s synthesized batch loader leaves a key its loader reports that way out of the batch instead
+  of failing it, and a `GetOrLoad` waiting on a batch load that omitted its key gets it instead of a zero value.
 
 ## [0.9.8] - 2026-08-13
 

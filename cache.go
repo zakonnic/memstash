@@ -8,6 +8,7 @@ package memstash
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/maphash"
 	"iter"
@@ -21,12 +22,16 @@ import (
 	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
-// LoaderFunc loads a value when both levels miss.
+// LoaderFunc loads a value when both levels miss. It returns ErrKeyNotFound for a key the source does not have.
 type LoaderFunc[K comparable, V any] func(ctx context.Context, key K) (V, error)
 
 // BatchLoaderFunc loads several values at once when both levels miss. A key omitted from the returned List is
 // treated as "not found" rather than an error.
 type BatchLoaderFunc[K comparable, V any] func(ctx context.Context, keys []K) (List[K, V], error)
+
+// ErrKeyNotFound is a loader's answer for a key the source does not have. Nothing is cached, and GetOrLoad returns
+// it, also to a GetOrLoad waiting on a batch load that omitted its key.
+var ErrKeyNotFound = errors.New("memstash: key not found")
 
 // TickInterval is how often the coarse current time used for TTL is refreshed.
 const (

@@ -1,6 +1,9 @@
 package memstash
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // LoadableCache is a Cache with a loader fixed at construction time: GetOrLoad and BatchGetOrLoad take only keys.
 // Every other Cache method is promoted as-is; the loader-taking Cache.GetOrLoad stays reachable as lc.Cache.GetOrLoad.
@@ -23,6 +26,9 @@ func NewLoadable[K comparable, V any](load LoaderFunc[K, V], opts ...Option) (*L
 		loaded := make(List[K, V], 0, len(missing))
 		for _, key := range missing {
 			value, err := load(ctx, key)
+			if errors.Is(err, ErrKeyNotFound) {
+				continue
+			}
 			if err != nil {
 				return loaded, err
 			}
@@ -44,15 +50,16 @@ func NewBatchLoadable[K comparable, V any](batchLoad BatchLoaderFunc[K, V], opts
 	}
 	load := func(ctx context.Context, key K) (V, error) {
 		res, err := batchLoad(ctx, []K{key})
+		var zero V
 		if err != nil {
-			var zero V
 			return zero, err
 		}
-		if len(res) > 0 { // at most one item for a single key
-			return res[0].Value, nil
+		for _, item := range res {
+			if item.Key == key {
+				return item.Value, nil
+			}
 		}
-		var zero V
-		return zero, nil
+		return zero, ErrKeyNotFound
 	}
 	return &LoadableCache[K, V]{Cache: c, load: load, batchLoad: batchLoad}, nil
 }
