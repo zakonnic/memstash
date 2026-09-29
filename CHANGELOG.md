@@ -113,6 +113,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   were matched to the flights by position in it: a loader that sorted its keys for the query, as most do, answered the calls
   waiting on `a` with the value of `c`. Flights are now matched by their own key. A loader may reorder the slice; for
   `BatchGetOrLoad` that reorders the caller's `keys`, which it may alias.
+- **The Badger adapter's `Get` could hand out memory Badger later unmaps.** It decoded the value inside
+  `item.Value`, whose slice points into Badger's own memory and is valid only for the transaction; with a
+  pass-through codec (`NewBytes`, `BytesCodec`) that slice went into the first level, and for a value in the
+  value log a later GC or `Close` unmapped it - the next read of the cached value crashed the process. `Get` copies
+  the value first, as `BatchGet` already did.
 
 ## [0.9.8] - 2026-08-13
 

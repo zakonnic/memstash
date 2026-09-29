@@ -96,14 +96,13 @@ func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 			}
 			return err
 		}
-		return item.Value(func(data []byte) error {
-			v, decErr := c.codec.Unmarshal(data)
-			if decErr != nil {
-				return decErr
-			}
-			value, found = v, true
-			return nil
-		})
+		data, err := item.ValueCopy(nil) // Value's slice is Badger's memory, valid only inside the transaction
+		if err != nil {
+			return err
+		}
+		value, err = c.codec.Unmarshal(data)
+		found = err == nil
+		return err
 	})
 	if err != nil {
 		return zero, false, err
