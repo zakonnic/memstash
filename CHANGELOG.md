@@ -108,6 +108,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   in no fixed order outside inline processing, Tarantool's connection shards and redispipe on a cluster could send
   its commands out of order: any of them could land `v1` after `v2`. They now collapse a repeated key to its last
   value first (the new `l2.LastValues`), and the `BatchSet` contract says a key may repeat.
+- **A batch loader that reordered its keys handed other callers the wrong values.** The keys a `BatchGetOrLoad` or
+  `BatchGetAndRefresh` loader receives may be the very list the flights were registered from, and the loaded values
+  were matched to the flights by position in it: a loader that sorted its keys for the query, as most do, answered the calls
+  waiting on `a` with the value of `c`. Flights are now matched by their own key. A loader may reorder the slice; for
+  `BatchGetOrLoad` that reorders the caller's `keys`, which it may alias.
 
 ## [0.9.8] - 2026-08-13
 

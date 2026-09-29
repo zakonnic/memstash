@@ -87,7 +87,7 @@ func (c *Cache[K, V]) loadBatchInto(ctx context.Context, keys []K, load BatchLoa
 
 	loaded, err := load(ctx, fl.owned)
 	c.storeLoadedBatch(ctx, loaded) // a partial result is still worth caching
-	assignLoaded(fl.owned, fl.calls, loaded, err, nil)
+	assignLoaded(fl.calls, loaded, err, nil)
 }
 
 func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {

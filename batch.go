@@ -337,7 +337,7 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 // single load(ctx, missing) call. A key omitted by the loader is absent from the result (any concurrent GetOrLoad
 // waiting on it gets the zero value). On error, the resolved part is returned with the error; errors are not cached.
 //
-// The slice handed to load may alias keys, so load must not hold on to it or write through it.
+// The slice handed to load may alias keys: load must not hold on to it, and reordering it reorders keys.
 func (c *Cache[K, V]) BatchGetOrLoad(ctx context.Context, keys []K, load BatchLoaderFunc[K, V]) (List[K, V], error) {
 	if load == nil {
 		return nil, ErrNilLoader
@@ -376,7 +376,7 @@ func (c *Cache[K, V]) loadOwned(ctx context.Context, load BatchLoaderFunc[K, V],
 	defer c.releaseAll(fl.calls)
 
 	resolved, err := c.batchLoad(ctx, fl.owned, load)
-	assignLoaded(fl.owned, fl.calls, resolved, err, found)
+	assignLoaded(fl.calls, resolved, err, found)
 	return err
 }
 

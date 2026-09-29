@@ -183,7 +183,7 @@ type joinedFlight[K comparable, V any] struct {
 }
 
 // batchFlights is the singleflight state of one batch: the keys this call ended up owning, index-aligned with their
-// flights, plus the flights it joined instead.
+// flights until the loader, which may reorder them, runs; plus the flights it joined instead.
 type batchFlights[K comparable, V any] struct {
 	owned  []K
 	calls  []flightCall[K, V]
@@ -224,15 +224,16 @@ const ownedScanMax = 32
 
 // assignLoaded hands the result to the owned flights; a key the loader skipped carries err, nil when it was simply
 // not found. Items this call does not own are skipped, and the owned ones are appended to found when it is non-nil.
-func assignLoaded[K comparable, V any](owned []K, calls []flightCall[K, V], loaded List[K, V], err error, found *List[K, V]) {
+// Flights are matched by their own key: the loader may have reordered the owned keys it was handed.
+func assignLoaded[K comparable, V any](calls []flightCall[K, V], loaded List[K, V], err error, found *List[K, V]) {
 	var index map[K]int
 	for i, item := range loaded {
 		j := i
-		if j >= len(owned) || owned[j] != item.Key { // loaders answer in order unless they drop or add keys
-			if index == nil && len(owned) > ownedScanMax {
-				index = ownedIndex(owned)
+		if j >= len(calls) || calls[j].key != item.Key { // loaders answer in order unless they drop or add keys
+			if index == nil && len(calls) > ownedScanMax {
+				index = ownedIndex(calls)
 			}
-			if j = indexOf(owned, item.Key, index); j < 0 {
+			if j = indexOf(calls, item.Key, index); j < 0 {
 				continue
 			}
 		}
@@ -248,25 +249,24 @@ func assignLoaded[K comparable, V any](owned []K, calls []flightCall[K, V], load
 	}
 }
 
-// ownedIndex maps every owned key to its slot, the first occurrence winning - same answer indexOf gives.
-func ownedIndex[K comparable](owned []K) map[K]int {
-	index := make(map[K]int, len(owned))
-	for i := len(owned) - 1; i >= 0; i-- {
-		index[owned[i]] = i
+// ownedIndex maps every owned flight's key to its slot.
+func ownedIndex[K comparable, V any](calls []flightCall[K, V]) map[K]int {
+	index := make(map[K]int, len(calls))
+	for i := range calls {
+		index[calls[i].key] = i
 	}
 	return index
 }
 
-func indexOf[K comparable](owned []K, key K, index map[K]int) int {
-	// search in map or array
+func indexOf[K comparable, V any](calls []flightCall[K, V], key K, index map[K]int) int {
 	if index != nil {
 		if i, ok := index[key]; ok {
 			return i
 		}
 		return -1
 	}
-	for i, k := range owned {
-		if k == key {
+	for i := range calls {
+		if calls[i].key == key {
 			return i
 		}
 	}

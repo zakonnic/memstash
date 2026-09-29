@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,6 +121,51 @@ func TestBatchGetOrLoadOutOfOrderAnswer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A loader may reorder the keys it is handed - sorting them for a query is the natural thing to do. Each flight must
+// still resolve to its own key's value: the calls waiting on those keys read it.
+func TestBatchGetOrLoadSortingLoader(t *testing.T) {
+	ctx := context.Background()
+	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100, StatsEnabled: true})
+	keys := []string{"c", "b", "a"}
+
+	entered, gate := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.BatchGetOrLoad(ctx, keys, func(_ context.Context, asked []string) (memstash.List[string, string], error) {
+			close(entered)
+			<-gate
+			slices.Sort(asked)
+			out := make(memstash.List[string, string], 0, len(asked))
+			for _, key := range asked {
+				out = append(out, memstash.KeyVal[string, string]{Key: key, Value: "v" + key})
+			}
+			return out, nil
+		})
+		done <- err
+	}()
+	<-entered
+
+	misses := func() int64 { stats := c.Stats(); return stats.MemoryMisses() }
+	base := misses()
+	got := make([]string, len(keys))
+	var wg sync.WaitGroup
+	for i := range keys {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i], _ = c.GetOrLoad(ctx, []string{"c", "b", "a"}[i], func(context.Context, string) (string, error) {
+				return "", errors.New("a flight was running: this call had to join it")
+			})
+		}()
+	}
+	require.Eventually(t, func() bool { return misses() >= base+int64(len(keys)) }, 5*time.Second, time.Millisecond,
+		"the GetOrLoad calls never joined the batch's flights")
+	close(gate)
+	require.NoError(t, <-done)
+	wg.Wait()
+	assert.Equal(t, []string{"vc", "vb", "va"}, got)
 }
 
 func TestBatchGetOrLoadPartialAnswerWithError(t *testing.T) {
