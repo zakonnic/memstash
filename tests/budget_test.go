@@ -79,6 +79,25 @@ func TestMemoryBudgetValidation(t *testing.T) {
 
 // TestMemoryBudgetFixedTypes pins down the arithmetic on fixed-size types: every uint64/uint64 item costs exactly its
 // 16-byte Entry, so a single-shard cache must settle at exactly budget/cost items.
+// NewWithConfig fills in what a budget implies (the cost function, the capacity) on its own copy: the caller's Config
+// must come back as it was, and build a second cache just as well.
+func TestNewWithConfigLeavesConfigAlone(t *testing.T) {
+	cfg := memstash.Config[string, string]{MemoryBudget: 1 << 20, PreallocationRatio: 0}
+	for range 2 {
+		c, err := memstash.NewWithConfig(&cfg)
+		require.NoError(t, err)
+		c.Close()
+	}
+	assert.Zero(t, cfg.MemoryCapacity)
+	assert.Nil(t, cfg.CostFunc)
+
+	ratio := memstash.Config[string, string]{MemoryCapacity: 100, PreallocationRatio: 0.5}
+	c, err := memstash.NewWithConfig(&ratio)
+	require.NoError(t, err)
+	c.Close()
+	assert.False(t, ratio.PreallocateMap)
+}
+
 func TestMemoryBudgetFixedTypes(t *testing.T) {
 	const budget = 64 << 10
 	c, err := memstash.NewWithConfig(&memstash.Config[uint64, uint64]{

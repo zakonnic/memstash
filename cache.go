@@ -152,13 +152,14 @@ func New[K comparable, V any](opts ...Option) (*Cache[K, V], error) {
 	return NewWithConfig(cfg)
 }
 
-// NewWithConfig creates a cache from an assembled Config (New builds one from the options and delegates here).
-// MemoryCapacity 0 falls back to DefaultMemoryCapacity unless CostFunc is set - a weighted cache must size its
-// capacity explicitly.
+// NewWithConfig creates a cache from a Config. MemoryCapacity 0 means DefaultMemoryCapacity, unless CostFunc is set:
+// a weighted cache must size its capacity explicitly. cfg is not modified, so one Config can build several caches.
 func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error) {
-	if cfg == nil {
-		cfg = &Config[K, V]{}
+	var local Config[K, V]
+	if cfg != nil {
+		local = *cfg
 	}
+	cfg = &local
 	if cfg.MemoryCapacity < 0 {
 		return nil, ErrBadCapacity
 	}

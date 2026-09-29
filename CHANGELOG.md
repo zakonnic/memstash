@@ -129,6 +129,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   source has no such key: nothing is cached and `GetOrLoad` returns it. `NewBatchLoadable` answers an omitted key
   with it, `NewLoadable`'s synthesized batch loader leaves a key its loader reports that way out of the batch instead
   of failing it, and a `GetOrLoad` waiting on a batch load that omitted its key gets it instead of a zero value.
+- **`NewWithConfig` wrote into the caller's `Config`.** A budget filled in `CostFunc` and moved itself into
+  `MemoryCapacity`, and a `PreallocationRatio` set `PreallocateMap`, so a second cache built from the same `Config`
+  failed with `ErrBudgetAndCapacity`. The constructor now works on its own copy.
 
 ## [0.9.8] - 2026-08-13
 
