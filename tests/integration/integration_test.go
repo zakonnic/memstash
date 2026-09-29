@@ -77,6 +77,7 @@ var suiteScenarios = []struct {
 	{name: "WriteBackVisibleAfterWait", run: suiteWriteBackVisibleAfterWait},
 	{name: "BatchSetGet", run: suiteBatchSetGet},
 	{name: "BatchOverBudget", run: suiteBatchOverBudget},
+	{name: "BatchSetRepeatedKey", run: suiteBatchSetRepeatedKey},
 	{name: "EvictedItemsServedFromL2", run: suiteEvictedItemsServedFromL2},
 	{name: "GetOrLoadPrefersL2", run: suiteGetOrLoadPrefersL2},
 	{name: "TTLReachesL2", run: suiteTTLReachesL2},
@@ -232,6 +233,27 @@ func suiteBatchSetGet(t *testing.T, newCache cacheFactory) {
 	// The L2 part of the batch must have been promoted into the reader's memory.
 	_, ok = reader.GetFromMemory("k0")
 	assert.True(t, ok, "BatchGet did not promote L2 hits to L1")
+}
+
+// suiteBatchSetRepeatedKey: a batch that repeats a key - as write-back batches of a hot key do - must leave the key's
+// last value in L2, however the adapter spreads the batch.
+func suiteBatchSetRepeatedKey(t *testing.T, newCache cacheFactory) {
+	ctx := context.Background()
+	prefix := uniquePrefix(t)
+	writer := newCache(t, prefix, memstash.WithWritePolicy(memstash.WriteThrough), memstash.WithTTL(time.Minute))
+
+	items := make(memstash.List[string, string], 0, 64)
+	for i := range 32 {
+		items = append(items,
+			memstash.KeyVal[string, string]{Key: "k", Value: fmt.Sprintf("v%d", i)},
+			memstash.KeyVal[string, string]{Key: fmt.Sprintf("other%d", i), Value: "x"})
+	}
+	require.NoError(t, writer.BatchSet(ctx, items))
+
+	v, ok, err := newCache(t, prefix).Get(ctx, "k")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "v31", v)
 }
 
 // suiteBatchOverBudget drives batches past the adapters' multi-key byte budget, where one command turns into several

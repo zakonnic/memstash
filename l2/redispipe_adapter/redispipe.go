@@ -283,6 +283,9 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		}
 		return sendManyErr(c.sync.SendMany(ctx, requests))
 	}
+	if !c.singleNode {
+		items = l2.LastValues(items) // a cluster sends the SETs over several connections, in no fixed order
+	}
 	var millis int64
 	if ttl > 0 {
 		millis = l2.RedisMillis(ttl)

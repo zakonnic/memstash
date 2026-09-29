@@ -177,6 +177,7 @@ type sequentialStub struct {
 	setCalls    int
 	deleteCalls int
 	failKey     string // if set, Get on this key returns errBoom
+	slowValue   string // if set, a Set of this value lands 20 ms late
 }
 
 var errBoom = errors.New("boom")
@@ -195,6 +196,9 @@ func (s *sequentialStub) Get(_ context.Context, key string) (string, bool, error
 }
 
 func (s *sequentialStub) Set(_ context.Context, key, value string, _ time.Duration) error {
+	if s.slowValue != "" && value == s.slowValue {
+		time.Sleep(20 * time.Millisecond)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.setCalls++
@@ -255,6 +259,15 @@ func TestBatchConcurrentFallbacks(t *testing.T) {
 		assert.Len(t, found, 3)
 	})
 
+	t.Run("a repeated key ends with its last value", func(t *testing.T) {
+		store := newSequentialStub()
+		store.slowValue = "v1" // concurrently, v1 would land after v2
+		dup := memstash.List[string, string]{{Key: "k", Value: "v1"}, {Key: "x", Value: "1"}, {Key: "k", Value: "v2"}}
+		require.NoError(t, l2.BatchSetConcurrent[string, string](ctx, store, dup, 0, 4))
+		assert.Equal(t, map[string]string{"k": "v2", "x": "1"}, store.m)
+		assert.Equal(t, 2, store.setCalls, "a repeated key is written once")
+	})
+
 	t.Run("first error is returned with the hits gathered so far", func(t *testing.T) {
 		store := newSequentialStub()
 		require.NoError(t, store.Set(ctx, "a", "1", 0))
@@ -264,6 +277,13 @@ func TestBatchConcurrentFallbacks(t *testing.T) {
 		require.ErrorIs(t, err, errBoom)
 		assert.LessOrEqual(t, len(found), 1, "only hits, never the failed key")
 	})
+}
+
+func TestLastValues(t *testing.T) {
+	items := memstash.List[string, string]{{Key: "a", Value: "1"}, {Key: "b", Value: "2"}, {Key: "a", Value: "3"}}
+	assert.Equal(t, memstash.List[string, string]{{Key: "a", Value: "3"}, {Key: "b", Value: "2"}}, l2.LastValues(items),
+		"a repeated key keeps its first place and takes its last value")
+	assert.Equal(t, items[1:], l2.LastValues(items[1:]))
 }
 
 func TestBatchSequentialFallbacks(t *testing.T) {

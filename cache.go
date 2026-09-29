@@ -1165,8 +1165,8 @@ func (c *Cache[K, V]) deliverRun(sets List[K, V], deletes []K, ttl time.Duration
 	c.writeBatch(sets, ttl)
 }
 
-// writeBatch delivers drained writes to L2: one Set for a single item, one BatchSet otherwise (duplicate keys
-// collapse to the last value there, as FIFO order would). A batch error is reported for every key it covers.
+// writeBatch delivers drained writes to L2: one Set for a single item, one BatchSet otherwise. A batch error is
+// reported for every key it covers.
 func (c *Cache[K, V]) writeBatch(batch List[K, V], ttl time.Duration) {
 	if len(batch) == 1 {
 		if err := c.l2Cache.Set(context.Background(), batch[0].Key, batch[0].Value, ttl); err != nil {

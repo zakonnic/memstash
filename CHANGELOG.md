@@ -102,6 +102,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   module-path rename had rewritten both names, so an adapter built with an empty table or space name failed on every
   call (a SQL syntax error, a missing space). Both are `"memstash_cache"` again, the name the docker setup and the
   documented schema create.
+- **A batch that repeated a key could leave an older value in L2.** Write-back coalesces a key's queued writes into
+  one `BatchSet`, so a hot key can appear in it twice, and `L2Cache.BatchSet` relied on the adapter to keep the
+  last value. The memcached adapters (gomemcache, mc, rainycape) sent the batch as concurrent `Set`s, Aerospike ran it
+  in no fixed order outside inline processing, Tarantool's connection shards and redispipe on a cluster could send
+  its commands out of order: any of them could land `v1` after `v2`. They now collapse a repeated key to its last
+  value first (the new `l2.LastValues`), and the `BatchSet` contract says a key may repeat.
 
 ## [0.9.8] - 2026-08-13
 

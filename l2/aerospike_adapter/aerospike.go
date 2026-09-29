@@ -166,10 +166,12 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 
 // BatchSet stores all items in one BatchOperate round trip, falling back to per-item Sets on servers without batch
 // writes (pre-6.0). The context is not honored by the client APIs used here; ttl == 0 means "no expiration".
+// Duplicate keys collapse to the last value: the server runs a batch in no fixed order unless it runs it inline.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
 	if len(items) <= 1 {
 		return l2.BatchSetSequential(ctx, c, items, ttl)
 	}
+	items = l2.LastValues(items)
 	policy := as.NewBatchWritePolicy()
 	policy.Expiration = expiration(ttl)
 	records := make([]as.BatchRecordIfc, 0, len(items))

@@ -196,10 +196,12 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 }
 
 // BatchSet issues all replaces up front (async futures) and then resolves them; ttl == 0 means "no expiration".
+// Duplicate keys collapse to the last value: the connection's shards may send the replaces in any order.
 func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
 	if len(items) == 0 {
 		return nil
 	}
+	items = l2.LastValues(items)
 	deadline := expiresAt(ttl)
 	futures := make([]*tarantool.Future, 0, len(items))
 	for _, item := range items {

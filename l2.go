@@ -15,7 +15,8 @@ type L2Cache[K comparable, V any] interface {
 	BatchGet(ctx context.Context, keys []K) (List[K, V], error)
 	// Set stores the value; ttl == 0 means "no expiration".
 	Set(ctx context.Context, key K, value V, ttl time.Duration) error
-	// BatchSet stores all items in one round trip where the backend supports it; ttl == 0 means "no expiration".
+	// BatchSet stores all items in one round trip where the backend supports it; ttl == 0 means "no expiration". A
+	// key may repeat: the backend must end with its last value.
 	BatchSet(ctx context.Context, items List[K, V], ttl time.Duration) error
 	// Delete removes the key; a missing key is not treated as an error.
 	Delete(ctx context.Context, key K) error

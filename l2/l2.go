@@ -202,8 +202,10 @@ func BatchGetConcurrent[K comparable, V any](ctx context.Context, store memstash
 	return found, firstErr
 }
 
-// BatchSetConcurrent implements L2Cache.BatchSet by running Set on up to workers goroutines.
+// BatchSetConcurrent implements L2Cache.BatchSet by running Set on up to workers goroutines. A repeated key is
+// written once, with its last value (see LastValues).
 func BatchSetConcurrent[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], items memstash.List[K, V], ttl time.Duration, workers int) error {
+	items = LastValues(items)
 	if len(items) <= 1 || workers <= 1 {
 		return BatchSetSequential(ctx, store, items, ttl)
 	}
@@ -220,6 +222,25 @@ func BatchDeleteConcurrent[K comparable, V any](ctx context.Context, store memst
 	return runConcurrent(len(keys), workers, func(i int) error {
 		return store.Delete(ctx, keys[i])
 	})
+}
+
+// LastValues collapses every repeated key of a batch into its first item, carrying the last value. A backend that
+// writes a batch's items in no fixed order needs it to end with each key's last value, as L2Cache.BatchSet requires.
+func LastValues[K comparable, V any](items memstash.List[K, V]) memstash.List[K, V] {
+	if len(items) <= 1 {
+		return items
+	}
+	at := make(map[K]int, len(items))
+	deduped := make(memstash.List[K, V], 0, len(items))
+	for _, item := range items {
+		if i, seen := at[item.Key]; seen {
+			deduped[i].Value = item.Value
+			continue
+		}
+		at[item.Key] = len(deduped)
+		deduped = append(deduped, item)
+	}
+	return deduped
 }
 
 // runConcurrent executes op for the indexes 0..n-1 on up to workers goroutines and returns the first error, after
