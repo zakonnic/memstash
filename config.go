@@ -108,8 +108,8 @@ type Config[K comparable, V any] struct {
 	// 0 means choose automatically: MemoryCapacity (but no more than 1<<20) when CostFunc == nil, otherwise 8192.
 	GhostSize int
 
-	// WriteBackBufferSize is the buffer size of each WriteBack worker. 0 means 500. On buffer overflow write is
-	// performed synchronously.
+	// WriteBackBufferSize is the buffer size of each WriteBack worker. 0 means 500. A write that finds the buffer full
+	// waits for room.
 	WriteBackBufferSize int
 
 	// WriteBackWorkers is the number of goroutines draining the WriteBack buffer. 0 means DefaultWriteBackWorkers.
@@ -131,6 +131,8 @@ type Config[K comparable, V any] struct {
 
 	// OnL2Error is an optional handler for L2Cache errors on paths where the error cannot be returned to the caller
 	// (write-back, the write after a load in GetOrLoad, the L2Cache read inside GetOrLoad before the loader runs).
+	// Write-back errors are reported on the worker goroutine, so the handler must not write to the cache: with the
+	// worker's buffer full, that write would wait for the worker itself.
 	OnL2Error func(key K, err error)
 
 	// OnDeletion is an optional handler called once for every item that leaves the first level, whatever the cause,
@@ -142,6 +144,7 @@ type Config[K comparable, V any] struct {
 	// OnPanic is an optional handler for the panics the cache recovers instead of letting them end the process:
 	// on its own goroutines (the TTL clock, the write-back workers) and around a loader running in the background.
 	// A loader that panics under a synchronous GetOrLoad is not recovered at all - that panic reaches the caller.
+	// Like OnL2Error, it must not write to the cache: on a write-back worker that write would wait for the worker.
 	OnPanic PanicHandler
 
 	// StatsEnabled turns on the operation counters returned by Stats(). Off by default - adds 0.6 ns overhead.

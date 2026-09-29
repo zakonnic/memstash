@@ -122,7 +122,7 @@ func TestNegativeTTLRejected(t *testing.T) {
 }
 
 // TestWriteBackSetAfterCloseWritesSync: with the write-back worker gone, a Set must fall back to a synchronous L2
-// write (as enqueueWriteBack documents) instead of parking the value in a channel nobody drains.
+// write (as enqueueL2 documents) instead of parking the value in a channel nobody drains.
 func TestWriteBackSetAfterCloseWritesSync(t *testing.T) {
 	ctx := context.Background()
 	l2 := newL2Stub()

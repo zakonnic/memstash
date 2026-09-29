@@ -156,3 +156,100 @@ func TestWriteBackWorkersValidation(t *testing.T) {
 	require.NoError(t, err)
 	c.Close()
 }
+
+// holdL2 keeps what L2 received per key and holds the Set of one value until gate is closed.
+type holdL2 struct {
+	blockingL2Stub
+	hold     string
+	once     sync.Once
+	openOnce sync.Once
+	entered  chan struct{}
+	gate     chan struct{}
+	deleted  map[string]bool
+}
+
+func newHoldL2(hold string) *holdL2 {
+	return &holdL2{
+		blockingL2Stub: *newBlockingL2Stub(1),
+		hold:           hold,
+		entered:        make(chan struct{}),
+		gate:           make(chan struct{}),
+		deleted:        map[string]bool{},
+	}
+}
+
+func (g *holdL2) Set(ctx context.Context, key, value string, ttl time.Duration) error {
+	if value == g.hold {
+		g.once.Do(func() {
+			close(g.entered)
+			<-g.gate
+		})
+	}
+	g.mu.Lock()
+	g.deleted[key] = false
+	g.mu.Unlock()
+	return g.blockingL2Stub.Set(ctx, key, value, ttl)
+}
+
+func (g *holdL2) open() { g.openOnce.Do(func() { close(g.gate) }) }
+
+func (g *holdL2) Delete(_ context.Context, key string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.deleted[key] = true
+	return nil
+}
+
+func (g *holdL2) BatchDelete(ctx context.Context, keys []string) error {
+	for _, key := range keys {
+		_ = g.Delete(ctx, key)
+	}
+	return nil
+}
+
+// TestWriteBackOverflowKeepsPerKeyOrder: a write that finds its worker's buffer full waits for room instead of
+// overtaking what the key already queued, so L2 ends with neither a stale value nor a resurrected key.
+func TestWriteBackOverflowKeepsPerKeyOrder(t *testing.T) {
+	ctx := context.Background()
+	for name, last := range map[string]func(*memstash.Cache[string, string]) error{
+		"set":    func(c *memstash.Cache[string, string]) error { return c.Set(ctx, "k", "v3") },
+		"delete": func(c *memstash.Cache[string, string]) error { return c.Delete(ctx, "k") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			l2 := newHoldL2("v1")
+			c, err := memstash.New[string, string](
+				memstash.WithL2Cache[string, string](l2),
+				memstash.WithWriteBackWorkers(1),
+				memstash.WithWriteBackBuffer(1),
+				memstash.WithNoBatchingForWriteBack(),
+			)
+			require.NoError(t, err)
+			defer c.Close()
+			defer l2.open() // before Close, which waits for the worker held inside L2
+
+			require.NoError(t, c.Set(ctx, "k", "v1"))
+			<-l2.entered                              // the worker holds v1 inside L2
+			require.NoError(t, c.Set(ctx, "k", "v2")) // fills the buffer
+			done := make(chan error, 1)
+			go func() { done <- last(c) }()
+			select {
+			case <-done:
+				t.Fatal("a write into a full buffer returned before the worker made room")
+			case <-time.After(50 * time.Millisecond):
+			}
+			l2.open()
+			require.NoError(t, <-done)
+			c.Wait()
+
+			_, values := l2.snapshot()
+			l2.mu.Lock()
+			deleted := l2.deleted["k"]
+			l2.mu.Unlock()
+			if name == "delete" {
+				assert.True(t, deleted, "the delete made last must land last")
+				return
+			}
+			assert.Equal(t, []string{"v1", "v2", "v3"}, values["k"])
+		})
+	}
+}

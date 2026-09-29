@@ -93,6 +93,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   skipped the generation bracket for any value no wider than a word, but gc stores a `struct{A, B uint32}` or a
   `struct{X, Y float32}` one field at a time, so a reader could pair `A` of one write with `B` of another. Only a
   single scalar - an integer, a float, a pointer - skips the bracket now; its code is unchanged.
+- **A write-back write could overtake the writes its key had already queued.** When a worker's buffer was full, the
+  write ran synchronously on the caller's goroutine, ahead of everything still in the queue: `Set(v1)`, `Set(v2)`,
+  `Set(v3)` could leave `v2` in L2, and a `Delete` could land before the queued `Set` that resurrected the key. A write
+  that finds the buffer full now waits for room, so the writes of one key reach L2 in order; after `Close` it still
+  runs synchronously. `OnL2Error` receives write-back errors on the worker goroutine and must not write to the cache.
 
 ## [0.9.8] - 2026-08-13
 

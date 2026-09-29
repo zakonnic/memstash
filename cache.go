@@ -298,7 +298,8 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 
 // Close stops the background goroutines and waits for the write-back buffer to drain. Repeated calls are safe.
 // A Set that starts strictly after Close returns still reaches L2 (synchronously); a Set racing with Close may
-// lose its asynchronous write. A GetBatched waiting on the read pool loses nothing: it reads L2 itself.
+// lose its asynchronous write, and one still waiting for buffer room writes synchronously, possibly ahead of the drain.
+// A GetBatched waiting on the read pool loses nothing: it reads L2 itself.
 func (c *Cache[K, V]) Close() {
 	c.closeOnce.Do(func() {
 		close(c.stop)

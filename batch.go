@@ -255,8 +255,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items List[K, V]) error {
 	return nil
 }
 
-// enqueueWriteBack puts a write into the worker's buffer; on overflow or when the cache is closed it writes
-// synchronously so no data is lost.
+// enqueueWriteBack queues a write for the key's write-back worker.
 func (c *Cache[K, V]) enqueueWriteBack(key K, value V, ttl time.Duration) {
 	c.enqueueL2(l2Write[K, V]{key: key, value: value, ttl: ttl})
 }
@@ -266,8 +265,8 @@ func (c *Cache[K, V]) enqueueDelete(key K) {
 	c.enqueueL2(l2Write[K, V]{key: key, del: true})
 }
 
-// enqueueL2 hands a task to the key's write-back worker; on overflow or when the cache is closed the task runs
-// synchronously so nothing is lost.
+// enqueueL2 hands a task to the key's write-back worker. A full buffer makes it wait: a task run on the spot would
+// overtake what the key already queued. Once the cache is closed the task runs synchronously.
 func (c *Cache[K, V]) enqueueL2(write l2Write[K, V]) {
 	sync := func() {
 		var err error
@@ -287,9 +286,15 @@ func (c *Cache[K, V]) enqueueL2(write l2Write[K, V]) {
 		return
 	default:
 	}
+	queue := c.writeQueueOf(write.key)
 	select {
-	case c.writeQueueOf(write.key) <- write:
+	case queue <- write:
+		return
 	default:
+	}
+	select {
+	case queue <- write:
+	case <-c.stop:
 		sync()
 	}
 }
