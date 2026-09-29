@@ -4,7 +4,7 @@
 // The constructor takes the tarantool.Doer interface, satisfied by *tarantool.Connection and by connection pools, so
 // the adapter does not depend on how connections are managed.
 //
-// Storage: a space (default "github.com/zakonnic/memstash_cache") whose tuples are [key string, value binary, expire_at unsigned], with
+// Storage: a space (default "memstash_cache") whose tuples are [key string, value binary, expire_at unsigned], with
 // the primary index on the key. Create it once, for example:
 //
 //	box.schema.space.create('memstash_cache', {if_not_exists = true})
@@ -25,7 +25,7 @@ import (
 )
 
 // DefaultSpace is the space name used when the caller passes an empty space.
-const DefaultSpace = "github.com/zakonnic/memstash_cache"
+const DefaultSpace = "memstash_cache"
 
 // primaryIndex is the index scanned by key; the primary index is always id 0.
 const primaryIndex = 0

@@ -29,7 +29,7 @@ type DB interface {
 }
 
 // DefaultTable is the table name used when the caller passes an empty table.
-const DefaultTable = "github.com/zakonnic/memstash_cache"
+const DefaultTable = "memstash_cache"
 
 // Dialect captures the fragments of the KV SQL that differ between databases: how a positional parameter is
 // rendered and how an upsert is spelled. The predefined dialects cover the common engines; supply your own for

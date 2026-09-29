@@ -32,9 +32,10 @@ func runSQLSuite(t *testing.T, driver, dsn, ddl, table string, dialect sql_adapt
 
 func TestSQLAdapterPostgres(t *testing.T) {
 	requireServer(t, postgresAddr())
-	runSQLSuite(t, "pgx", postgresDSN(),
-		"CREATE TABLE IF NOT EXISTS memstash_sql (cache_key TEXT PRIMARY KEY, value BYTEA, expires_at BIGINT NOT NULL DEFAULT 0)",
-		"memstash_sql", sql_adapter.Postgres)
+	runSQLSuite(t, "pgx", postgresDSN(), // an empty table name: the adapter falls back to DefaultTable
+		"CREATE TABLE IF NOT EXISTS "+sql_adapter.DefaultTable+
+			" (cache_key TEXT PRIMARY KEY, value BYTEA, expires_at BIGINT NOT NULL DEFAULT 0)",
+		"", sql_adapter.Postgres)
 }
 
 func TestSQLAdapterMySQL(t *testing.T) {
