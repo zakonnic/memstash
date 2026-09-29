@@ -132,6 +132,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **`NewWithConfig` wrote into the caller's `Config`.** A budget filled in `CostFunc` and moved itself into
   `MemoryCapacity`, and a `PreallocationRatio` set `PreallocateMap`, so a second cache built from the same `Config`
   failed with `ErrBudgetAndCapacity`. The constructor now works on its own copy.
+- **An out-of-range `WritePolicy` passed validation and made `Set` panic.** `WritePolicy(3)` built a cache with no
+  write-back workers that still took the write-back path, dividing by zero workers on the first `Set`, while
+  `Delete` silently skipped L2; an unknown `WriteBackBatching` quietly behaved as `BatchingFull`. The constructor now
+  rejects both, with the new `ErrUnknownWritePolicy` and `ErrUnknownBatching`.
 
 ## [0.9.8] - 2026-08-13
 

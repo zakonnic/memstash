@@ -26,6 +26,8 @@ var (
 	ErrBudgetAndCapacity     = fmt.Errorf("%w: MemoryBudget and MemoryCapacity are mutually exclusive", Error)
 	ErrBudgetNeedsCostFunc   = fmt.Errorf("%w: MemoryBudget cannot estimate the byte size of this type - set CostFunc explicitly", Error)
 	ErrUnknownPolicy         = fmt.Errorf("%w: unknown eviction policy", Error)
+	ErrUnknownWritePolicy    = fmt.Errorf("%w: unknown write policy", Error)
+	ErrUnknownBatching       = fmt.Errorf("%w: unknown write-back batching mode", Error)
 	ErrNilCustomPolicy       = fmt.Errorf("%w: the custom eviction policy factory returned nil", Error)
 	ErrNilLoader             = fmt.Errorf("%w: loader must not be nil", Error)
 	ErrBadWorkers            = fmt.Errorf("%w: WriteBackWorkers must not be negative", Error)

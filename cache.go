@@ -210,6 +210,12 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 			return nil, ErrUnknownPolicy
 		}
 	}
+	if cfg.WritePolicy > WriteDisabled {
+		return nil, ErrUnknownWritePolicy
+	}
+	if cfg.WriteBackBatching > BatchingAdaptive {
+		return nil, ErrUnknownBatching
+	}
 	if cfg.TTL < 0 {
 		return nil, ErrBadTTL
 	}

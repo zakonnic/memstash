@@ -292,6 +292,11 @@ func TestNewValidation(t *testing.T) {
 			wantErr: memstash.ErrUnknownPolicy,
 		},
 		{
+			name:    "unknown write policy",
+			opts:    []memstash.Option{memstash.WithWritePolicy(memstash.WritePolicy(3))},
+			wantErr: memstash.ErrUnknownWritePolicy,
+		},
+		{
 			name:    "capacity beyond the 32-bit pool index space",
 			opts:    []memstash.Option{memstash.WithMemoryCapacity(itemstore.MaxItems + 1)},
 			wantErr: memstash.ErrCapacityTooLarge,
@@ -358,6 +363,11 @@ func TestNewValidation(t *testing.T) {
 	t.Run("nil loader", func(t *testing.T) {
 		_, err := memstash.NewLoadable[string, string](nil, memstash.WithMemoryCapacity(1))
 		require.ErrorIs(t, err, memstash.ErrNilLoader)
+	})
+
+	t.Run("unknown write-back batching mode", func(t *testing.T) {
+		_, err := memstash.NewWithConfig(&memstash.Config[string, string]{WriteBackBatching: memstash.WriteBackBatching(3)})
+		require.ErrorIs(t, err, memstash.ErrUnknownBatching)
 	})
 }
 
