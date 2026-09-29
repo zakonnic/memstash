@@ -136,6 +136,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   write-back workers that still took the write-back path, dividing by zero workers on the first `Set`, while
   `Delete` silently skipped L2; an unknown `WriteBackBatching` quietly behaved as `BatchingFull`. The constructor now
   rejects both, with the new `ErrUnknownWritePolicy` and `ErrUnknownBatching`.
+- **A write-back batch that panicked in the adapter was reported for one key, sometimes the wrong one, and could
+  take the next task down with it.** The worker recovered once per drain with the key of the drain's first task:
+  `OnL2Error` heard of that key only - one that may already have reached L2 - and never of the rest of the failed
+  batch, and a task taken off the queue to end the batch's run, a `Delete` for instance, was never sent. Every L2 call
+  of the write-back now recovers on its own: the batch's keys all get the `ErrPanic`, and the worker goes on with the
+  task it already holds.
 
 ## [0.9.8] - 2026-08-13
 

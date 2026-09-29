@@ -1080,20 +1080,16 @@ func (c *Cache[K, V]) recoverWorker() {
 	}
 }
 
-// recoverWriteBack is recoverWorker for a write-back worker, where a panic comes from the L2 adapter or from
-// OnL2Error itself: it is reported like any other L2 failure, unless the handler is the one that panicked.
-func (c *Cache[K, V]) recoverWriteBack(key K) {
-	r := recover()
-	if r == nil {
-		return
-	}
-	if c.onL2Error == nil {
-		c.notifyPanic(r, false)
-		return
-	}
-	defer c.recoverWorker() // OnL2Error is next, and it may be what panicked in the first place
-	c.onL2Error(key, fmt.Errorf("%w: %v", ErrPanic, r))
-	c.notifyPanic(r, true)
+// deliver runs one write-back call to L2. An adapter that panics costs that batch, not the worker: the panic comes back
+// as an ErrPanic error, which the caller reports for every key of the batch.
+func (c *Cache[K, V]) deliver(call func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%w: %v", ErrPanic, r)
+			c.notifyPanic(r, c.onL2Error != nil)
+		}
+	}()
+	return call()
 }
 
 // clockLoop refreshes the coarse TTL clock.
@@ -1116,9 +1112,9 @@ func (c *Cache[K, V]) clockLoop() {
 const WriteBackBatchMax = 128
 
 // flushWrite hands one write-back task to L2, coalescing the tasks already queued behind it in the same worker's
-// queue into one BatchSet; a panicking adapter costs this batch, not the worker.
+// queue into one BatchSet.
 func (c *Cache[K, V]) flushWrite(queue chan l2Write[K, V], first l2Write[K, V]) {
-	defer c.recoverWriteBack(first.key)
+	defer c.recoverWorker() // deliver recovers the adapter: a panic reaching here is OnL2Error's own
 	for more := true; more; {
 		if first.flush != nil {
 			close(first.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
@@ -1180,13 +1176,13 @@ func (c *Cache[K, V]) deliverRun(sets List[K, V], deletes []K, ttl time.Duration
 // writeBatch delivers drained writes to L2: one Set for a single item, one BatchSet otherwise. A batch error is
 // reported for every key it covers.
 func (c *Cache[K, V]) writeBatch(batch List[K, V], ttl time.Duration) {
-	if len(batch) == 1 {
-		if err := c.l2Cache.Set(context.Background(), batch[0].Key, batch[0].Value, ttl); err != nil {
-			c.reportL2Err(batch[0].Key, err)
+	err := c.deliver(func() error {
+		if len(batch) == 1 {
+			return c.l2Cache.Set(context.Background(), batch[0].Key, batch[0].Value, ttl)
 		}
-		return
-	}
-	if err := c.l2Cache.BatchSet(context.Background(), batch, ttl); err != nil {
+		return c.l2Cache.BatchSet(context.Background(), batch, ttl)
+	})
+	if err != nil {
 		for _, item := range batch {
 			c.reportL2Err(item.Key, err)
 		}
@@ -1196,13 +1192,13 @@ func (c *Cache[K, V]) writeBatch(batch List[K, V], ttl time.Duration) {
 // deleteBatch delivers drained deletes to L2: one Delete for a single key, one BatchDelete otherwise. A batch error
 // is reported for every key it covers.
 func (c *Cache[K, V]) deleteBatch(keys []K) {
-	if len(keys) == 1 {
-		if err := c.l2Cache.Delete(context.Background(), keys[0]); err != nil {
-			c.reportL2Err(keys[0], err)
+	err := c.deliver(func() error {
+		if len(keys) == 1 {
+			return c.l2Cache.Delete(context.Background(), keys[0])
 		}
-		return
-	}
-	if err := c.l2Cache.BatchDelete(context.Background(), keys); err != nil {
+		return c.l2Cache.BatchDelete(context.Background(), keys)
+	})
+	if err != nil {
 		for _, key := range keys {
 			c.reportL2Err(key, err)
 		}
@@ -1213,7 +1209,7 @@ func (c *Cache[K, V]) deleteBatch(keys []K) {
 // everything left in that queue.
 func (c *Cache[K, V]) writeBackLoop(queue chan l2Write[K, V]) {
 	defer c.wg.Done()
-	defer c.recoverWorker() // flushWrite recovers per batch, so reaching this means the loop itself broke
+	defer c.recoverWorker() // deliver recovers per batch, so reaching this means the loop itself broke
 	for {
 		select {
 		case write := <-queue:

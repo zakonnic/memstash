@@ -3,7 +3,9 @@ package tests
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -250,6 +252,82 @@ func TestWriteBackOverflowKeepsPerKeyOrder(t *testing.T) {
 				return
 			}
 			assert.Equal(t, []string{"v1", "v2", "v3"}, values["k"])
+		})
+	}
+}
+
+// explodingL2 is holdL2 whose next BatchSet or BatchDelete panics once armed.
+type explodingL2 struct {
+	*holdL2
+	panicSet, panicDelete atomic.Bool
+}
+
+func (e *explodingL2) BatchSet(ctx context.Context, items memstash.List[string, string], ttl time.Duration) error {
+	if e.panicSet.CompareAndSwap(true, false) {
+		panic("batch set exploded")
+	}
+	return e.holdL2.BatchSet(ctx, items, ttl)
+}
+
+func (e *explodingL2) BatchDelete(ctx context.Context, keys []string) error {
+	if e.panicDelete.CompareAndSwap(true, false) {
+		panic("batch delete exploded")
+	}
+	return e.holdL2.BatchDelete(ctx, keys)
+}
+
+// TestWriteBackPanicCostsOnlyItsBatch: an adapter panicking inside a write-back batch is reported for every key of
+// that batch and no other, and the task queued right behind it is still delivered.
+func TestWriteBackPanicCostsOnlyItsBatch(t *testing.T) {
+	ctx := context.Background()
+	for name, arm := range map[string]func(*explodingL2){
+		"batch set":    func(l2 *explodingL2) { l2.panicSet.Store(true) },
+		"batch delete": func(l2 *explodingL2) { l2.panicDelete.Store(true) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			l2 := &explodingL2{holdL2: newHoldL2("hold")}
+			var mu sync.Mutex
+			reported := map[string]error{}
+			c, err := memstash.New[string, string](
+				memstash.WithL2Cache[string, string](l2),
+				memstash.WithWriteBackWorkers(1),
+				memstash.WithOnL2Error[string, string](func(key string, err error) {
+					mu.Lock()
+					defer mu.Unlock()
+					reported[key] = err
+				}),
+			)
+			require.NoError(t, err)
+			defer c.Close()
+			defer l2.open()
+
+			require.NoError(t, c.Set(ctx, "w", "hold"))
+			<-l2.entered // the worker is held, so the next four queue up: a run of sets, then a run of deletes
+			require.NoError(t, c.Set(ctx, "a", "1"))
+			require.NoError(t, c.Set(ctx, "b", "2"))
+			require.NoError(t, c.Delete(ctx, "c"))
+			require.NoError(t, c.Delete(ctx, "d"))
+			arm(l2)
+			l2.open()
+			c.Wait()
+
+			failed, delivered := []string{"a", "b"}, []string{"c", "d"}
+			if name == "batch delete" {
+				failed, delivered = delivered, failed
+			}
+			_, values := l2.snapshot()
+			l2.mu.Lock()
+			deleted := maps.Clone(l2.deleted)
+			l2.mu.Unlock()
+			mu.Lock()
+			defer mu.Unlock()
+			for _, key := range failed {
+				assert.ErrorIs(t, reported[key], memstash.ErrPanic, "key %s of the failed batch", key)
+			}
+			for _, key := range delivered {
+				assert.NotContains(t, reported, key)
+				assert.True(t, deleted[key] || len(values[key]) > 0, "key %s, queued behind the failed batch, was lost", key)
+			}
 		})
 	}
 }
