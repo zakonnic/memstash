@@ -118,6 +118,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   pass-through codec (`NewBytes`, `BytesCodec`) that slice went into the first level, and for a value in the
   value log a later GC or `Close` unmapped it - the next read of the cached value crashed the process. `Get` copies
   the value first, as `BatchGet` already did.
+- **The rueidis and valkey adapters panicked on a one-master cluster.** They told a single server from a cluster by
+  `len(client.Nodes()) <= 1`, and a cluster client with one master (a single-shard cluster, a local node with
+  `cluster-enabled yes`) has one node: the adapters then took the ordered-MGET and dedicated-pipeline paths, where
+  the client panics on keys from different slots - in `BatchGet`, in every `BatchSet` with a TTL, and in large
+  `BatchDelete`s. They now ask the client's `Mode()`.
 
 ## [0.9.8] - 2026-08-13
 

@@ -25,10 +25,10 @@ type Cache[K comparable, V any] struct {
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
 
-// IsOrderedMgetAvailable reports whether MGET on this client returns its replies in key order. It holds for a client
-// that talks to a single node: a cluster client splits a batch per node and the helper regroups it, losing the order.
+// IsOrderedMgetAvailable reports whether MGET on this client returns its replies in key order. It holds for any client
+// but a cluster one: that splits a batch per node and the helper regroups it, losing the order.
 func IsOrderedMgetAvailable(client valkeylib.Client) bool {
-	return client != nil && len(client.Nodes()) <= 1
+	return client != nil && client.Mode() != valkeylib.ClientModeCluster
 }
 
 // Multi-key commands (MGET/MSET) beat a per-key pipeline while they stay small.
@@ -64,7 +64,7 @@ func New[K comparable, V any](client valkeylib.Client, codec memstash.Codec[V], 
 		codec:       codec,
 		keyFunc:     keyFunc,
 		orderedMget: l2.ResolveOrderedMget(mgetMode, func() bool { return IsOrderedMgetAvailable(client) }),
-		singleNode:  len(client.Nodes()) <= 1,
+		singleNode:  client.Mode() != valkeylib.ClientModeCluster, // a one-master cluster has one node, but cross-slot batches panic
 	}, nil
 }
 
