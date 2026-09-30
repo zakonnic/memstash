@@ -376,7 +376,28 @@ func (c *Cache[K, V]) loadOwned(ctx context.Context, load BatchLoaderFunc[K, V],
 	}
 	defer c.releaseAll(fl.calls)
 
-	resolved, err := c.batchLoad(ctx, fl.owned, load)
+	// A flight that ended between the memory pass and the claim has stored its key already.
+	fromMemory, _, hits := c.batchGetMemory(fl.owned, nil, false)
+	c.stats.addMemHits(hits)
+	missing := fl.owned
+	if hits > 0 {
+		missing = make([]K, 0, len(fl.owned)-int(hits))
+		next := 0
+		for _, key := range fl.owned { // the hits come back in the order of the keys
+			if next < len(fromMemory) && fromMemory[next].Key == key {
+				next++
+				continue
+			}
+			missing = append(missing, key)
+		}
+	}
+	resolved := fromMemory
+	var err error
+	if len(missing) > 0 {
+		var loaded List[K, V]
+		loaded, err = c.batchLoad(ctx, missing, load)
+		resolved = append(resolved, loaded...)
+	}
 	if errors.Is(err, ErrKeyNotFound) {
 		err = nil // said of the whole batch it means none found, as it does to the calls that joined it
 	}

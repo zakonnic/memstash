@@ -147,6 +147,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   that panicked there escaped the batch's recovery: the reads already collected and the one in hand were never
   answered, and the pool lost a worker for good - with all of them gone, every `GetBatched` miss waited for its
   context. The recovery now covers the whole batch: its callers get `ErrPanic` and the worker goes on.
+- **`BatchGetOrLoad` could load a key that a concurrent load had just stored.** A flight that ended between the
+  batch's memory pass and its claim on the key left the key in memory with its flight gone, so the batch owned it
+  anew and sent it to L2 and the loader again. It now checks memory once more for the keys it owns, as `GetOrLoad`
+  always did, and loads only those still missing.
 
 ## [0.9.8] - 2026-08-13
 

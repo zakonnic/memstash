@@ -168,6 +168,42 @@ func TestBatchGetOrLoadSortingLoader(t *testing.T) {
 	assert.Equal(t, []string{"vc", "vb", "va"}, got)
 }
 
+// A flight can end between a batch's memory pass and its claim on the same key; the batch then owns a key that is in
+// memory already and must take it from there, as GetOrLoad does, instead of loading it a second time.
+func TestBatchGetOrLoadLoadsEachKeyOnce(t *testing.T) {
+	ctx := context.Background()
+	c, err := memstash.New[int, int](memstash.WithMemoryCapacity(1 << 16))
+	require.NoError(t, err)
+	defer c.Close()
+	const keys, goroutines = 2000, 16
+	var loads [keys]atomic.Int32
+	load := func(_ context.Context, asked []int) (memstash.List[int, int], error) {
+		out := make(memstash.List[int, int], 0, len(asked))
+		for _, key := range asked {
+			loads[key].Add(1)
+			out = append(out, memstash.KeyVal[int, int]{Key: key, Value: key})
+		}
+		return out, nil
+	}
+	var wg sync.WaitGroup
+	for g := range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range keys {
+				_, err := c.BatchGetOrLoad(ctx, []int{(i*7 + g*131) % keys}, load)
+				assert.NoError(t, err)
+			}
+		}()
+	}
+	wg.Wait()
+	for key := range loads {
+		if n := loads[key].Load(); n != 1 {
+			t.Errorf("key %d loaded %d times", key, n)
+		}
+	}
+}
+
 func TestBatchGetOrLoadPartialAnswerWithError(t *testing.T) {
 	ctx := context.Background()
 	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100})
