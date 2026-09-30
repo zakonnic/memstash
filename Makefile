@@ -119,10 +119,16 @@ check-new-libs: ## Checks for new versions of libraries
 .PHONY: require-core tag
 require-core: ## Make every l2 adapter require core v$(V): the release commit (make require-core V=1.2.3)
 	@test -n "$(V)" || { echo "V is required, e.g. make require-core V=1.2.3"; exit 1; }
-	$(foreach m, $(ADAPTERS), go -C $(m) mod edit -require=github.com/zakonnic/memstash@v$(V);)
+	@for m in $(ADAPTERS); do \
+		go -C $$m mod edit -require=github.com/zakonnic/memstash@v$(V) || exit 1; \
+	done
 
 tag: ## Tag the root module and every l2 adapter module with the given version (make tag V=1.2.3), then 'make push'
 	@test -n "$(V)" || { echo "V is required, e.g. make tag V=1.2.3"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { \
+		echo "Error: the working tree is dirty. Tags would point at the last commit, not at what you see."; \
+		exit 1; \
+	}
 	@for t in $(TAGS); do \
 		if git rev-parse "$$t" >/dev/null 2>&1; then \
 			echo "Error: tag $$t already exists. Aborting."; \

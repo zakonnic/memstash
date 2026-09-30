@@ -97,3 +97,6 @@ make require-core V=1.2.3   # then commit: the release commit
 make tag V=1.2.3
 make push
 ```
+
+The adapters' go.sum gets the new core's hashes only once the tag is published: run `go mod tidy` in them after the
+push, or `GOWORK=off` builds report a missing go.sum entry.
