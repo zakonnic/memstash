@@ -3,6 +3,7 @@ package l2_test
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
 	"sync"
 	"testing"
@@ -61,6 +62,7 @@ func TestMemcacheExpiration(t *testing.T) {
 		{name: "sub-second rounds up to one second", ttl: 300 * time.Millisecond, want: 1},
 		{name: "whole seconds pass through", ttl: 90 * time.Second, want: 90},
 		{name: "exactly 30 days stays relative", ttl: 30 * 24 * time.Hour, want: 30 * 24 * 60 * 60},
+		{name: "forever clamps to the int32 horizon", ttl: math.MaxInt64, want: math.MaxInt32},
 		{
 			name: "beyond 30 days becomes an absolute unix timestamp",
 			ttl:  31 * 24 * time.Hour,
@@ -90,6 +92,7 @@ func TestRedisMillis(t *testing.T) {
 		{name: "sub-millisecond rounds up to one", ttl: time.Microsecond, want: 1},
 		{name: "whole milliseconds pass through", ttl: 2500 * time.Millisecond, want: 2500},
 		{name: "fractional milliseconds round up", ttl: 1500*time.Millisecond + time.Microsecond, want: 1501},
+		{name: "forever does not overflow", ttl: math.MaxInt64, want: math.MaxInt64/int64(time.Millisecond) + 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

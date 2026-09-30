@@ -58,7 +58,7 @@ type Config[K comparable, V any] struct {
 	CostFunc func(key K, value V) uint32
 
 	// TTL is the lifetime of first-level items with one-second resolution. 0 means no TTL. The same TTL is passed to L2Cache
-	// on writes.
+	// on writes. Anything past ~146 years is taken as ~146 years.
 	TTL time.Duration
 
 	// RefreshTTLOnGet makes every first-level hit extend the item's lifetime by a full TTL (sliding expiration).

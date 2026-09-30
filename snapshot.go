@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"time"
 )
 
@@ -172,7 +173,8 @@ func (c *Cache[K, V]) LoadFrom(
 
 		expireOff, ttl := c.expireOffset(), c.ttl
 		if keepTTL && lifeSeconds > 0 {
-			remaining := time.Until(savedAt.Add(time.Duration(lifeSeconds-1) * time.Second))
+			life := time.Duration(min(lifeSeconds-1, math.MaxInt64/uint64(time.Second))) * time.Second
+			remaining := time.Until(savedAt.Add(life))
 			if remaining <= 0 {
 				continue // it would already have expired: nothing to restore
 			}

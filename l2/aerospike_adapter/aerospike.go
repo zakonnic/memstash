@@ -9,6 +9,7 @@ package aerospike_adapter
 
 import (
 	"context"
+	"math"
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v7"
@@ -250,10 +251,14 @@ func (c *Cache[K, V]) decode(rec *as.Record) (V, bool, error) {
 }
 
 // expiration maps a TTL to the Aerospike write-policy expiration: 0 means "never expire", otherwise whole seconds
-// rounded up.
+// rounded up. Past the top of the uint32 range, where the server's reserved values sit, it never expires either.
 func expiration(ttl time.Duration) uint32 {
-	if ttl <= 0 {
+	secs := ttl / time.Second
+	if ttl%time.Second > 0 {
+		secs++
+	}
+	if ttl <= 0 || secs > math.MaxUint32-2 {
 		return as.TTLDontExpire
 	}
-	return uint32((ttl + time.Second - 1) / time.Second)
+	return uint32(secs)
 }

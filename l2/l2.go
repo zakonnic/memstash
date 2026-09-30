@@ -329,7 +329,10 @@ func MemcacheExpiration(ttl time.Duration) int32 {
 	if ttl <= 0 {
 		return 0
 	}
-	secs := int64((ttl + time.Second - 1) / time.Second)
+	secs := int64(ttl / time.Second) // rounded up below; ttl+time.Second-1 would overflow near math.MaxInt64
+	if ttl%time.Second > 0 {
+		secs++
+	}
 	if secs <= memcachedRelativeMax {
 		return int32(secs)
 	}
@@ -343,9 +346,9 @@ func MemcacheExpiration(ttl time.Duration) int32 {
 // RedisMillis converts a TTL to whole milliseconds for the PX argument of SET, rounding sub-millisecond TTLs up to 1
 // so a tiny but non-zero TTL is never mistaken for "no expiration".
 func RedisMillis(ttl time.Duration) int64 {
-	millis := int64((ttl + time.Millisecond - 1) / time.Millisecond)
-	if millis < 1 {
-		return 1
+	millis := int64(ttl / time.Millisecond) // rounded up below: ttl+time.Millisecond-1 could overflow
+	if ttl%time.Millisecond > 0 {
+		millis++
 	}
-	return millis
+	return max(millis, 1)
 }

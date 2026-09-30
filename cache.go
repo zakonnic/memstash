@@ -63,6 +63,10 @@ const (
 
 	// maxTableSlots is the largest table a shard can address: the whole uint32 slot index space.
 	maxTableSlots = int64(1) << 32
+
+	// maxTTL caps the TTL at ~146 years. A TTL near math.MaxInt64, the usual way to write forever, would overflow the
+	// lifetimes the expiry scale computes.
+	maxTTL = time.Duration(math.MaxInt64 / 2)
 )
 
 // requires64BitPlatform is what a 32-bit build fails on: table sizes and the shard layout assume 64-bit words.
@@ -219,6 +223,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.TTL < 0 {
 		return nil, ErrBadTTL
 	}
+	cfg.TTL = min(cfg.TTL, maxTTL)
 	if cfg.WriteBackWorkers < 0 {
 		return nil, ErrBadWorkers
 	}
@@ -285,7 +290,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	}
 
 	if cfg.TTL > 0 {
-		ttlSec := int64((cfg.TTL + time.Second - 1) / time.Second)
+		ttlSec := ceilDiv(cfg.TTL, time.Second)
 		unitSec := max((ttlSec+itemstore.ExpireMax-1)/itemstore.ExpireMax, 1)
 		c.expireUnit = time.Duration(unitSec) * time.Second
 		// The cap keeps ttlOff+1 (see expireOffsetAt) within half the wrapping scale.
@@ -573,7 +578,7 @@ func (c *Cache[K, V]) SetWithTTL(ctx context.Context, key K, value V, ttl time.D
 // expireOffsetOf is expireOffset for a caller-supplied lifetime: the offset for the item, and the lifetime it
 // actually got after rounding up to expireUnit and capping at the far edge of the unambiguous half of the scale.
 func (c *Cache[K, V]) expireOffsetOf(ttl time.Duration) (uint32, time.Duration) {
-	units := min((int64(ttl)+int64(c.expireUnit)-1)/int64(c.expireUnit), int64(itemstore.ExpireMax-1))
+	units := min(ceilDiv(ttl, c.expireUnit), int64(itemstore.ExpireMax-1))
 	expireOff := (c.nowOff.Load() + uint32(units) + 1) & itemstore.ExpireWrapMask
 	if expireOff == 0 {
 		expireOff = 1
@@ -972,12 +977,21 @@ func (c *Cache[K, V]) expireOffsetIn(remaining time.Duration) uint32 {
 	if c.ttlOff == 0 || remaining <= 0 {
 		return 0
 	}
-	units := min(uint32((remaining+c.expireUnit-1)/c.expireUnit), c.ttlOff)
+	units := uint32(min(ceilDiv(remaining, c.expireUnit), int64(c.ttlOff)))
 	expireOff := (c.nowOff.Load() + units + 1) & itemstore.ExpireWrapMask
 	if expireOff == 0 {
 		expireOff = 1
 	}
 	return expireOff
+}
+
+// ceilDiv is d/unit rounded up; (d+unit-1)/unit would overflow for a d near math.MaxInt64, the "forever" TTL.
+func ceilDiv(d, unit time.Duration) int64 {
+	q := int64(d / unit)
+	if d%unit > 0 {
+		q++
+	}
+	return q
 }
 
 // Len returns the number of first-level items (including expired ones not yet swept).

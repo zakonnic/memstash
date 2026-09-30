@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"math"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,4 +107,36 @@ func TestSetWithTTLRefreshOnGetUsesCacheTTL(t *testing.T) {
 
 	_, ok = c.GetFromMemory("k")
 	assert.True(t, ok, "the read extended the entry by the cache's TTL, not by its own")
+}
+
+// ttlRecordL2 is l2Stub remembering the lifetime of the last Set.
+type ttlRecordL2 struct {
+	*l2Stub
+	last atomic.Int64
+}
+
+func (r *ttlRecordL2) Set(ctx context.Context, key, value string, ttl time.Duration) error {
+	r.last.Store(int64(ttl))
+	return r.l2Stub.Set(ctx, key, value, ttl)
+}
+
+// A "forever" lifetime, time.Duration(math.MaxInt64), is the longest one the scale holds - not an overflow that
+// expires the item on the spot or hands L2 a negative TTL.
+func TestForeverTTL(t *testing.T) {
+	ctx := context.Background()
+	for _, cacheTTL := range []time.Duration{time.Minute, time.Duration(math.MaxInt64)} {
+		l2 := &ttlRecordL2{l2Stub: newL2Stub()}
+		c, err := memstash.New[string, string](memstash.WithTTL(cacheTTL),
+			memstash.WithL2Cache[string, string](l2), memstash.WithWritePolicy(memstash.WriteThrough))
+		require.NoError(t, err)
+
+		require.NoError(t, c.Set(ctx, "set", "v"))
+		require.NoError(t, c.SetWithTTL(ctx, "forever", "v", time.Duration(math.MaxInt64)))
+		for _, key := range []string{"set", "forever"} {
+			_, ok := c.GetFromMemory(key)
+			assert.True(t, ok, "cache TTL %v: %s expired at once", cacheTTL, key)
+		}
+		assert.Positive(t, l2.last.Load(), "cache TTL %v: L2 got a non-positive lifetime", cacheTTL)
+		c.Close()
+	}
 }

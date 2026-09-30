@@ -155,6 +155,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   `ItemDead`/`ItemChanceMask`/`ItemInMainQueue` bits, so they were 2..6 in 0.9.8 and 3..7 once a bit was added, and a
   cause stored or exported as a number meant something else after an upgrade. They have their own block now and stay
   at 1..5 (`CauseInvalidation` to `CauseOverflow`); the zero value is no cause.
+- **A "forever" TTL overflowed.** `WithTTL(math.MaxInt64)` rounded the TTL up past the int64 range, and every item
+  was expired the moment it was written; `SetWithTTL` with such a lifetime handed L2 a negative TTL;
+  `l2.RedisMillis` turned it into one millisecond and `l2.MemcacheExpiration` into a negative expiration, both of
+  which expire the key at once; the Aerospike adapter wrapped TTLs of 2^32 seconds or more into its reserved values
+  (keep the old TTL, the namespace default). The roundings no longer overflow, a TTL is capped at ~146 years, and
+  the Aerospike adapter stores anything past its range as "never expire".
 
 ## [0.9.8] - 2026-08-13
 
