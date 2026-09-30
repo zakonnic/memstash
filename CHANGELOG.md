@@ -161,6 +161,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   which expire the key at once; the Aerospike adapter wrapped TTLs of 2^32 seconds or more into its reserved values
   (keep the old TTL, the namespace default). The roundings no longer overflow, a TTL is capped at ~146 years, and
   the Aerospike adapter stores anything past its range as "never expire".
+- **`LoadFrom` with `LoadWithTTL` and `LoadToL2` gave L2 a different lifetime than memory.** Memory capped a
+  restored item at the loading cache's TTL, L2 got the uncapped remainder from the snapshot - an hour where memory
+  kept a minute - and a cache without a TTL kept the item forever while L2 expired it. L2 now gets the lifetime
+  memory ended up with, rounded and capped the same way, and none from a cache without a TTL.
 
 ## [0.9.8] - 2026-08-13
 

@@ -298,6 +298,35 @@ func TestSnapshotLoadWithTTLIntoCacheWithoutTTL(t *testing.T) {
 	assert.True(t, ok)
 }
 
+// With LoadToL2, L2 gets the lifetime memory ended up with - capped at the loading cache's TTL, or none when it has
+// none - not the one the snapshot recorded.
+func TestSnapshotLoadWithTTLGivesL2WhatMemoryGot(t *testing.T) {
+	ctx := context.Background()
+	src := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100, TTL: time.Hour})
+	require.NoError(t, src.Set(ctx, "k", "v"))
+	var buf bytes.Buffer
+	require.NoError(t, src.SaveTo(&buf, l2.StringCodec(), l2.StringCodec()))
+
+	for _, tc := range []struct {
+		ttl, min, max time.Duration
+	}{
+		{ttl: time.Minute, min: time.Second, max: time.Minute + time.Second}, // one clock unit of rounding
+		{ttl: 0},
+	} {
+		target := &ttlRecordL2{l2Stub: newL2Stub()}
+		target.last.Store(-1)
+		dst := newCache(t, memstash.Config[string, string]{
+			MemoryCapacity: 100, TTL: tc.ttl, L2Cache: target, WritePolicy: memstash.WriteThrough,
+		})
+		snapshot := bytes.NewReader(buf.Bytes())
+		require.NoError(t, dst.LoadFrom(ctx, snapshot, l2.StringCodec(), l2.StringCodec(), memstash.LoadWithTTL,
+			memstash.LoadToL2))
+		got := time.Duration(target.last.Load())
+		assert.GreaterOrEqual(t, got, tc.min, "cache TTL %v", tc.ttl)
+		assert.LessOrEqual(t, got, tc.max, "cache TTL %v", tc.ttl)
+	}
+}
+
 func TestSnapshotLoadToL2(t *testing.T) {
 	ctx := context.Background()
 	src := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100})

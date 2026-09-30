@@ -28,6 +28,7 @@ const (
 	LoadWithCurrentTTL LoadOption = iota
 	// LoadWithTTL restores the expiration the item carried when the snapshot was taken: it expires at the same moment
 	// it would have, so time spent in the file counts against it and items already past that moment are skipped.
+	// Capped at the cache's own TTL; a cache without one keeps the items without expiry. L2 gets the same lifetime.
 	LoadWithTTL
 	// LoadToL2 also writes every loaded item to the second level, following WritePolicy. Without an L2 it does nothing.
 	LoadToL2
@@ -178,7 +179,9 @@ func (c *Cache[K, V]) LoadFrom(
 			if remaining <= 0 {
 				continue // it would already have expired: nothing to restore
 			}
-			expireOff, ttl = c.expireOffsetIn(remaining), remaining
+			if c.ttlOff != 0 { // without a TTL of its own the cache keeps it forever, in both levels
+				expireOff, ttl = c.expireOffsetFor(remaining, c.ttlOff)
+			}
 		}
 		c.setMemory(key, value, expireOff)
 		if toL2 {

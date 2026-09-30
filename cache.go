@@ -562,7 +562,7 @@ func (c *Cache[K, V]) SetWithTTL(ctx context.Context, key K, value V, ttl time.D
 	if ttl <= 0 {
 		return ErrBadTTL
 	}
-	expireOff, effectiveTTL := c.expireOffsetOf(ttl)
+	expireOff, effectiveTTL := c.expireOffsetFor(ttl, itemstore.ExpireMax-1)
 	c.setMemory(key, value, expireOff)
 	c.stats.addSets(1)
 	if c.l2WritePolicy == WriteDisabled {
@@ -575,11 +575,11 @@ func (c *Cache[K, V]) SetWithTTL(ctx context.Context, key K, value V, ttl time.D
 	return nil
 }
 
-// expireOffsetOf is expireOffset for a caller-supplied lifetime: the offset for the item, and the lifetime it
-// actually got after rounding up to expireUnit and capping at the far edge of the unambiguous half of the scale.
-func (c *Cache[K, V]) expireOffsetOf(ttl time.Duration) (uint32, time.Duration) {
-	units := min(ceilDiv(ttl, c.expireUnit), int64(itemstore.ExpireMax-1))
-	expireOff := (c.nowOff.Load() + uint32(units) + 1) & itemstore.ExpireWrapMask
+// expireOffsetFor is expireOffset for the caller's lifetime. It also returns the lifetime the item actually got,
+// rounded up to expireUnit and capped at maxUnits, which is what L2 must get too. TTL must be enabled.
+func (c *Cache[K, V]) expireOffsetFor(ttl time.Duration, maxUnits uint32) (uint32, time.Duration) {
+	units := uint32(min(ceilDiv(ttl, c.expireUnit), int64(maxUnits)))
+	expireOff := (c.nowOff.Load() + units + 1) & itemstore.ExpireWrapMask
 	if expireOff == 0 {
 		expireOff = 1
 	}
@@ -969,20 +969,6 @@ func (c *Cache[K, V]) lifeLeft(metaWord uint64, nowOff uint32) time.Duration {
 		return 0
 	}
 	return time.Duration((expireOff-nowOff)&itemstore.ExpireWrapMask) * c.expireUnit
-}
-
-// expireOffsetIn is expireOffset for an item that should outlive now by remaining, capped at the cache's own TTL.
-// Rounding is upwards so a restored item never expires earlier than it would have.
-func (c *Cache[K, V]) expireOffsetIn(remaining time.Duration) uint32 {
-	if c.ttlOff == 0 || remaining <= 0 {
-		return 0
-	}
-	units := uint32(min(ceilDiv(remaining, c.expireUnit), int64(c.ttlOff)))
-	expireOff := (c.nowOff.Load() + units + 1) & itemstore.ExpireWrapMask
-	if expireOff == 0 {
-		expireOff = 1
-	}
-	return expireOff
 }
 
 // ceilDiv is d/unit rounded up; (d+unit-1)/unit would overflow for a d near math.MaxInt64, the "forever" TTL.

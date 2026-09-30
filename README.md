@@ -286,7 +286,7 @@ Loading takes options:
 | Option | Effect |
 |---|---|
 | `LoadWithCurrentTTL` | Every item gets a full, fresh lifetime, exactly as `Set` would. The default. |
-| `LoadWithTTL` | Expirations are restored on their original schedule: the snapshot records what each item had left plus the moment it was taken, so time spent in the file counts and items already past their deadline are skipped. Capped at the loading cache's own TTL. |
+| `LoadWithTTL` | Expirations are restored on their original schedule: the snapshot records what each item had left plus the moment it was taken, so time spent in the file counts and items already past their deadline are skipped. Capped at the loading cache's own TTL; a cache without one keeps the items without expiry. With `LoadToL2`, L2 gets the same lifetime. |
 | `LoadToL2` | Also write every loaded item to the second level, following `WritePolicy`. |
 
 Without `LoadToL2` only the first level is touched, and `ctx` goes unused. A truncated or foreign
