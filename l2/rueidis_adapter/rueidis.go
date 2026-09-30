@@ -59,12 +59,13 @@ func New[K comparable, V any](client rueidislib.Client, codec memstash.Codec[V],
 	if err != nil {
 		return nil, err
 	}
+	single := client.Mode() != rueidislib.ClientModeCluster // a one-master cluster has one node, yet splits by slot
 	return &Cache[K, V]{
 		client:      client,
 		codec:       codec,
 		keyFunc:     keyFunc,
-		orderedMget: l2.ResolveOrderedMget(mgetMode, func() bool { return IsOrderedMgetAvailable(client) }),
-		singleNode:  client.Mode() != rueidislib.ClientModeCluster, // a one-master cluster has one node, but cross-slot batches panic
+		orderedMget: l2.ResolveOrderedMget(mgetMode, func() bool { return single }),
+		singleNode:  single,
 	}, nil
 }
 
