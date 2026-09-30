@@ -377,6 +377,9 @@ func (c *Cache[K, V]) loadOwned(ctx context.Context, load BatchLoaderFunc[K, V],
 	defer c.releaseAll(fl.calls)
 
 	resolved, err := c.batchLoad(ctx, fl.owned, load)
+	if errors.Is(err, ErrKeyNotFound) {
+		err = nil // said of the whole batch it means none found, as it does to the calls that joined it
+	}
 	assignLoaded(fl.calls, resolved, err, found)
 	return err
 }
