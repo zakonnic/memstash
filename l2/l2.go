@@ -231,14 +231,24 @@ func LastValues[K comparable, V any](items memstash.List[K, V]) memstash.List[K,
 		return items
 	}
 	at := make(map[K]int, len(items))
-	deduped := make(memstash.List[K, V], 0, len(items))
-	for _, item := range items {
-		if i, seen := at[item.Key]; seen {
+	var deduped memstash.List[K, V] // nil until the first repeat: most batches have none
+	for n, item := range items {
+		i, seen := at[item.Key]
+		switch {
+		case seen && deduped == nil:
+			deduped = append(make(memstash.List[K, V], 0, len(items)), items[:n]...)
+			fallthrough
+		case seen:
 			deduped[i].Value = item.Value
-			continue
+		case deduped != nil:
+			at[item.Key] = len(deduped)
+			deduped = append(deduped, item)
+		default:
+			at[item.Key] = n
 		}
-		at[item.Key] = len(deduped)
-		deduped = append(deduped, item)
+	}
+	if deduped == nil {
+		return items
 	}
 	return deduped
 }
