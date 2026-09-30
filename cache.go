@@ -834,8 +834,12 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		return value, nil
 	}
 
-	call := &flightCall[K, V]{}
-	if winner, running := c.claim(c.keyHash(key), key, call); running {
+	for {
+		call := &flightCall[K, V]{}
+		winner, running := c.claim(c.keyHash(key), key, call)
+		if !running {
+			return c.loadFlight(ctx, key, load, call)
+		}
 		// A flight is already in progress - wait for its result or for the context to be canceled (the owner keeps
 		// loading on behalf of everyone else). The key was not in memory when this call looked, and this call itself
 		// never reaches L2 - the owner does: a memory miss.
@@ -844,9 +848,15 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 			var zero V
 			return zero, err
 		}
-		return winner.val, winner.err
+		if !canceledElsewhere(ctx, winner.err) {
+			return winner.val, winner.err
+		}
+		c.stats.addMemMisses(-1) // the next attempt counts this read
 	}
+}
 
+// loadFlight loads the key as the owner of call and hands the result to everyone waiting on it.
+func (c *Cache[K, V]) loadFlight(ctx context.Context, key K, load LoaderFunc[K, V], call *flightCall[K, V]) (V, error) {
 	// ErrLoaderPanic stands until doLoad returns: a loader that panics or Goexits must not leave waiters stuck.
 	call.err = ErrLoaderPanic
 	defer c.release(call)
@@ -854,6 +864,12 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 	value, err := c.doLoad(ctx, key, load)
 	call.val, call.err, call.ok = value, err, err == nil
 	return value, err
+}
+
+// canceledElsewhere reports a context error from a flight while ctx itself is live: the owner's context ended that
+// load, not this caller's, which loads again instead.
+func canceledElsewhere(ctx context.Context, err error) bool {
+	return ctx.Err() == nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) (V, error) {

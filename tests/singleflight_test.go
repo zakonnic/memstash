@@ -459,3 +459,59 @@ func TestStatsCountGetAndRefresh(t *testing.T) {
 	assert.EqualValues(t, 2, s.MemoryHits())
 	assert.EqualValues(t, 2, s.MemoryMisses())
 }
+
+// A call waiting on a flight must not inherit the owner's cancellation: the owner's context ended that load, not the
+// waiter's, so the waiter loads the key itself - one key at a time or in a batch.
+func TestLoadWaiterOutlivesCanceledOwner(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("batch=%v", batch), func(t *testing.T) {
+			c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100, StatsEnabled: true})
+			getOrLoad := func(ctx context.Context, load func(context.Context) (string, error)) (string, error) {
+				if !batch {
+					return c.GetOrLoad(ctx, "k", func(ctx context.Context, _ string) (string, error) { return load(ctx) })
+				}
+				found, err := c.BatchGetOrLoad(ctx, []string{"k"},
+					func(ctx context.Context, _ []string) (memstash.List[string, string], error) {
+						v, err := load(ctx)
+						if err != nil {
+							return nil, err
+						}
+						return memstash.List[string, string]{{Key: "k", Value: v}}, nil
+					})
+				return found.ToMap()["k"], err
+			}
+
+			ownerCtx, cancel := context.WithCancel(context.Background())
+			entered := make(chan struct{})
+			owner := make(chan error, 1)
+			go func() {
+				_, err := getOrLoad(ownerCtx, func(ctx context.Context) (string, error) {
+					close(entered)
+					<-ctx.Done()
+					return "", ctx.Err()
+				})
+				owner <- err
+			}()
+			<-entered
+
+			misses := func() int64 { stats := c.Stats(); return stats.MemoryMisses() }
+			base := misses()
+			type result struct {
+				value string
+				err   error
+			}
+			waiter := make(chan result, 1)
+			go func() {
+				v, err := getOrLoad(context.Background(), func(context.Context) (string, error) { return "fresh", nil })
+				waiter <- result{v, err}
+			}()
+			require.Eventually(t, func() bool { return misses() > base }, 5*time.Second, time.Millisecond,
+				"the waiter never joined the owner's flight")
+			cancel()
+			require.ErrorIs(t, <-owner, context.Canceled)
+			got := <-waiter
+			require.NoError(t, got.err, "the owner's cancellation reached a waiter whose context is live")
+			assert.Equal(t, "fresh", got.value)
+		})
+	}
+}
