@@ -214,6 +214,13 @@ func TestDeletionCauseString(t *testing.T) {
 	assert.Equal(t, "eviction", memstash.CauseEviction.String())
 	assert.Equal(t, "overflow", memstash.CauseOverflow.String())
 	assert.Equal(t, "unknown", memstash.DeletionCause(200).String())
+	assert.Equal(t, "unknown", memstash.DeletionCause(0).String(), "the zero value is no cause")
+
+	// The values are API: they must not move with whatever constants are declared around them.
+	assert.Equal(t, []memstash.DeletionCause{1, 2, 3, 4, 5}, []memstash.DeletionCause{
+		memstash.CauseInvalidation, memstash.CauseReplacement, memstash.CauseExpiration, memstash.CauseEviction,
+		memstash.CauseOverflow,
+	})
 
 	assert.False(t, memstash.CauseInvalidation.Automatic())
 	assert.False(t, memstash.CauseReplacement.Automatic())

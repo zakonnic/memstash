@@ -69,11 +69,12 @@ const (
 	ItemChanceMask = itemstore.ChanceMask
 	// ItemInMainQueue is the meta-word bit of an item in queue 1.
 	ItemInMainQueue = itemstore.InMainQueue
+)
 
-	// --- DeletionCause ---
-
+// The zero DeletionCause is no cause: every removal carries one of these.
+const (
 	// CauseInvalidation is an explicit Delete or BatchDelete.
-	CauseInvalidation DeletionCause = iota
+	CauseInvalidation DeletionCause = iota + 1
 	// CauseReplacement is a Set over a live key; the handler receives the value that was replaced.
 	CauseReplacement
 	// CauseExpiration is an elapsed TTL. It is reported when the item is actually reclaimed - by the read that finds

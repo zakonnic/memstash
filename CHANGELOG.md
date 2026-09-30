@@ -151,6 +151,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   batch's memory pass and its claim on the key left the key in memory with its flight gone, so the batch owned it
   anew and sent it to L2 and the loader again. It now checks memory once more for the keys it owns, as `GetOrLoad`
   always did, and loads only those still missing.
+- **`DeletionCause` values shifted with unrelated constants.** The causes shared an `iota` block with the
+  `ItemDead`/`ItemChanceMask`/`ItemInMainQueue` bits, so they were 2..6 in 0.9.8 and 3..7 once a bit was added, and a
+  cause stored or exported as a number meant something else after an upgrade. They have their own block now and stay
+  at 1..5 (`CauseInvalidation` to `CauseOverflow`); the zero value is no cause.
 
 ## [0.9.8] - 2026-08-13
 
