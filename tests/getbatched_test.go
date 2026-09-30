@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"errors"
+	"maps"
 	"runtime"
 	"strconv"
 	"sync"
@@ -628,4 +629,50 @@ func BenchmarkGetBatchedMemoryHit(b *testing.B) {
 	for b.Loop() {
 		_, _, _ = cache.GetBatched(ctx, "k")
 	}
+}
+
+// A panic while the worker files a request - here an OnDeletion handler that blows up on the lazy expiry the memory
+// check triggers - must cost that batch only: its caller gets ErrPanic and the worker keeps serving.
+func TestGetBatchedSurvivesPanicWhileCollecting(t *testing.T) {
+	t.Parallel() // waits out a one-second TTL
+	l2 := newCoalesceL2(nil)
+	var handled atomic.Int32
+	c, err := memstash.New[string, string](
+		memstash.WithL2Cache[string, string](l2),
+		memstash.WithWritePolicy(memstash.WriteDisabled),
+		memstash.WithTTL(time.Second),
+		memstash.WithGetBatchedWorkers(1),
+		memstash.WithOnDeletion(func(_, _ string, cause memstash.DeletionCause) {
+			if cause == memstash.CauseExpiration {
+				panic("handler exploded")
+			}
+		}),
+		memstash.WithPanicHandler(func(_ any, h bool) {
+			if h {
+				handled.Add(1)
+			}
+		}),
+	)
+	require.NoError(t, err)
+	defer c.Close()
+	defer l2.release()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	go func() { _, _, _ = c.GetBatched(ctx, "x") }()
+	l2.waitEntered(t) // the only worker is held inside L2
+	queued := make(chan error, 1)
+	go func() {
+		_, _, err := c.GetBatched(ctx, "k")
+		queued <- err
+	}()
+	time.Sleep(200 * time.Millisecond)       // nothing outside shows the read has queued: give it the head start
+	require.NoError(t, c.Set(ctx, "k", "v")) // expires while its read waits in the queue
+	require.Eventually(t, func() bool { return len(maps.Collect(c.Iterator())) == 0 }, 5*time.Second, 50*time.Millisecond)
+	l2.release()
+
+	assert.ErrorIs(t, <-queued, memstash.ErrPanic)
+	_, _, err = c.GetBatched(ctx, "z")
+	require.NoError(t, err, "the worker must have survived the panic")
+	assert.EqualValues(t, 1, handled.Load())
 }

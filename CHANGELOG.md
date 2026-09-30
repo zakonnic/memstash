@@ -142,6 +142,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   batch, and a task taken off the queue to end the batch's run, a `Delete` for instance, was never sent. Every L2 call
   of the write-back now recovers on its own: the batch's keys all get the `ErrPanic`, and the worker goes on with the
   task it already holds.
+- **A panic while a `GetBatched` worker filed a read took the worker down and left the reads it held waiting.** The
+  memory check a worker makes before queuing a key for L2 can reclaim an expired item, and an `OnDeletion` handler
+  that panicked there escaped the batch's recovery: the reads already collected and the one in hand were never
+  answered, and the pool lost a worker for good - with all of them gone, every `GetBatched` miss waited for its
+  context. The recovery now covers the whole batch: its callers get `ErrPanic` and the worker goes on.
 
 ## [0.9.8] - 2026-08-13
 

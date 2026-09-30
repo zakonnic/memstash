@@ -204,12 +204,17 @@ func (c *Cache[K, V]) getBatchLoop(queue chan asyncGet[K, V]) {
 // serveBatch resolves one read together with everything already queued behind it.
 func (c *Cache[K, V]) serveBatch(queue chan asyncGet[K, V], first asyncGet[K, V], b *getBatch[K, V]) {
 	b.reset()
+	pending := first.slot // the request being filed: neither in the batch nor settled yet
+	defer c.recoverBatch(b, &pending)
 	c.collect(b, first)
+	pending = nil
 drain:
 	for len(b.keys) < GetBatchMax {
 		select {
 		case req := <-queue:
+			pending = req.slot
 			c.collect(b, req)
+			pending = nil
 		default:
 			break drain
 		}
@@ -230,7 +235,6 @@ func (c *Cache[K, V]) collect(b *getBatch[K, V], req asyncGet[K, V]) {
 
 // resolveBatch asks L2 for the batch and hands every answer to the slots waiting for it.
 func (c *Cache[K, V]) resolveBatch(b *getBatch[K, V]) {
-	defer c.recoverBatch(b)
 	switch len(b.keys) {
 	case 0:
 		return // memory had grown everything this batch was going to ask for
@@ -259,14 +263,20 @@ func (c *Cache[K, V]) resolveBatch(b *getBatch[K, V]) {
 	c.stats.addL2Misses(c.settleRest(b, nil))
 }
 
-// recoverBatch is recoverWorker for a coalescing read batch: an adapter that panicked would otherwise leave its
-// callers waiting forever, so they are woken with the panic as their error. Must be deferred directly.
-func (c *Cache[K, V]) recoverBatch(b *getBatch[K, V]) {
+// recoverBatch is recoverWorker for a read batch. A panic, the adapter's or an OnDeletion handler's on a lazy expiry
+// or a promotion, would leave the batch's callers waiting forever and take the worker down. Instead the callers get
+// the panic as their error, and the worker goes on. Must be deferred directly.
+func (c *Cache[K, V]) recoverBatch(b *getBatch[K, V], pending **asyncSlot[V]) {
 	r := recover()
 	if r == nil {
 		return
 	}
-	c.settleRest(b, fmt.Errorf("%w: %v", ErrPanic, r))
+	err := fmt.Errorf("%w: %v", ErrPanic, r)
+	if *pending != nil {
+		var zero V
+		c.batchedGets.settle(*pending, zero, false, err)
+	}
+	c.settleRest(b, err)
 	c.notifyPanic(r, true)
 }
 
