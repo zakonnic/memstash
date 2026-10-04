@@ -185,13 +185,15 @@ func TestWithKeyFuncAndResolveOptions(t *testing.T) {
 // back into l2.BatchGetSequential/BatchSetSequential, so this is also representative of how an adapter without a
 // native multi-get/multi-set wires them up.
 type sequentialStub struct {
-	mu          sync.Mutex
-	m           map[string]string
-	getCalls    int
-	setCalls    int
-	deleteCalls int
-	failKey     string // if set, Get on this key returns errBoom
-	slowValue   string // if set, a Set of this value lands 20 ms late
+	mu            sync.Mutex
+	m             map[string]string
+	getCalls      int
+	setCalls      int
+	deleteCalls   int
+	failKey       string // if set, Get on this key returns errBoom
+	failSetKey    string // if set, Set on this key returns errBoom
+	failDeleteKey string // if set, Delete on this key returns errBoom
+	slowValue     string // if set, a Set of this value lands 20 ms late
 }
 
 var errBoom = errors.New("boom")
@@ -216,6 +218,9 @@ func (s *sequentialStub) Set(_ context.Context, key, value string, _ time.Durati
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.setCalls++
+	if s.failSetKey != "" && key == s.failSetKey {
+		return errBoom
+	}
 	s.m[key] = value
 	return nil
 }
@@ -232,6 +237,9 @@ func (s *sequentialStub) Delete(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deleteCalls++
+	if s.failDeleteKey != "" && key == s.failDeleteKey {
+		return errBoom
+	}
 	delete(s.m, key)
 	return nil
 }
@@ -280,6 +288,21 @@ func TestBatchConcurrentFallbacks(t *testing.T) {
 		require.NoError(t, l2.BatchSetConcurrent[string, string](ctx, store, dup, 0, 4))
 		assert.Equal(t, map[string]string{"k": "v2", "x": "1"}, store.m)
 		assert.Equal(t, 2, store.setCalls, "a repeated key is written once")
+	})
+
+	t.Run("a failed write or delete does not stop the others", func(t *testing.T) {
+		for _, workers := range []int{1, 4} {
+			store := newSequentialStub()
+			store.failSetKey = "k3"
+			err := l2.BatchSetConcurrent[string, string](ctx, store, items[:10], 0, workers)
+			require.ErrorIs(t, err, errBoom)
+			assert.Len(t, store.m, 9, "workers=%d: the other nine were not written", workers)
+
+			store.failDeleteKey = "k5"
+			err = l2.BatchDeleteConcurrent[string, string](ctx, store, keys[:10], workers)
+			require.ErrorIs(t, err, errBoom)
+			assert.Equal(t, map[string]string{"k5": "v5"}, store.m, "workers=%d: the other deletes did not run", workers)
+		}
 	})
 
 	t.Run("first error is returned with the hits gathered so far", func(t *testing.T) {

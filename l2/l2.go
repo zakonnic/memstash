@@ -7,6 +7,7 @@ package l2
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -151,25 +152,34 @@ func BatchGetSequential[K comparable, V any](ctx context.Context, store memstash
 	return found, nil
 }
 
-// BatchSetSequential implements L2Cache.BatchSet for backends without a native multi-set by looping over Set.
+// BatchSetSequential implements L2Cache.BatchSet for backends without a native multi-set by looping over Set. A
+// failed item does not stop the rest, which belong to unrelated keys; the failures come back joined.
 func BatchSetSequential[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], items memstash.List[K, V], ttl time.Duration) error {
-	for _, item := range items {
-		if err := store.Set(ctx, item.Key, item.Value, ttl); err != nil {
-			return err
-		}
-	}
-	return nil
+	return runSequential(ctx, len(items), func(i int) error {
+		return store.Set(ctx, items[i].Key, items[i].Value, ttl)
+	})
 }
 
 // BatchDeleteSequential implements L2Cache.BatchDelete for backends without a native multi-delete by looping over
-// Delete.
+// Delete. A failed key does not stop the rest; the failures come back joined.
 func BatchDeleteSequential[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], keys []K) error {
-	for _, key := range keys {
-		if err := store.Delete(ctx, key); err != nil {
-			return err
+	return runSequential(ctx, len(keys), func(i int) error {
+		return store.Delete(ctx, keys[i])
+	})
+}
+
+// runSequential runs op for the indexes 0..n-1 in order and joins what failed; a canceled ctx ends the run.
+func runSequential(ctx context.Context, n int, op func(i int) error) error {
+	var errs []error
+	for i := range n {
+		if err := op(i); err != nil {
+			errs = append(errs, err)
+			if ctx.Err() != nil {
+				break
+			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // --- concurrent batch fallbacks ---
@@ -185,7 +195,7 @@ func BatchGetConcurrent[K comparable, V any](ctx context.Context, store memstash
 		ok    bool
 	}
 	results := make([]slot, len(keys))
-	firstErr := runConcurrent(len(keys), workers, func(i int) error {
+	firstErr := runConcurrent(ctx, len(keys), workers, true, func(i int) error {
 		value, ok, err := store.Get(ctx, keys[i])
 		if err != nil {
 			return err
@@ -203,23 +213,25 @@ func BatchGetConcurrent[K comparable, V any](ctx context.Context, store memstash
 }
 
 // BatchSetConcurrent implements L2Cache.BatchSet by running Set on up to workers goroutines. A repeated key is
-// written once, with its last value (see LastValues).
+// written once, with its last value (see LastValues). A failed item does not stop the rest; the failures come back
+// joined.
 func BatchSetConcurrent[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], items memstash.List[K, V], ttl time.Duration, workers int) error {
 	items = LastValues(items)
 	if len(items) <= 1 || workers <= 1 {
 		return BatchSetSequential(ctx, store, items, ttl)
 	}
-	return runConcurrent(len(items), workers, func(i int) error {
+	return runConcurrent(ctx, len(items), workers, false, func(i int) error {
 		return store.Set(ctx, items[i].Key, items[i].Value, ttl)
 	})
 }
 
-// BatchDeleteConcurrent implements L2Cache.BatchDelete by running Delete on up to workers goroutines.
+// BatchDeleteConcurrent implements L2Cache.BatchDelete by running Delete on up to workers goroutines. A failed key
+// does not stop the rest; the failures come back joined.
 func BatchDeleteConcurrent[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], keys []K, workers int) error {
 	if len(keys) <= 1 || workers <= 1 {
 		return BatchDeleteSequential(ctx, store, keys)
 	}
-	return runConcurrent(len(keys), workers, func(i int) error {
+	return runConcurrent(ctx, len(keys), workers, false, func(i int) error {
 		return store.Delete(ctx, keys[i])
 	})
 }
@@ -253,46 +265,52 @@ func LastValues[K comparable, V any](items memstash.List[K, V]) memstash.List[K,
 	return deduped
 }
 
-// runConcurrent executes op for the indexes 0..n-1 on up to workers goroutines and returns the first error, after
-// which no new indexes are started. A panicking op stops the run the same way an error does.
-func runConcurrent(n, workers int, op func(i int) error) error {
-	if workers > n {
-		workers = n
-	}
+// runConcurrent executes op for the indexes 0..n-1 on up to workers goroutines. With firstErr it stops starting new
+// indexes after the first error and returns it; otherwise every index runs and the failures come back joined, a
+// canceled ctx alone ending the run early. A panicking op counts as a failed one.
+func runConcurrent(ctx context.Context, n, workers int, firstErr bool, op func(i int) error) error {
 	var (
-		next     atomic.Int64
-		stopped  atomic.Bool
-		errOnce  sync.Once
-		firstErr error
-		wg       sync.WaitGroup
+		next    atomic.Int64
+		stopped atomic.Bool
+		mu      sync.Mutex
+		errs    []error
+		wg      sync.WaitGroup
 	)
-	fail := func(err error) {
-		errOnce.Do(func() { firstErr = err })
-		stopped.Store(true)
-	}
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
+	wg.Add(min(workers, n))
+	for range min(workers, n) {
 		go func() {
 			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					fail(fmt.Errorf("%w: %v", memstash.ErrPanic, r))
-				}
-			}()
 			for {
 				i := int(next.Add(1)) - 1
 				if i >= n || stopped.Load() {
 					return
 				}
-				if err := op(i); err != nil {
-					fail(err)
-					return
+				if err := runGuarded(op, i); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+					if firstErr || ctx.Err() != nil {
+						stopped.Store(true)
+					}
 				}
 			}
 		}()
 	}
 	wg.Wait()
-	return firstErr
+	if firstErr && len(errs) > 0 {
+		return errs[0]
+	}
+	return errors.Join(errs...)
+}
+
+// runGuarded runs op(i), turning a panic into an ErrPanic error.
+func runGuarded(op func(i int) error, i int) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%w: %v", memstash.ErrPanic, r)
+		}
+	}()
+	return op(i)
 }
 
 // --- codecs ---

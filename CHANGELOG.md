@@ -179,6 +179,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   connection wraps: with a `Dial` that wraps the connection for tracing or metrics, `Get`, `Set`, `Delete` and the
   MGET/MSET batch paths all returned "connection does not support ConnWithContext". The fallback now runs on the
   answer redigo gives for exactly that case.
+- **One failed item cancelled the rest of an L2 batch write in the adapters built on the `l2` batch helpers.**
+  `l2.BatchSetConcurrent`/`BatchDeleteConcurrent` (gomemcache, mc, rainycape) and `BatchSetSequential`/
+  `BatchDeleteSequential` (sql, aerospike fallbacks) stopped at the first error. A write-back batch carries up to 128
+  unrelated keys, so one value too large for memcached, or one illegal key, cost every other write in it - and a
+  lost delete leaves a key in L2 that the cache already dropped. Every item is tried now and the failures come back
+  joined; only a canceled context ends the run early. `BatchGet*` still stop at the first error.
 
 ## [0.9.8] - 2026-08-13
 
