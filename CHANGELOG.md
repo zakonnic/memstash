@@ -200,6 +200,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   to. Each failed on its own and took down the batch around it - every other key of a write-back batch, a DynamoDB
   chunk of 25. The Badger and DynamoDB adapters now store such keys under `l2.HashedKey`, the stand-in the memcached
   adapters already use (`l2.MemcacheKey`), and a nil value goes out as an empty one.
+- **The DynamoDB adapter gave up on a throttled batch after one immediate retry.** Unprocessed items were re-sent
+  once, straight away, and the batch then failed: under throttling that lost the write - or the delete, leaving a
+  key in L2 the cache had dropped - and a `BatchGet` whose answer passes the service's 16 MB page limit failed every
+  time, since each page used up the retry. A round that makes progress now goes again at once, and one that does not
+  waits first, doubling from 25 ms with jitter and within the context, five times in a row at most.
 
 ## [0.9.8] - 2026-08-13
 

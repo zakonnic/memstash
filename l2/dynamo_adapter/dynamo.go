@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strconv"
 	"sync"
 	"time"
@@ -35,7 +36,11 @@ const (
 
 	batchGetLimit   = 100 // DynamoDB BatchGetItem hard limit
 	batchWriteLimit = 25  // DynamoDB BatchWriteItem hard limit
-	maxBatchRetries = 1   // bounded retries for UnprocessedKeys / UnprocessedItems
+
+	// A batch round that leaves no less unprocessed than it was sent is retried after a pause doubling from
+	// retryPause, maxStalls times in a row at most (0.8 s of waiting in all).
+	maxStalls  = 5
+	retryPause = 25 * time.Millisecond
 )
 
 // DynamoAPI is the subset of the DynamoDB SDK the adapter needs; *dynamodb.Client satisfies it.
@@ -205,15 +210,12 @@ func (c *Cache[K, V]) batchGetChunk(ctx context.Context, storageKeys []string, b
 	for _, storageKey := range storageKeys {
 		req = append(req, map[string]types.AttributeValue{keyAttr: &types.AttributeValueMemberS{Value: storageKey}})
 	}
-	pending := map[string]types.KeysAndAttributes{c.table: {Keys: req}}
-
-	for attempt := 0; len(pending) > 0; attempt++ {
-		if attempt > maxBatchRetries {
-			return found, errUnprocessed
-		}
+	pending := getRequests{c.table: {Keys: req}}
+	size := func(p getRequests) int { return len(p[c.table].Keys) }
+	err := drain(ctx, pending, size, func(pending getRequests) (getRequests, error) {
 		out, err := c.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: pending})
 		if err != nil {
-			return found, err
+			return nil, err
 		}
 		for _, item := range out.Responses[c.table] {
 			storageKey, ok := item[keyAttr].(*types.AttributeValueMemberS)
@@ -226,15 +228,15 @@ func (c *Cache[K, V]) batchGetChunk(ctx context.Context, storageKeys []string, b
 			}
 			value, present, err := c.decodeItem(item)
 			if err != nil {
-				return found, err
+				return nil, err
 			}
 			if present {
 				found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
 			}
 		}
-		pending = out.UnprocessedKeys
-	}
-	return found, nil
+		return out.UnprocessedKeys, nil
+	})
+	return found, err
 }
 
 // BatchSet stores the items with concurrent BatchWriteItem chunks of 25 (the API's hard limit), retrying
@@ -285,19 +287,63 @@ func (c *Cache[K, V]) batchSetChunk(ctx context.Context, items memstash.List[K, 
 		}
 		writes = append(writes, types.WriteRequest{PutRequest: &types.PutRequest{Item: encoded}})
 	}
-	pending := map[string][]types.WriteRequest{c.table: writes}
+	return c.writeBatch(ctx, writes)
+}
 
-	for attempt := 0; len(pending) > 0; attempt++ {
-		if attempt > maxBatchRetries {
-			return errUnprocessed
-		}
-		out, err := c.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: pending})
-		if err != nil {
+// writeBatch sends one BatchWriteItem request and re-sends what it leaves unprocessed.
+func (c *Cache[K, V]) writeBatch(ctx context.Context, writes []types.WriteRequest) error {
+	size := func(p writeRequests) int { return len(p[c.table]) }
+	return drain(ctx, writeRequests{c.table: writes}, size,
+		func(pending writeRequests) (writeRequests, error) {
+			out, err := c.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: pending})
+			if err != nil {
+				return nil, err
+			}
+			return out.UnprocessedItems, nil
+		})
+}
+
+// getRequests and writeRequests are what BatchGetItem and BatchWriteItem take and hand back unprocessed, by table.
+type (
+	getRequests   = map[string]types.KeysAndAttributes
+	writeRequests = map[string][]types.WriteRequest
+)
+
+// drain runs round until it leaves nothing unprocessed. A round that shrinks the leftover goes again at once -
+// BatchGetItem pages an answer past 16 MB that way; one that does not waits first, and after maxStalls of those in a
+// row the batch fails with errUnprocessed.
+func drain[P any](ctx context.Context, pending P, size func(P) int, round func(P) (P, error)) error {
+	for sent, stalls := size(pending), 0; sent > 0; {
+		var err error
+		if pending, err = round(pending); err != nil {
 			return err
 		}
-		pending = out.UnprocessedItems
+		left := size(pending)
+		if left >= sent {
+			if stalls++; stalls > maxStalls {
+				return errUnprocessed
+			}
+			if err := pause(ctx, retryPause<<(stalls-1)); err != nil {
+				return err
+			}
+		} else {
+			stalls = 0
+		}
+		sent = left
 	}
 	return nil
+}
+
+// pause waits between half and all of d, jittered so throttled callers do not come back in step, or until ctx ends.
+func pause(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d/2 + rand.N(d/2+1))
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // BatchDelete removes the keys with concurrent BatchWriteItem chunks of 25 (the API's hard limit), retrying
@@ -344,19 +390,7 @@ func (c *Cache[K, V]) batchDeleteChunk(ctx context.Context, storageKeys []string
 			Key: map[string]types.AttributeValue{keyAttr: &types.AttributeValueMemberS{Value: storageKey}},
 		}})
 	}
-	pending := map[string][]types.WriteRequest{c.table: writes}
-
-	for attempt := 0; len(pending) > 0; attempt++ {
-		if attempt > maxBatchRetries {
-			return errUnprocessed
-		}
-		out, err := c.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: pending})
-		if err != nil {
-			return err
-		}
-		pending = out.UnprocessedItems
-	}
-	return nil
+	return c.writeBatch(ctx, writes)
 }
 
 func (c *Cache[K, V]) encodeItem(storageKey string, value V, ttl time.Duration) (map[string]types.AttributeValue, error) {
