@@ -417,7 +417,7 @@ write-back worker coalesces the Sets into the adapter's native `BatchSet` call (
 | `l2/redigo_adapter` | Redis — [gomodule/redigo](https://github.com/gomodule/redigo) | partial |
 | `l2/gomemcache_adapter` | memcached — [bradfitz/gomemcache](https://github.com/bradfitz/gomemcache) | ❌ |
 | `l2/rainycape_adapter` | memcached — [rainycape/memcache](https://github.com/rainycape/memcache) | ❌ |
-| `l2/mc_adapter` | memcached — [memcachier/mc](https://github.com/memcachier/mc) | ❌ |
+| `l2/mc_adapter` | memcached, one server — [memcachier/mc](https://github.com/memcachier/mc) | ❌ |
 | `l2/sql_adapter` | any [database/sql](https://pkg.go.dev/database/sql) engine (SQLite, MySQL, ...) | ✅ |
 | `l2/pgx_adapter` | PostgreSQL — [jackc/pgx](https://github.com/jackc/pgx) (native, pipelined) | ✅ |
 | `l2/badger_adapter` | embedded — [dgraph-io/badger](https://github.com/dgraph-io/badger) | ❌ |

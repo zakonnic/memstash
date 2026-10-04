@@ -3,6 +3,10 @@
 //
 // The client does not support context: the ctx arguments are ignored, calls can be neither canceled nor given a
 // per-call deadline. Bound the latency with mc.Config timeouts instead.
+//
+// Give it a client of one server. The client's server hasher (mc v3.0.3) shares one FNV state between concurrent
+// calls, so with several servers a call can pick the wrong one: a false miss on a read, a stale value left behind by
+// a write or a delete. For a pool of memcached servers use gomemcache_adapter.
 package mc_adapter
 
 import (
@@ -15,8 +19,8 @@ import (
 	"github.com/zakonnic/memstash/l2"
 )
 
-// Cache is an L2 adapter over the memcachier client. The client is safe for concurrent use; its lifecycle stays with
-// the caller.
+// Cache is an L2 adapter over the memcachier client of a single server (see the package doc); its lifecycle stays
+// with the caller.
 type Cache[K comparable, V any] struct {
 	client  *mclib.Client
 	codec   memstash.Codec[V]
