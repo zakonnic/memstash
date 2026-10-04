@@ -353,6 +353,19 @@ func MemcacheExpiration(ttl time.Duration) int32 {
 	return int32(deadline)
 }
 
+// ExpiresAt is the unix second an item written now with ttl expires at, for stores that keep a deadline in whole
+// seconds; 0 for ttl <= 0, "no expiration". Rounded up: an item never expires before its ttl is out.
+func ExpiresAt(ttl time.Duration) int64 {
+	if ttl <= 0 {
+		return 0
+	}
+	deadline := time.Now().Add(ttl)
+	if deadline.Nanosecond() > 0 {
+		return deadline.Unix() + 1
+	}
+	return deadline.Unix()
+}
+
 // RedisMillis converts a TTL to whole milliseconds for the PX argument of SET, rounding sub-millisecond TTLs up to 1
 // so a tiny but non-zero TTL is never mistaken for "no expiration".
 func RedisMillis(ttl time.Duration) int64 {

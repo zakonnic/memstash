@@ -258,9 +258,4 @@ func (c *Cache[K, V]) DeleteExpired(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-func expiresAt(ttl time.Duration) int64 {
-	if ttl <= 0 {
-		return 0
-	}
-	return time.Now().Add(ttl).Unix()
-}
+func expiresAt(ttl time.Duration) int64 { return l2.ExpiresAt(ttl) }

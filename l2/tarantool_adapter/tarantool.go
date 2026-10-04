@@ -135,12 +135,7 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V, ttl time.Duration
 }
 
 // expiresAt converts a TTL to the stored unix-second deadline.
-func expiresAt(ttl time.Duration) uint64 {
-	if ttl <= 0 {
-		return 0
-	}
-	return uint64(time.Now().Add(ttl).Unix())
-}
+func expiresAt(ttl time.Duration) uint64 { return uint64(l2.ExpiresAt(ttl)) }
 
 // Delete removes the key; a missing key is not an error.
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {

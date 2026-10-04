@@ -361,7 +361,7 @@ func (c *Cache[K, V]) encodeItem(storageKey string, value V, ttl time.Duration) 
 		valueAttr: &types.AttributeValueMemberB{Value: data},
 	}
 	if ttl > 0 {
-		item[ttlAttr] = &types.AttributeValueMemberN{Value: strconv.FormatInt(time.Now().Add(ttl).Unix(), 10)}
+		item[ttlAttr] = &types.AttributeValueMemberN{Value: strconv.FormatInt(l2.ExpiresAt(ttl), 10)}
 	}
 	return item, nil
 }

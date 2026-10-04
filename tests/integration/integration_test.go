@@ -81,6 +81,7 @@ var suiteScenarios = []struct {
 	{name: "EvictedItemsServedFromL2", run: suiteEvictedItemsServedFromL2},
 	{name: "GetOrLoadPrefersL2", run: suiteGetOrLoadPrefersL2},
 	{name: "TTLReachesL2", run: suiteTTLReachesL2},
+	{name: "ShortTTLVisibleAtOnce", run: suiteShortTTLVisibleAtOnce},
 	{name: "ConcurrentMixed", run: suiteConcurrentMixed},
 }
 
@@ -357,6 +358,22 @@ func suiteTTLReachesL2(t *testing.T, newCache cacheFactory) {
 	_, ok, err = reader.Get(ctx, "k")
 	require.NoError(t, err)
 	assert.False(t, ok, "value survived its TTL in L2")
+}
+
+// suiteShortTTLVisibleAtOnce: a TTL under a second is still a TTL - a store that keeps its deadline in whole seconds
+// must round it up, or the item is gone before anyone reads it.
+func suiteShortTTLVisibleAtOnce(t *testing.T, newCache cacheFactory) {
+	ctx := context.Background()
+	prefix := uniquePrefix(t)
+	writer := newCache(t, prefix, memstash.WithWritePolicy(memstash.WriteThrough), memstash.WithTTL(300*time.Millisecond))
+	reader := newCache(t, prefix)
+	for i := range 10 {
+		key := fmt.Sprintf("k%d", i)
+		require.NoError(t, writer.Set(ctx, key, "v"))
+		_, ok, err := reader.Get(ctx, key)
+		require.NoError(t, err)
+		require.True(t, ok, "%s was gone from L2 right after it was written", key)
+	}
 }
 
 func suiteConcurrentMixed(t *testing.T, newCache cacheFactory) {

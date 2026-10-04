@@ -83,6 +83,17 @@ func TestMemcacheExpiration(t *testing.T) {
 	}
 }
 
+func TestExpiresAt(t *testing.T) {
+	assert.Zero(t, l2.ExpiresAt(0))
+	assert.Zero(t, l2.ExpiresAt(-time.Second))
+	for _, ttl := range []time.Duration{time.Nanosecond, 300 * time.Millisecond, time.Second, 90 * time.Second} {
+		before := time.Now()
+		got := l2.ExpiresAt(ttl)
+		assert.GreaterOrEqual(t, got, before.Add(ttl).Unix(), "ttl %v", ttl)
+		assert.Greater(t, time.Unix(got, 0).Add(time.Nanosecond), before.Add(ttl), "ttl %v expires early", ttl)
+	}
+}
+
 func TestRedisMillis(t *testing.T) {
 	cases := []struct {
 		name string

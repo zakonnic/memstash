@@ -195,11 +195,10 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	return wb.Flush()
 }
 
-// newEntry builds a Badger entry, attaching a TTL only when one is requested.
+// newEntry builds a Badger entry, attaching a TTL only when one is requested. Not WithTTL: that rounds the deadline
+// down to the second, and Badger expires the entry once the clock's second reaches it.
 func newEntry(key string, data []byte, ttl time.Duration) *badger.Entry {
 	e := badger.NewEntry([]byte(key), data)
-	if ttl > 0 {
-		e = e.WithTTL(ttl)
-	}
+	e.ExpiresAt = uint64(l2.ExpiresAt(ttl))
 	return e
 }

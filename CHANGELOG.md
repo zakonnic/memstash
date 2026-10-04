@@ -170,6 +170,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   canceled or timed out, every call waiting on the key received `context.Canceled` or `DeadlineExceeded`, though its
   own context was live. A waiter now loads the key itself when the error is a context error and its own context is
   fine.
+- **L2 items with a TTL expired up to a second early in the SQL, pgx, Badger, DynamoDB and Tarantool adapters.**
+  They stored the deadline as `time.Now().Add(ttl).Unix()`, rounded down, and read it back as expired once the
+  clock's second reached it: every item lived somewhere in (ttl-1s, ttl], and one with a TTL under a second was
+  usually gone before anyone read it. The new `l2.ExpiresAt` rounds the deadline up, and all five use it.
 
 ## [0.9.8] - 2026-08-13
 
