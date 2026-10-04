@@ -432,9 +432,9 @@ any `{QueryContext, ExecContext}` (so pgx via database/sql works too), `badger_a
 [badgerhold](https://github.com/timshannon/badgerhold) via `store.Badger()`, and `dynamo_adapter`
 covers [guregu/dynamo](https://github.com/guregu/dynamo) via its underlying `*dynamodb.Client`.
 
-SQL, Tarantool and other stores without server-side expiration filter expired entries on read and
-expose a reaper (`DeleteExpired`) to purge them; the note in each package doc explains the
-specifics.
+Stores without server-side expiration filter expired entries on read. The SQL adapters (`sql_adapter`,
+`pgx_adapter`) expose a reaper (`DeleteExpired`) to purge them; Tarantool leaves that to its
+`expirationd` module. The note in each package doc explains the specifics.
 
 Rolling your own is straightforward: implement the `memstash.L2Cache[K, V]` interface
 (`Get`/`BatchGet`/`Set`/`BatchSet`/`Delete`/`BatchDelete`) and pass it to `WithL2Cache`.
