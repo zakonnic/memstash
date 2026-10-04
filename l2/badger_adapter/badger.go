@@ -11,6 +11,7 @@ package badger_adapter
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -40,6 +41,8 @@ func New[K comparable, V any](db *badger.DB, codec memstash.Codec[V], opts ...me
 	if err != nil {
 		return nil, err
 	}
+	storageKey := keyFunc
+	keyFunc = func(key K) string { return badgerKey(storageKey(key)) }
 	return &Cache[K, V]{db: db, codec: codec, keyFunc: keyFunc}, nil
 }
 
@@ -193,6 +196,15 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 		}
 	}
 	return wb.Flush()
+}
+
+// badgerKey is key if Badger accepts it, and its l2.HashedKey otherwise: Badger rejects the empty key, keys with its
+// internal "!badger!" prefix and keys over 65000 bytes, and one such key in a write batch fails the whole batch.
+func badgerKey(key string) string {
+	if key == "" || strings.HasPrefix(key, "!badger!") || len(key) > 65000 {
+		return l2.HashedKey(key)
+	}
+	return key
 }
 
 // newEntry builds a Badger entry, attaching a TTL only when one is requested. Not WithTTL: that rounds the deadline

@@ -33,4 +33,15 @@ func TestTarantoolAdapter(t *testing.T) {
 		t.Cleanup(c.Close)
 		return c
 	})
+
+	t.Run("NilValue", func(t *testing.T) {
+		store, err := tarantool_adapter.New[string, []byte](conn, l2.BytesCodec(), "")
+		require.NoError(t, err)
+		key := uniquePrefix(t)
+		require.NoError(t, store.Set(ctx, key, nil, 0))
+		_, ok, err := store.Get(ctx, key)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.NoError(t, store.BatchSet(ctx, memstash.List[string, []byte]{{Key: key}, {Key: key + "2"}}, 0))
+	})
 }

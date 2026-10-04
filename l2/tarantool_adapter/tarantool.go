@@ -129,9 +129,17 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V, ttl time.Duration
 	if err != nil {
 		return err
 	}
-	req := tarantool.NewReplaceRequest(c.space).Context(ctx).Tuple([]any{c.keyFunc(key), data, expiresAt(ttl)})
+	req := tarantool.NewReplaceRequest(c.space).Context(ctx).Tuple([]any{c.keyFunc(key), binary(data), expiresAt(ttl)})
 	_, err = c.doer.Do(req).Get()
 	return err
+}
+
+// binary keeps a nil value a binary one: msgpack encodes a nil []byte as nil, which the varbinary field rejects.
+func binary(data []byte) []byte {
+	if data == nil {
+		return []byte{}
+	}
+	return data
 }
 
 // expiresAt converts a TTL to the stored unix-second deadline.
@@ -204,7 +212,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		if err != nil {
 			return err
 		}
-		req := tarantool.NewReplaceRequest(c.space).Context(ctx).Tuple([]any{c.keyFunc(item.Key), data, deadline})
+		req := tarantool.NewReplaceRequest(c.space).Context(ctx).Tuple([]any{c.keyFunc(item.Key), binary(data), deadline})
 		futures = append(futures, c.doer.Do(req))
 	}
 	for _, future := range futures {

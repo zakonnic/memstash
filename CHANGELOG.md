@@ -194,6 +194,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   been a miss - and one such key failed a whole `GetMulti`, so every caller sharing a `GetBatched` batch with it got
   the error; mc and rainycape failed on the long ones. The new `l2.MemcacheKey` stores such a key under a stand-in
   derived from its SHA-256, and all three adapters use it, so they agree on it and any key reads back.
+- **Keys and values some backends reject failed whole batches.** Badger refuses the empty key, keys with its internal
+  `!badger!` prefix and keys over 65000 bytes; DynamoDB refuses an empty partition key and one over 2048 bytes, and a
+  nil value, which its SDK sends as `{"B":null}`; Tarantool's varbinary field refuses the nil a `[]byte(nil)` encodes
+  to. Each failed on its own and took down the batch around it - every other key of a write-back batch, a DynamoDB
+  chunk of 25. The Badger and DynamoDB adapters now store such keys under `l2.HashedKey`, the stand-in the memcached
+  adapters already use (`l2.MemcacheKey`), and a nil value goes out as an empty one.
 
 ## [0.9.8] - 2026-08-13
 

@@ -70,6 +70,14 @@ func New[K comparable, V any](client DynamoAPI, codec memstash.Codec[V], table s
 	if err != nil {
 		return nil, err
 	}
+	storageKey := keyFunc
+	keyFunc = func(key K) string {
+		k := storageKey(key)
+		if k == "" || len(k) > 2048 { // DynamoDB rejects these, and one of them fails a whole batch
+			return l2.HashedKey(k)
+		}
+		return k
+	}
 	return &Cache[K, V]{client: client, table: table, codec: codec, keyFunc: keyFunc}, nil
 }
 
@@ -355,6 +363,9 @@ func (c *Cache[K, V]) encodeItem(storageKey string, value V, ttl time.Duration) 
 	data, err := c.codec.Marshal(value)
 	if err != nil {
 		return nil, err
+	}
+	if data == nil {
+		data = []byte{} // the SDK sends nil as {"B":null}, which the service rejects
 	}
 	item := map[string]types.AttributeValue{
 		keyAttr:   &types.AttributeValueMemberS{Value: storageKey},
