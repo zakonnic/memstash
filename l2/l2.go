@@ -6,10 +6,13 @@ package l2
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -370,6 +373,23 @@ func MemcacheExpiration(ttl time.Duration) int32 {
 	}
 	return int32(deadline)
 }
+
+// MemcacheKey is key if memcached accepts it - at most 250 bytes, no space, control character or DEL - and otherwise
+// a stand-in that it does, derived from key's SHA-256. The memcached adapters store every key through it, so they
+// agree on the stand-in and any key reads back.
+func MemcacheKey(key string) string {
+	if len(key) <= memcachedKeyMax && !strings.ContainsFunc(key, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	return memcachedHashedPrefix + hex.EncodeToString(sum[:])
+}
+
+// memcachedKeyMax is the longest key memcached accepts; a stand-in is prefixed so it never reads as a raw key.
+const (
+	memcachedKeyMax       = 250
+	memcachedHashedPrefix = "memstash:sha256:"
+)
 
 // ExpiresAt is the unix second an item written now with ttl expires at, for stores that keep a deadline in whole
 // seconds; 0 for ttl <= 0, "no expiration". Rounded up: an item never expires before its ttl is out.

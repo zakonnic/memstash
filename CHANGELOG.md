@@ -189,6 +189,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   of its per-server reads - an unreachable server, a batch that runs past the connection's deadline, an illegal
   key - and just answers with fewer items, so a failing memcached read as an empty one: no error, no `OnL2Error`,
   and the loaders ran for everything. `BatchGet` now runs concurrent `Get`s, which report their errors.
+- **The memcached adapters failed on keys memcached rejects.** A key with a space or a control character, or longer
+  than 250 bytes, made every gomemcache call on it fail with `ErrMalformedKey` - a `Get` included, which should have
+  been a miss - and one such key failed a whole `GetMulti`, so every caller sharing a `GetBatched` batch with it got
+  the error; mc and rainycape failed on the long ones. The new `l2.MemcacheKey` stores such a key under a stand-in
+  derived from its SHA-256, and all three adapters use it, so they agree on it and any key reads back.
 
 ## [0.9.8] - 2026-08-13
 

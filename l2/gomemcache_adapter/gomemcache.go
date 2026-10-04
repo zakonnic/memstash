@@ -25,8 +25,8 @@ type Cache[K comparable, V any] struct {
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
 
-// New creates the adapter with an explicit value codec. By default keys must be strings (identity mapping, 250 bytes
-// maximum); for other key types pass l2.WithKeyFunc.
+// New creates the adapter with an explicit value codec. By default keys must be strings (identity mapping); for other
+// key types pass l2.WithKeyFunc. A key memcached rejects is stored under a stand-in (see l2.MemcacheKey).
 func New[K comparable, V any](client *memcache.Client, codec memstash.Codec[V], opts ...memstash.Option) (*Cache[K, V], error) {
 	if client == nil {
 		return nil, l2.ErrNilClient
@@ -38,6 +38,8 @@ func New[K comparable, V any](client *memcache.Client, codec memstash.Codec[V], 
 	if err != nil {
 		return nil, err
 	}
+	storageKey := keyFunc
+	keyFunc = func(key K) string { return l2.MemcacheKey(storageKey(key)) }
 	return &Cache[K, V]{client: client, codec: codec, keyFunc: keyFunc}, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -80,6 +81,25 @@ func TestMemcacheExpiration(t *testing.T) {
 			}
 			assert.Equal(t, tc.want, got)
 		})
+	}
+}
+
+func TestMemcacheKey(t *testing.T) {
+	for _, key := range []string{"k", "user:42", strings.Repeat("x", 250), "ключ"} {
+		assert.Equal(t, key, l2.MemcacheKey(key), "a key memcached accepts must pass unchanged")
+	}
+	awkward := []string{
+		"with space", "tab" + string(rune(9)), "new" + string(rune(10)) + "line", "del" + string(rune(0x7f)),
+		strings.Repeat("x", 251),
+	}
+	seen := map[string]bool{}
+	for _, key := range awkward {
+		got := l2.MemcacheKey(key)
+		assert.LessOrEqual(t, len(got), 250)
+		assert.False(t, strings.ContainsFunc(got, func(r rune) bool { return r <= ' ' || r == 0x7f }), "stand-in %q", got)
+		assert.Equal(t, got, l2.MemcacheKey(key), "the stand-in must be stable")
+		assert.False(t, seen[got], "two keys share a stand-in")
+		seen[got] = true
 	}
 }
 
