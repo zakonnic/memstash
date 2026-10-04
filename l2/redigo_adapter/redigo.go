@@ -104,19 +104,24 @@ func NewStringCache[K comparable](pool *redigolib.Pool, opts ...memstash.Option)
 	return NewCache[K, string](pool, l2.StringCodec(), opts...)
 }
 
+// errNoContext is what a pooled connection answers DoContext with when the connection it wraps has no DoContext of its
+// own - a wrapper for tracing or metrics, say. redigo keeps it unexported; a bare Conn gives the same value.
+var _, errNoContext = redigolib.DoContext(struct{ redigolib.Conn }{}, context.Background(), "")
+
 // do borrows a connection, runs one command and returns the connection to the pool. The context cancels the wait for
-// a free connection always; it cancels the command itself only when the pool dials connections with context support
-// (Pool.DialContext) - otherwise the command falls back to the plain Do.
+// a free connection always, and the command itself when the pool's connections support it; otherwise the command
+// runs with the plain Do.
 func (c *Cache[K, V]) do(ctx context.Context, cmd string, args ...any) (any, error) {
 	conn, err := c.pool.GetContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	if connWithCtx, ok := conn.(redigolib.ConnWithContext); ok {
-		return connWithCtx.DoContext(ctx, cmd, args...)
+	reply, err := redigolib.DoContext(conn, ctx, cmd, args...)
+	if err == errNoContext { //nolint:errorlint // redigo returns the sentinel itself, before touching the connection
+		return conn.Do(cmd, args...)
 	}
-	return conn.Do(cmd, args...)
+	return reply, err
 }
 
 // Get returns the value; a missing key is (zero, false, nil).

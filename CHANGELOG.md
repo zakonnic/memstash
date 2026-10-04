@@ -174,6 +174,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   They stored the deadline as `time.Now().Add(ttl).Unix()`, rounded down, and read it back as expired once the
   clock's second reached it: every item lived somewhere in (ttl-1s, ttl], and one with a TTL under a second was
   usually gone before anyone read it. The new `l2.ExpiresAt` rounds the deadline up, and all five use it.
+- **The redigo adapter failed every single command on a pool whose connections have no `DoContext`.** Its fallback
+  to the plain `Do` tested the pooled connection, which always has `DoContext`, and never the connection that
+  connection wraps: with a `Dial` that wraps the connection for tracing or metrics, `Get`, `Set`, `Delete` and the
+  MGET/MSET batch paths all returned "connection does not support ConnWithContext". The fallback now runs on the
+  answer redigo gives for exactly that case.
 
 ## [0.9.8] - 2026-08-13
 

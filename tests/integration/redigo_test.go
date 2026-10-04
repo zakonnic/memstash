@@ -33,3 +33,26 @@ func TestRedigoAdapter(t *testing.T) {
 		return c
 	})
 }
+
+// wrappedConn is a connection a pool's Dial wraps, as tracing and metrics wrappers do: it has Do, not DoContext.
+type wrappedConn struct{ redigolib.Conn }
+
+func TestRedigoAdapterWrappedConnections(t *testing.T) {
+	requireServer(t, redisAddr())
+	pool := &redigolib.Pool{
+		Dial: func() (redigolib.Conn, error) {
+			conn, err := redigolib.Dial("tcp", redisAddr())
+			return wrappedConn{conn}, err
+		},
+		MaxIdle: 8,
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+
+	runSuite(t, func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string] {
+		opts = append(opts, l2.WithKeyFunc(l2.PrefixedString(prefix)))
+		c, err := redigo_adapter.NewCache[string, string](pool, l2.StringCodec(), opts...)
+		require.NoError(t, err, "NewCache")
+		t.Cleanup(c.Close)
+		return c
+	})
+}
