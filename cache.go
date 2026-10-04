@@ -137,7 +137,7 @@ type Cache[K comparable, V any] struct {
 	batchedGets getWorkerPool[K, V]
 
 	flights []flightBucket[K, V]
-	stats   Stats
+	stats   counters
 
 	stop      chan struct{}
 	wg        sync.WaitGroup
@@ -248,7 +248,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		onL2Error:         cfg.OnL2Error,
 		onPanic:           cfg.OnPanic,
 		onDeletion:        cfg.OnDeletion,
-		stats:             newStats(cfg.StatsEnabled),
+		stats:             newCounters(cfg.StatsEnabled),
 		stop:              make(chan struct{}),
 		batchedGets:       getWorkerPool[K, V]{size: cfg.getBatchedBuffer(), workers: cfg.getBatchedWorkers()},
 	}

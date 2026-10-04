@@ -170,3 +170,18 @@ func TestStatsCountsL2HitAsHit(t *testing.T) {
 	assert.InDelta(t, 2.0/3.0, s.L2HitRate(), 1e-9)
 	assert.Equal(t, s.Hits()+s.Misses(), s.Gets())
 }
+
+// Stats is a snapshot: a value taken earlier keeps its numbers while the cache goes on, so two subtract to what
+// happened in between.
+func TestStatsIsASnapshot(t *testing.T) {
+	c, err := memstash.New[string, string](memstash.WithStats())
+	require.NoError(t, err)
+	defer c.Close()
+	c.GetFromMemory("k")
+	before := c.Stats()
+	for range 10 {
+		c.GetFromMemory("k")
+	}
+	assert.EqualValues(t, 1, before.Gets(), "the earlier snapshot moved")
+	assert.EqualValues(t, 10, c.Stats().Gets()-before.Gets())
+}

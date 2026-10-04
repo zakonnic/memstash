@@ -205,6 +205,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   key in L2 the cache had dropped - and a `BatchGet` whose answer passes the service's 16 MB page limit failed every
   time, since each page used up the retry. A round that makes progress now goes again at once, and one that does not
   waits first, doubling from 25 ms with jitter and within the context, five times in a row at most.
+- **`Stats()` returned a live view, not the snapshot it was documented as.** Copying the struct copied the counters'
+  shared stripes, so a value taken earlier kept counting and two of them could not be subtracted, and its methods on
+  a pointer receiver made `c.Stats().Hits()` fail to compile. `Stats` is now a plain snapshot with value-receiver
+  methods, read once from the counters, whose own shape - and the read and write paths - is unchanged.
 
 ## [0.9.8] - 2026-08-13
 
