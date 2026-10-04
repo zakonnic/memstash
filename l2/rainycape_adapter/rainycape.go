@@ -118,36 +118,11 @@ func (c *Cache[K, V]) Delete(_ context.Context, key K) error {
 	return nil
 }
 
-// BatchGet fetches all keys in one native GetMulti round trip. Raise the connection limit via
-// Client.SetMaxIdleConnsPerAddr when large batches run concurrently. The context is ignored: the client has no
-// context support.
+// BatchGet fetches the keys with concurrent Gets. Not the client's GetMulti: it drops every error - an unreachable
+// server, a read past the connection's deadline, an illegal key - and answers with fewer items, so a failure would
+// read as misses. The context is ignored: the client has no context support.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
-	length := len(keys)
-	found := make(memstash.List[K, V], 0, length)
-	if length == 0 {
-		return found, nil
-	}
-	storageKeys := make([]string, length)
-	byStorageKey := make(map[string]K, length)
-	for i, key := range keys {
-		storageKeys[i] = c.keyFunc(key)
-		byStorageKey[storageKeys[i]] = key
-	}
-	items, err := c.client.GetMulti(storageKeys)
-	if err != nil {
-		return found, err
-	}
-	for storageKey, item := range items {
-		value, err := c.codec.Unmarshal(item.Value)
-		if err != nil {
-			return found, err
-		}
-		found = append(found, memstash.KeyVal[K, V]{
-			Key:   byStorageKey[storageKey],
-			Value: value,
-		})
-	}
-	return found, nil
+	return l2.BatchGetConcurrent(ctx, c, keys, BatchWorkers)
 }
 
 // BatchWorkers is the number of goroutines the concurrent batch fallback runs. Raise the connection limit via

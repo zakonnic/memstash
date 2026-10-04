@@ -185,6 +185,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   unrelated keys, so one value too large for memcached, or one illegal key, cost every other write in it - and a
   lost delete leaves a key in L2 that the cache already dropped. Every item is tried now and the failures come back
   joined; only a canceled context ends the run early. `BatchGet*` still stop at the first error.
+- **The rainycape adapter's `BatchGet` turned every failure into misses.** The client's `GetMulti` drops the errors
+  of its per-server reads - an unreachable server, a batch that runs past the connection's deadline, an illegal
+  key - and just answers with fewer items, so a failing memcached read as an empty one: no error, no `OnL2Error`,
+  and the loaders ran for everything. `BatchGet` now runs concurrent `Get`s, which report their errors.
 
 ## [0.9.8] - 2026-08-13
 
