@@ -643,6 +643,10 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) boo
 		item := storage.At(pos)
 		metaWord := item.Metadata()
 		if empty(metaWord) { // deletions compact their runs, so the key cannot live past an empty slot
+			if sh.live+1 >= storage.Len() { // the last free slot stays free: a probe needs one to end at
+				weightDelta = 0
+				break
+			}
 			idx := storage.Wrap(pos)
 			item.Publish(itemstore.Entry[K, V]{Key: key, Value: value}, tagged, expireOff, storage.Dist(home, idx))
 			storage.NoteDisplaced(keyHash, pos)

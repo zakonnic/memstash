@@ -105,7 +105,8 @@ type EvictionPolicy[K comparable, V any] interface {
 	// Reweigh tells the policy an overwrite changed the weight of the item at idx by delta.
 	Reweigh(idx uint32, delta int64)
 	// Evict picks the next victim and returns its index: the policy's choice, or an expired item (ItemExpired). The
-	// cache removes and kills it - the policy must not call Item.Kill. (0, false) means there is nothing to evict.
+	// cache removes and kills it - the policy must not call Item.Kill. (0, false) means there is nothing to evict: the
+	// shard stays over capacity, and once its table cannot grow, a new key is not stored while one free slot is left.
 	Evict(nowOff uint32) (uint32, bool)
 	// Bytes returns the footprint of the policy's own bookkeeping.
 	Bytes() int64

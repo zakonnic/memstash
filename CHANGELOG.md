@@ -231,6 +231,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   live value for, and a loaded value that loses that way does not go to L2 either. The call that read it still
   returns the value it read, as of that read. A value that loses is not counted in `Sets()`, replaces nothing (no
   `CauseReplacement`) and leaves the TTL of the one in memory alone. `GetAndRefresh` still replaces: that is its job.
+- **A table that could not grow was filled to the last slot and then written past its end.** `EvictionPolicy.Evict`
+  may answer "nothing to evict", and a custom policy that did so kept the shard over capacity; a preallocated table
+  (or one at the size cap) then filled up, and the next new key walked past the last slot and was published outside
+  the table - memory corruption, or an index panic. A new key is now not stored while only one free slot is left,
+  so every probe still has an empty slot to end at; an overwrite or a delete works as before.
 
 ## [0.9.8] - 2026-08-13
 
