@@ -570,7 +570,7 @@ func (c *Cache[K, V]) touchHit(item *itemstore.Item[K, V], metaWord uint64, nowO
 }
 
 // Set stores the value in memory and in L2 according to WritePolicy. An error can come only from a synchronous L2
-// write.
+// write. A key unequal to itself (a NaN, or a struct holding one) never enters memory: no read could find it.
 func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 	c.setMemory(key, value, c.expireOffset(), false)
 	c.stats.addSets(1)
@@ -626,6 +626,9 @@ func (c *Cache[K, V]) expireOffsetFor(ttl time.Duration, maxUnits uint32) (uint3
 // fill is for a value read from L2 or a loader rather than written: it keeps a live value it finds, which was written
 // after the miss the fill answers. false means the fill lost to such a value.
 func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) bool {
+	if key != key { // a NaN: no read could find it, and its hash changes from call to call. Folded away for most K.
+		return true
+	}
 	weight := c.rawCost(key, value)
 	sh, keyHash := c.shardAndHash(key)
 	var deletions []deletion[K, V] // stays nil unless a handler is configured

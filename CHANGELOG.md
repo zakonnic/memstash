@@ -244,6 +244,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **`RefreshTTLOnGet` skipped hits served by the slow read paths.** A read that overlaps a deletion's compaction
   re-probes, and after a second overlap reads under the shard mutex; both fallbacks granted the reference but left the
   expiry alone, so under steady deletes a hot key could expire while being read. Every hit path now extends the TTL.
+- **A NaN key could lose other keys.** A key unequal to itself (a NaN float, or a struct or interface holding one)
+  hashes differently on every call. Each `Set` stored another copy nobody could read; worse, when such an item sat
+  far enough from its home that the table rehashes it to find the home, its removal decremented the overflow counter
+  of a random group, and a live key there became unreachable. Such a key no longer enters memory. For key types that
+  cannot hold a NaN the check compiles away.
 
 ## [0.9.8] - 2026-08-13
 
