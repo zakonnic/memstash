@@ -75,7 +75,7 @@ func TestWriteBackCarriesPerEntryTTL(t *testing.T) {
 	require.NoError(t, c.SetWithTTL(ctx, "k", "v", 5*time.Minute))
 	<-l2.entered
 	l2.release <- struct{}{}
-	c.Wait()
+	c.Wait(context.Background())
 
 	require.Len(t, l2.recorded(), 1)
 	assert.Equal(t, ttlCall{size: 1, ttl: 5 * time.Minute}, l2.recorded()[0])
@@ -103,7 +103,7 @@ func TestWriteBackSplitsBatchesByTTL(t *testing.T) {
 	for range 4 {            // the queue drains as four runs, one per lifetime stretch
 		l2.pass()
 	}
-	c.Wait()
+	c.Wait(context.Background())
 
 	assert.Equal(t, []ttlCall{
 		{size: 1, ttl: time.Hour},       // the stalled write, on the cache's own TTL

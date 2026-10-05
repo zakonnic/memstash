@@ -178,7 +178,7 @@ func suiteWriteBackVisibleAfterWait(t *testing.T, newCache cacheFactory) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		writer.Wait() // returns once every Set above has been handed to L2
+		writer.Wait(context.Background()) // returns once every Set above has been handed to L2
 		for i := 0; i < keys; i++ {
 			v, ok, err := reader.Get(ctx, fmt.Sprintf("k%d", i))
 			assert.NoError(t, err)
@@ -309,7 +309,7 @@ func suiteEvictedItemsServedFromL2(t *testing.T, newCache cacheFactory) {
 	for i := 0; i < keys; i++ {
 		require.NoError(t, c.Set(ctx, fmt.Sprintf("k%d", i), fmt.Sprintf("v%d", i)))
 	}
-	c.Wait() // the write-back worker must have delivered every value to L2 before we start reading
+	c.Wait(context.Background()) // the write-back worker must have delivered every value to L2 before we start reading
 
 	evicted := 0
 	for i := 0; i < keys; i++ {

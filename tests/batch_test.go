@@ -57,7 +57,7 @@ func TestBatchSetWriteBackFlushedByWait(t *testing.T) {
 	defer c.Close()
 
 	require.NoError(t, c.BatchSet(ctx, memstash.List[string, string]{{Key: "a", Value: "1"}, {Key: "b", Value: "2"}}))
-	c.Wait()
+	c.Wait(context.Background())
 	for _, key := range []string{"a", "b"} {
 		_, ok := l2.snapshot(key)
 		assert.True(t, ok, "batch write-back write %s is not in L2 after Wait", key)

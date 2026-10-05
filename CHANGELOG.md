@@ -216,6 +216,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **A shard table could grow, or be preallocated, to 2^32 slots, whose count wrapped to 0 in the table's uint32
   size.** The table then read its chunk directory as items. It takes a single shard of over 3.2 billion items to get
   there; the largest table is now the last whole chunk below 2^32.
+- **`Wait` could block forever, and could not tell a finished checkpoint from a cache that was closing.** A stuck L2
+  holds the write-back queue - and with it the checkpoint - up indefinitely, and `Wait` took no context; it also
+  returned silently when `Close` began. It is now `Wait(ctx) error`: nil once everything enqueued before the call
+  reached L2, `ctx.Err()` when the context ends first, and the new `ErrClosed` once the cache is closing. This changes
+  its signature.
 
 ## [0.9.8] - 2026-08-13
 

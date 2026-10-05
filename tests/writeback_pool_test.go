@@ -115,7 +115,7 @@ func TestWriteBackPoolRunsWorkersInParallel(t *testing.T) {
 			for i := range 500 {
 				require.NoError(t, c.Set(context.Background(), fmt.Sprintf("k-%d", i), "v"))
 			}
-			c.Wait()
+			c.Wait(context.Background())
 
 			peak, _ := l2.snapshot()
 			assert.Equal(t, workers, peak)
@@ -140,7 +140,7 @@ func TestWriteBackPoolKeepsPerKeyOrder(t *testing.T) {
 	for i := range writes {
 		require.NoError(t, c.Set(context.Background(), "k", fmt.Sprintf("v-%04d", i)))
 	}
-	c.Wait()
+	c.Wait(context.Background())
 
 	_, values := l2.snapshot()
 	got := values["k"]
@@ -241,7 +241,7 @@ func TestWriteBackOverflowKeepsPerKeyOrder(t *testing.T) {
 			}
 			l2.open()
 			require.NoError(t, <-done)
-			c.Wait()
+			c.Wait(context.Background())
 
 			_, values := l2.snapshot()
 			l2.mu.Lock()
@@ -309,7 +309,7 @@ func TestWriteBackPanicCostsOnlyItsBatch(t *testing.T) {
 			require.NoError(t, c.Delete(ctx, "d"))
 			arm(l2)
 			l2.open()
-			c.Wait()
+			c.Wait(context.Background())
 
 			failed, delivered := []string{"a", "b"}, []string{"c", "d"}
 			if name == "batch delete" {

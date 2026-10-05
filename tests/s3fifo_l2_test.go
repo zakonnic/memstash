@@ -270,7 +270,7 @@ func TestWriteBackWait(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		c.Wait()
+		assert.NoError(t, c.Wait(context.Background()))
 		for i := 0; i < keys; i++ {
 			_, ok := l2.snapshot(fmt.Sprintf("k%d", i))
 			assert.True(t, ok, "write k%d is not in L2 after Wait", i)
@@ -284,7 +284,7 @@ func TestWriteBackWait(t *testing.T) {
 
 	// The cache keeps accepting writes after Wait, and a second Wait flushes them too.
 	require.NoError(t, c.Set(ctx, "later", "v"))
-	c.Wait()
+	c.Wait(context.Background())
 	_, ok := l2.snapshot("later")
 	assert.True(t, ok, "the write issued after the first Wait was not flushed by the second one")
 }
@@ -293,12 +293,12 @@ func TestWriteBackWait(t *testing.T) {
 // immediately instead of hanging.
 func TestWaitIsNoopWithoutWriteBack(t *testing.T) {
 	noL2 := newCache(t, memstash.Config[string, string]{MemoryCapacity: 10})
-	noL2.Wait()
+	assert.NoError(t, noL2.Wait(context.Background()))
 
 	writeThrough := newCache(t, memstash.Config[string, string]{
 		MemoryCapacity: 10, L2Cache: newL2Stub(), WritePolicy: memstash.WriteThrough,
 	})
-	writeThrough.Wait()
+	assert.NoError(t, writeThrough.Wait(context.Background()))
 
 	closed, err := memstash.New[string, string](
 		memstash.WithMemoryCapacity(10),
@@ -307,7 +307,20 @@ func TestWaitIsNoopWithoutWriteBack(t *testing.T) {
 	)
 	require.NoError(t, err)
 	closed.Close()
-	closed.Wait() // must not hang after Close
+	assert.ErrorIs(t, closed.Wait(context.Background()), memstash.ErrClosed, "a checkpoint on a closed cache")
+}
+
+// A stuck L2 holds a checkpoint up for as long as it is stuck: Wait gives up when its context does.
+func TestWaitHonorsItsContext(t *testing.T) {
+	l2 := newHoldL2("hold") // holds the Set of "hold" until opened
+	c := newCache(t, memstash.Config[string, string]{MemoryCapacity: 10, L2Cache: l2, WriteBackWorkers: 1})
+	defer l2.open()
+	require.NoError(t, c.Set(context.Background(), "k", "hold"))
+	<-l2.entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	assert.ErrorIs(t, c.Wait(ctx), context.DeadlineExceeded)
 }
 
 // failingL2 wraps l2Stub but Set always fails.

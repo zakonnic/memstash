@@ -346,12 +346,13 @@ func (c *Cache[K, V]) Close() {
 	})
 }
 
-// Wait blocks until every asynchronous write-back write enqueued before the call has been handed to L2. Unlike Close
-// it is a checkpoint, not a shutdown: the cache keeps serving traffic. With WriteThrough or WriteDisabled, or while
-// the cache is closing (Close drains the buffer itself), it returns immediately.
-func (c *Cache[K, V]) Wait() {
+// Wait blocks until every write-back write enqueued before the call has been handed to L2. It is a checkpoint, not a
+// shutdown: the cache keeps serving. It returns ctx's error if ctx ends first, which a stuck L2 can cause, and
+// ErrClosed once the cache is closing, since Close drains the buffer itself. With WriteThrough or WriteDisabled it
+// returns at once.
+func (c *Cache[K, V]) Wait(ctx context.Context) error {
 	if len(c.writeQueues) == 0 {
-		return
+		return nil
 	}
 	// Marker sits behind everything enqueued into that queue before this call.
 	markers := make([]chan struct{}, len(c.writeQueues))
@@ -360,16 +361,21 @@ func (c *Cache[K, V]) Wait() {
 		select {
 		case queue <- l2Write[K, V]{flush: markers[i]}:
 		case <-c.stop:
-			return
+			return ErrClosed
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 	for _, marker := range markers {
 		select {
 		case <-marker:
 		case <-c.stop:
-			return
+			return ErrClosed
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
+	return nil
 }
 
 // shardAndHash returns the key's shard and hash: the low bits pick the shard, the high bits seed the table probe,

@@ -152,7 +152,7 @@ func TestWriteBackBatchingModes(t *testing.T) {
 		}
 		l2.release <- struct{}{} // the stalled single completes
 		l2.pass()                // the queued six drain as one BatchSet
-		c.Wait()
+		c.Wait(context.Background())
 
 		sets, batches, sizes := l2.counters()
 		assert.Equal(t, 1, sets, "only the stalled first write goes through Set")
@@ -172,7 +172,7 @@ func TestWriteBackBatchingModes(t *testing.T) {
 		for i := 0; i < 6; i++ {
 			l2.pass()
 		}
-		c.Wait()
+		c.Wait(context.Background())
 
 		sets, batches, _ := l2.counters()
 		assert.Equal(t, 7, sets)
@@ -190,7 +190,7 @@ func TestWriteBackBatchingModes(t *testing.T) {
 		}
 		l2.release <- struct{}{}
 		l2.pass() // one BatchSet of six
-		c.Wait()
+		c.Wait(context.Background())
 
 		// Two queued: at most half the buffer stays after the pop - per-item Sets.
 		stall(t, c, l2)
@@ -199,7 +199,7 @@ func TestWriteBackBatchingModes(t *testing.T) {
 		l2.release <- struct{}{}
 		l2.pass()
 		l2.pass()
-		c.Wait()
+		c.Wait(context.Background())
 
 		sets, batches, sizes := l2.counters()
 		assert.Equal(t, 4, sets, "the two stalled firsts plus the two under-half writes")

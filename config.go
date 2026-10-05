@@ -36,6 +36,7 @@ var (
 	ErrTTLDisabled           = fmt.Errorf("%w: TTL must be enabled - see WithTTL option", Error)
 	ErrPanic                 = fmt.Errorf("%w: panic recovered", Error)
 	ErrLoaderPanic           = fmt.Errorf("%w: loader panicked", ErrPanic)
+	ErrClosed                = fmt.Errorf("%w: cache closed", Error)
 )
 
 // PanicHandler is called with whatever recover() returned when the cache swallows a panic. Runs on the goroutine that

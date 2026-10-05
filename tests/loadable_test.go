@@ -42,7 +42,7 @@ func TestLoadableCacheDirectAccess(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"a": "1", "b": "2"}, found.ToMap())
 
-	lc.Wait() // no L2/WriteBack configured: must return immediately, not hang
+	lc.Wait(context.Background()) // no L2/WriteBack configured: must return immediately, not hang
 }
 
 // TestNewBatchLoadable covers the batch-loader constructor: GetOrLoad and BatchGetOrLoad both go through the

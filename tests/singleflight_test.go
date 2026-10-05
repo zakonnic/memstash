@@ -411,9 +411,9 @@ func TestWriteBackSurvivesPanickingL2(t *testing.T) {
 	})
 
 	require.NoError(t, c.Set(ctx, "boom", "1"))
-	c.Wait()
+	c.Wait(context.Background())
 	require.NoError(t, c.Set(ctx, "after", "2"))
-	c.Wait()
+	c.Wait(context.Background())
 
 	l2.mu.Lock()
 	_, stored := l2.m["after"]

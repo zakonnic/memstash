@@ -61,7 +61,7 @@ func TestDeleteWriteBackIsAsync(t *testing.T) {
 	l2.release <- struct{}{} // the stalled single completes
 	l2.pass()                // run 1: Set{a}
 	l2.pass()                // run 2: Delete{a}
-	c.Wait()
+	c.Wait(context.Background())
 
 	deletes, deleteBatches, _ := l2.deleteCounters()
 	assert.Equal(t, 1, deletes+deleteBatches, "the queued delete must reach L2 through the worker")
@@ -101,7 +101,7 @@ func TestBatchDeleteWriteBack(t *testing.T) {
 	l2.pass()                // run 1: BatchSet{a, b}
 	l2.pass()                // run 2: BatchDelete{a, b}
 	l2.pass()                // run 3: Set{c}
-	c.Wait()
+	c.Wait(context.Background())
 
 	sets, batches, sizes := l2.counters()
 	assert.Equal(t, 2, sets, "the stalled first write and the trailing single set")
