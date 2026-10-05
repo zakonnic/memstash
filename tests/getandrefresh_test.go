@@ -445,3 +445,20 @@ func loadedList(keys []string, value string) memstash.List[string, string] {
 	}
 	return out
 }
+
+// Close cancels a refresh's load and waits for it: nothing a refresh does may land after Close returns.
+func TestCloseWaitsForRefresh(t *testing.T) {
+	c, err := memstash.New[string, string]()
+	require.NoError(t, err)
+	entered := make(chan struct{})
+	var finished atomic.Bool
+	c.GetAndRefresh(context.Background(), "k", func(ctx context.Context, _ string) (string, error) {
+		close(entered)
+		<-ctx.Done()
+		finished.Store(true)
+		return "", ctx.Err()
+	})
+	<-entered
+	c.Close()
+	assert.True(t, finished.Load(), "Close returned while a refresh was still loading")
+}

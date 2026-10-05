@@ -142,6 +142,13 @@ type Cache[K comparable, V any] struct {
 	stop      chan struct{}
 	wg        sync.WaitGroup
 	closeOnce sync.Once
+
+	// refreshes counts the GetAndRefresh loads in flight: Close cancels their context (life) and waits for them.
+	// refreshMu keeps one from registering while Close waits, which sync.WaitGroup does not allow.
+	refreshes sync.WaitGroup
+	refreshMu sync.RWMutex
+	life      context.Context
+	endLife   context.CancelFunc
 }
 
 // New creates a cache configured by the options. The returned cache must be closed with Close when background
@@ -255,6 +262,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if c.l2Cache == nil {
 		c.l2WritePolicy = WriteDisabled
 	}
+	c.life, c.endLife = context.WithCancel(context.Background())
 
 	baseCap, remainder := cfg.MemoryCapacity/int64(numShards), cfg.MemoryCapacity%int64(numShards)
 	ghostPerShard := max(cfg.ghostSize()/numShards, 1)
@@ -313,14 +321,20 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	return c, nil
 }
 
-// Close stops the background goroutines and waits for the write-back buffer to drain. Repeated calls are safe.
-// A Set that starts strictly after Close returns still reaches L2 (synchronously); a Set racing with Close may
-// lose its asynchronous write, and one still waiting for buffer room writes synchronously, possibly ahead of the drain.
-// A GetBatched waiting on the read pool loses nothing: it reads L2 itself.
+// Close stops the background goroutines. It waits for the write-back buffer to drain and for GetAndRefresh loads,
+// whose context it cancels. Repeated calls are safe.
+//
+// A Set that starts after Close returns still reaches L2, synchronously. A Set racing Close may lose its asynchronous
+// write, and one still waiting for buffer room writes synchronously, possibly ahead of the drain. A GetBatched waiting
+// on the read pool loses nothing: it reads L2 itself.
 func (c *Cache[K, V]) Close() {
 	c.closeOnce.Do(func() {
+		c.refreshMu.Lock()
 		close(c.stop)
+		c.refreshMu.Unlock()
+		c.endLife()
 		c.batchedGets.close() // before the wait below: see getPool.close
+		c.refreshes.Wait()
 		c.wg.Wait()
 		// Catch writes that slipped into a buffer while its worker was shutting down. The workers are gone, so
 		// this goroutine is the only receiver and a non-empty queue can always be received from.

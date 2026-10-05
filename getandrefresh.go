@@ -10,9 +10,9 @@ import (
 // GetAndRefresh returns what memory holds for key - a value past its TTL included, as long as no read has reclaimed it -
 // and reloads the key in the background, where the result replaces the cached value and follows WritePolicy into L2.
 //
-// ctx is used for its values only: the load outlives this call. A load error, ErrKeyNotFound included, leaves the
-// current value in place; a GetOrLoad waiting on the same key receives it. Concurrent loads of one key are coalesced
-// into one.
+// ctx is used for its values only: the load outlives this call, and Close cancels it and waits for it. A load error,
+// ErrKeyNotFound included, leaves the current value in place; a GetOrLoad waiting on the same key receives it.
+// Concurrent loads of one key are coalesced into one.
 func (c *Cache[K, V]) GetAndRefresh(ctx context.Context, key K, load LoaderFunc[K, V]) (V, bool) {
 	value, ok := c.peekMemory(key)
 	if ok {
@@ -29,7 +29,10 @@ func (c *Cache[K, V]) GetAndRefresh(ctx context.Context, key K, load LoaderFunc[
 	if _, running := c.claim(c.keyHash(key), key, call); running {
 		return value, ok
 	}
-	go c.loadInto(context.WithoutCancel(ctx), key, load, call)
+	if !c.refresh(ctx, func(ctx context.Context) { c.loadInto(ctx, key, load, call) }) {
+		call.err = context.Canceled // Close came in between: the flight ends unloaded
+		c.release(call)
+	}
 	return value, ok
 }
 
@@ -47,9 +50,27 @@ func (c *Cache[K, V]) BatchGetAndRefresh(ctx context.Context, keys []K, load Bat
 	if load == nil || len(keys) == 0 || c.closing() {
 		return found
 	}
-	// The caller may reuse its slice the moment this returns.
-	go c.loadBatchInto(context.WithoutCancel(ctx), append([]K(nil), keys...), load)
+	keys = append([]K(nil), keys...) // the caller may reuse its slice the moment this returns
+	c.refresh(ctx, func(ctx context.Context) { c.loadBatchInto(ctx, keys, load) })
 	return found
+}
+
+// refresh runs load on a goroutine of its own, under ctx's values and the cache's lifetime, unless Close has begun.
+func (c *Cache[K, V]) refresh(ctx context.Context, load func(context.Context)) bool {
+	c.refreshMu.RLock()
+	defer c.refreshMu.RUnlock()
+	if c.closing() {
+		return false
+	}
+	c.refreshes.Add(1)
+	go func() {
+		defer c.refreshes.Done()
+		ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		defer cancel()
+		defer context.AfterFunc(c.life, cancel)()
+		load(ctx)
+	}()
+	return true
 }
 
 // closing reports whether Close has been called; a refresh started after that has no worker left to outlive it.

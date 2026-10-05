@@ -209,6 +209,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   shared stripes, so a value taken earlier kept counting and two of them could not be subtracted, and its methods on
   a pointer receiver made `c.Stats().Hits()` fail to compile. `Stats` is now a plain snapshot with value-receiver
   methods, read once from the counters, whose own shape - and the read and write paths - is unchanged.
+- **`Close` did not wait for `GetAndRefresh` loads.** They ran on goroutines of their own with a context stripped of
+  cancellation, so one started before `Close` wrote to memory and L2 - and could call `OnDeletion`, `OnL2Error` and
+  `OnPanic` - after `Close` had returned, against an L2 client the caller had shut down by then. `Close` now cancels
+  their context and waits for them; a refresh that would start once `Close` has begun does not start.
 
 ## [0.9.8] - 2026-08-13
 
