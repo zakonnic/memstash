@@ -61,8 +61,8 @@ const (
 	// minTableSlots is the initial table size of every shard.
 	minTableSlots = 64
 
-	// maxTableSlots is the largest table a shard can address: the whole uint32 slot index space.
-	maxTableSlots = int64(1) << 32
+	// maxTableSlots is the largest table a shard can address.
+	maxTableSlots = itemstore.MaxSlots
 
 	// maxTTL caps the TTL at ~146 years. A TTL near math.MaxInt64, the usual way to write forever, would overflow the
 	// lifetimes the expiry scale computes.

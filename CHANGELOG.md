@@ -213,6 +213,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   cancellation, so one started before `Close` wrote to memory and L2 - and could call `OnDeletion`, `OnL2Error` and
   `OnPanic` - after `Close` had returned, against an L2 client the caller had shut down by then. `Close` now cancels
   their context and waits for them; a refresh that would start once `Close` has begun does not start.
+- **A shard table could grow, or be preallocated, to 2^32 slots, whose count wrapped to 0 in the table's uint32
+  size.** The table then read its chunk directory as items. It takes a single shard of over 3.2 billion items to get
+  there; the largest table is now the last whole chunk below 2^32.
 
 ## [0.9.8] - 2026-08-13
 

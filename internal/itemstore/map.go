@@ -21,6 +21,9 @@ const (
 // MaxItems caps the item count: 5/6 (the default growth load factor) of the 2^32 slot positions.
 const MaxItems = int64(1) << 32 * 5 / 6
 
+// MaxSlots is the largest table: whole chunks, with the slot count itself still fitting a uint32.
+const MaxSlots = int64(1)<<32 - chunkSlots
+
 // FlatHashMap is one shard's item table: linear probing (https://en.wikipedia.org/wiki/Linear_probing) over slots
 // that are the items themselves, so a probe that lands has meta, key and value right there. At load 0.75 a hit walks
 // ~2.5 slots.

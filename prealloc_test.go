@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
 func slotCounts[K comparable, V any](c *Cache[K, V]) []int {
@@ -261,6 +262,10 @@ func TestPreallocSlots(t *testing.T) {
 	assert.Equal(t, 64<<16, preallocSlots(100_000_000/32, DefaultPreallocationRatio))
 	assert.Equal(t, int(maxTableSlots), preallocSlots(3<<30, DefaultPreallocationRatio),
 		"the table is capped by the uint32 index space")
+	// The slot count is a uint32 too: a table of 2^32 slots would have size 0.
+	assert.EqualValues(t, maxTableSlots, uint32(maxTableSlots))
+	assert.EqualValues(t, maxTableSlots, itemstore.TableSlots(int(maxTableSlots)), "the cap is whole chunks")
+	assert.Equal(t, int(maxTableSlots), min(itemstore.GrowSlots(int(maxTableSlots)-1<<16), int(maxTableSlots)))
 
 	// The ratio is the dial: the same shard packs into whatever share of its table the caller asked for.
 	assert.Equal(t, 2056, preallocSlots(1024, 0.5))
