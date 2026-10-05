@@ -241,6 +241,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   `SetWithTTL` of 36 hours and more on a 1 s-unit cache - that put the offset past `ExpireMax`, which reads as
   expired: every such write during that one clock unit (once every ~73 hours at the 1 s unit) was lost at once. The
   wrap now moves the offset one unit earlier.
+- **`RefreshTTLOnGet` skipped hits served by the slow read paths.** A read that overlaps a deletion's compaction
+  re-probes, and after a second overlap reads under the shard mutex; both fallbacks granted the reference but left the
+  expiry alone, so under steady deletes a hot key could expire while being read. Every hit path now extends the TTL.
 
 ## [0.9.8] - 2026-08-13
 

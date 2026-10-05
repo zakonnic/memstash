@@ -471,7 +471,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 			}
 			nowOff := c.nowOff.Load()
 			if !expired(metaWord, nowOff) {
-				if c.refreshOnGet {
+				if c.refreshOnGet { // touchHit, inlined by hand: it is past the inlining budget
 					expireOff := uint32(metaWord & itemstore.ExpireMask >> itemstore.ExpireShift)
 					if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && item.TouchAndRefreshExpire(metaWord, newOff) {
 						return entry.Value, true
@@ -523,7 +523,7 @@ func (c *Cache[K, V]) getMoved(sh *shard[K, V], keyHash uint64, key K) (V, bool)
 			}
 			nowOff := c.nowOff.Load()
 			if !expired(metaWord, nowOff) {
-				item.TouchWith(metaWord)
+				c.touchHit(item, metaWord, nowOff)
 				return entry.Value, true
 			}
 			c.dropExpired(sh, keyHash, key)
@@ -550,11 +550,23 @@ func (c *Cache[K, V]) getLocked(sh *shard[K, V], keyHash uint64, key K) (V, bool
 		return zero, false
 	}
 	metaWord := item.Metadata()
-	if expired(metaWord, c.nowOff.Load()) {
+	nowOff := c.nowOff.Load()
+	if expired(metaWord, nowOff) {
 		return zero, false
 	}
-	item.TouchWith(metaWord)
+	c.touchHit(item, metaWord, nowOff)
 	return item.Entry().Value, true
+}
+
+// touchHit grants a hit its reference and, with RefreshTTLOnGet, a full TTL.
+func (c *Cache[K, V]) touchHit(item *itemstore.Item[K, V], metaWord uint64, nowOff uint32) {
+	if c.refreshOnGet {
+		expireOff := uint32(metaWord & itemstore.ExpireMask >> itemstore.ExpireShift)
+		if newOff := c.expireOffsetAt(nowOff); newOff != expireOff && item.TouchAndRefreshExpire(metaWord, newOff) {
+			return
+		}
+	}
+	item.TouchWith(metaWord)
 }
 
 // Set stores the value in memory and in L2 according to WritePolicy. An error can come only from a synchronous L2
