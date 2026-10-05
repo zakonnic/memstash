@@ -236,6 +236,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   (or one at the size cap) then filled up, and the next new key walked past the last slot and was published outside
   the table - memory corruption, or an index panic. A new key is now not stored while only one free slot is left,
   so every probe still has an empty slot to end at; an overwrite or a delete works as before.
+- **A write could be expired at birth once every 2^18 clock units.** An expiry offset that wrapped onto 0 ("no TTL")
+  was moved to 1, one unit later than asked. For a lifetime at the cap - a cache TTL of 131070-131071 s, or any
+  `SetWithTTL` of 36 hours and more on a 1 s-unit cache - that put the offset past `ExpireMax`, which reads as
+  expired: every such write during that one clock unit (once every ~73 hours at the 1 s unit) was lost at once. The
+  wrap now moves the offset one unit earlier.
 
 ## [0.9.8] - 2026-08-13
 

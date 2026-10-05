@@ -601,7 +601,7 @@ func (c *Cache[K, V]) expireOffsetFor(ttl time.Duration, maxUnits uint32) (uint3
 	units := uint32(min(ceilDiv(ttl, c.expireUnit), int64(maxUnits)))
 	expireOff := (c.nowOff.Load() + units + 1) & itemstore.ExpireWrapMask
 	if expireOff == 0 {
-		expireOff = 1
+		expireOff = itemstore.ExpireWrapMask // see expireOffsetAt
 	}
 	return expireOff, time.Duration(units) * c.expireUnit
 }
@@ -1100,12 +1100,14 @@ func (c *Cache[K, V]) expireOffset() uint32 {
 	return c.expireOffsetAt(c.nowOff.Load())
 }
 
-// expireOffsetAt is expireOffset for an already-loaded clock value; only meaningful when TTL is enabled. Offsets wrap
-// on their 18-bit scale; 0 means "no TTL", so a wrap landing there shifts one unit earlier.
+// expireOffsetAt is expireOffset at a loaded clock value; TTL must be enabled. The +1 covers the coarse clock. nowOff
+// lags real time by up to a tick, so without it an item written just before a tick would expire almost at once.
+// Offset 0 means no TTL, so a wrap that lands there moves one unit earlier. Moving it later would push a TTL at the
+// cap past ExpireMax, and the item would be expired at birth.
 func (c *Cache[K, V]) expireOffsetAt(nowOff uint32) uint32 {
 	expireOff := (nowOff + c.ttlOff + 1) & itemstore.ExpireWrapMask
 	if expireOff == 0 {
-		expireOff = 1
+		expireOff = itemstore.ExpireWrapMask
 	}
 	return expireOff
 }
