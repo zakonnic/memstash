@@ -868,7 +868,7 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 			var zero V
 			return zero, err
 		}
-		if !canceledElsewhere(ctx, winner.err) {
+		if !winner.canceled || ctx.Err() != nil {
 			return winner.val, winner.err
 		}
 		c.stats.addMemMisses(-1) // the next attempt counts this read
@@ -883,13 +883,8 @@ func (c *Cache[K, V]) loadFlight(ctx context.Context, key K, load LoaderFunc[K, 
 
 	value, err := c.doLoad(ctx, key, load)
 	call.val, call.err, call.ok = value, err, err == nil
+	call.canceled = err != nil && ctx.Err() != nil
 	return value, err
-}
-
-// canceledElsewhere reports a context error from a flight while ctx itself is live: the owner's context ended that
-// load, not this caller's, which loads again instead.
-func canceledElsewhere(ctx context.Context, err error) bool {
-	return ctx.Err() == nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) (V, error) {

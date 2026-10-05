@@ -91,10 +91,9 @@ func (c *Cache[K, V]) batchGetMemory(keys []K, dst List[K, V], wantMissing bool)
 	return dst, missing, hits
 }
 
-// batchGetMemoryFlights is the memory pass of the load path: hits go to the returned list, and every miss claims its
+// batchGetMemoryFlights is the memory pass of the load path: hits are appended to dst, and every miss claims its
 // flight right there, while the hash the lookup just computed is still in hand.
-func (c *Cache[K, V]) batchGetMemoryFlights(keys []K, fl *batchFlights[K, V]) (List[K, V], int64) {
-	var dst List[K, V]
+func (c *Cache[K, V]) batchGetMemoryFlights(keys []K, fl *batchFlights[K, V], dst List[K, V]) (List[K, V], int64) {
 	hits := int64(0)
 	if len(keys) <= smallBatch {
 		for i, key := range keys {
@@ -343,40 +342,38 @@ func (c *Cache[K, V]) BatchGetOrLoad(ctx context.Context, keys []K, load BatchLo
 	if load == nil {
 		return nil, ErrNilLoader
 	}
-	var fl batchFlights[K, V]
-	found, hits := c.batchGetMemoryFlights(keys, &fl)
-	c.stats.addMemHits(hits)
-	if fl.calls == nil {
-		return found, nil
-	}
-
-	loadErr := c.loadOwned(ctx, load, &fl, &found)
-
-	// Joined keys missed memory and go no further here - their owner does the L2 lookup (the owned keys are counted
-	// by batchLoad).
-	c.stats.addMemMisses(int64(len(fl.joined)))
-
-	var retry []K // keys whose owner's context ended their load: this call loads them again
-	for _, flight := range fl.joined {
-		if err := flight.call.wait(ctx); err != nil {
-			return found, err
+	var found List[K, V]
+	var loadErr error
+	for len(keys) > 0 {
+		var fl batchFlights[K, V]
+		var hits int64
+		found, hits = c.batchGetMemoryFlights(keys, &fl, found)
+		c.stats.addMemHits(hits)
+		if fl.calls == nil {
+			break
 		}
-		switch {
-		case flight.call.err == nil && flight.call.ok:
-			found = append(found, KeyVal[K, V]{Key: flight.key, Value: flight.call.val})
-		case canceledElsewhere(ctx, flight.call.err):
-			retry = append(retry, flight.key)
-		case loadErr == nil && !errors.Is(flight.call.err, ErrKeyNotFound):
-			loadErr = flight.call.err
-		}
-	}
-	if len(retry) > 0 {
-		c.stats.addMemMisses(-int64(len(retry))) // the retry counts them
-		more, err := c.BatchGetOrLoad(ctx, retry, load)
-		found = append(found, more...)
-		if loadErr == nil {
+		if err := c.loadOwned(ctx, load, &fl, &found); loadErr == nil {
 			loadErr = err
 		}
+
+		// Joined keys missed memory and stop here: their owner reads L2. batchLoad counts the owned keys.
+		c.stats.addMemMisses(int64(len(fl.joined)))
+
+		keys = nil // next, the keys whose owner's context ended their load
+		for _, flight := range fl.joined {
+			if err := flight.call.wait(ctx); err != nil {
+				return found, err
+			}
+			switch {
+			case flight.call.err == nil && flight.call.ok:
+				found = append(found, KeyVal[K, V]{Key: flight.key, Value: flight.call.val})
+			case flight.call.canceled && ctx.Err() == nil:
+				keys = append(keys, flight.key)
+			case loadErr == nil && !errors.Is(flight.call.err, ErrKeyNotFound):
+				loadErr = flight.call.err
+			}
+		}
+		c.stats.addMemMisses(-int64(len(keys))) // the next pass counts them
 	}
 	return found, loadErr
 }
@@ -414,7 +411,7 @@ func (c *Cache[K, V]) loadOwned(ctx context.Context, load BatchLoaderFunc[K, V],
 	if errors.Is(err, ErrKeyNotFound) {
 		err = nil // said of the whole batch it means none found, as it does to the calls that joined it
 	}
-	assignLoaded(fl.calls, resolved, err, found)
+	assignLoaded(ctx, fl.calls, resolved, err, found)
 	return err
 }
 

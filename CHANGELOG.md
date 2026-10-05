@@ -168,8 +168,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **A call waiting on another's load got that caller's cancellation.** `GetOrLoad` and `BatchGetOrLoad` coalesce
   concurrent loads of a key, and the load runs under the context of whoever started it: when that context was
   canceled or timed out, every call waiting on the key received `context.Canceled` or `DeadlineExceeded`, though its
-  own context was live. A waiter now loads the key itself when the error is a context error and its own context is
-  fine.
+  own context was live. A waiter now loads the key itself when the load failed after the starter's context ended and
+  its own context is fine. An error the loader hits on its own, its own timeout included, still reaches every waiter
+  once.
 - **L2 items with a TTL expired up to a second early in the SQL, pgx, Badger, DynamoDB and Tarantool adapters.**
   They stored the deadline as `time.Now().Add(ttl).Unix()`, rounded down, and read it back as expired once the
   clock's second reached it: every item lived somewhere in (ttl-1s, ttl], and one with a TTL under a second was

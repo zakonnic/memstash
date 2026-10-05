@@ -30,6 +30,8 @@ type flightCall[K comparable, V any] struct {
 	// enough - Config.shardCount caps the bucket count at 128.
 	at uint16
 	ok bool
+	// canceled says the load failed after the owner's context ended: the error is the owner's, not the key's.
+	canceled bool
 	// joined is set by a claim that handed this call out as the winner, and read by release under the same bucket
 	// lock: a flight nobody joined skips finish entirely.
 	joined bool
@@ -225,7 +227,7 @@ const ownedScanMax = 32
 // assignLoaded hands the result to the owned flights; a key the loader skipped carries err, or ErrKeyNotFound when
 // there is none. Items this call does not own are skipped, and the owned ones are appended to found when it is non-nil.
 // Flights are matched by their own key: the loader may have reordered the owned keys it was handed.
-func assignLoaded[K comparable, V any](calls []flightCall[K, V], loaded List[K, V], err error, found *List[K, V]) {
+func assignLoaded[K comparable, V any](ctx context.Context, calls []flightCall[K, V], loaded List[K, V], err error, found *List[K, V]) {
 	var index map[K]int
 	for i, item := range loaded {
 		j := i
@@ -242,12 +244,13 @@ func assignLoaded[K comparable, V any](calls []flightCall[K, V], loaded List[K, 
 			*found = append(*found, item)
 		}
 	}
+	canceled := err != nil && ctx.Err() != nil
 	if err == nil {
 		err = ErrKeyNotFound
 	}
 	for i := range calls {
 		if !calls[i].ok {
-			calls[i].err = err
+			calls[i].err, calls[i].canceled = err, canceled
 		}
 	}
 }

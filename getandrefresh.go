@@ -30,7 +30,7 @@ func (c *Cache[K, V]) GetAndRefresh(ctx context.Context, key K, load LoaderFunc[
 		return value, ok
 	}
 	if !c.refresh(ctx, func(ctx context.Context) { c.loadInto(ctx, key, load, call) }) {
-		call.err = context.Canceled // Close came in between: the flight ends unloaded
+		call.err, call.canceled = context.Canceled, true // Close came in between: the flight ends unloaded
 		c.release(call)
 	}
 	return value, ok
@@ -89,7 +89,7 @@ func (c *Cache[K, V]) loadInto(ctx context.Context, key K, load LoaderFunc[K, V]
 
 	value, err := load(ctx, key)
 	if err != nil {
-		call.err = err
+		call.err, call.canceled = err, ctx.Err() != nil
 		return
 	}
 	c.storeLoaded(ctx, key, value)
@@ -109,7 +109,7 @@ func (c *Cache[K, V]) loadBatchInto(ctx context.Context, keys []K, load BatchLoa
 
 	loaded, err := load(ctx, fl.owned)
 	c.storeLoadedBatch(ctx, loaded) // a partial result is still worth caching
-	assignLoaded(fl.calls, loaded, err, nil)
+	assignLoaded(ctx, fl.calls, loaded, err, nil)
 }
 
 func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {
