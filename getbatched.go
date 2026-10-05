@@ -283,7 +283,7 @@ func (c *Cache[K, V]) recoverBatch(b *getBatch[K, V], pending **asyncSlot[V]) {
 // settleHit settles a key L2 answered for. The value lands in memory first, so a caller still queued behind this
 // batch finds it there instead of asking again.
 func (c *Cache[K, V]) settleHit(b *getBatch[K, V], at int32, value V) int64 {
-	c.setMemory(b.keys[at], value, c.expireOffset())
+	c.setMemory(b.keys[at], value, c.expireOffset(), true)
 	return c.settleKey(b, at, value, true, nil)
 }
 

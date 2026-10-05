@@ -227,7 +227,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error
 	c.stats.addL2Hits(int64(len(fromL2)))
 	c.stats.addL2Misses(int64(max(len(missing)-len(fromL2), 0)))
 	for _, item := range fromL2 {
-		c.setMemory(item.Key, item.Value, c.expireOffset())
+		c.setMemory(item.Key, item.Value, c.expireOffset(), true)
 		found = append(found, item)
 	}
 	return found, nil
@@ -241,7 +241,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items List[K, V]) error {
 		return nil
 	}
 	for _, item := range items {
-		c.setMemory(item.Key, item.Value, c.expireOffset())
+		c.setMemory(item.Key, item.Value, c.expireOffset(), false)
 	}
 	c.stats.addSets(int64(len(items)))
 	switch c.l2WritePolicy {
@@ -436,7 +436,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 	var buf [batchResolvedSlots]itemstore.SetSlot[K] // trick to stay on stack
 	keysFromL2 := itemstore.NewSetFrom(buf[:])
 	for _, item := range fromL2 {
-		c.setMemory(item.Key, item.Value, c.expireOffset())
+		c.setMemory(item.Key, item.Value, c.expireOffset(), true)
 		result = append(result, item)
 		keysFromL2.Add(item.Key)
 	}
@@ -465,7 +465,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 func (c *Cache[K, V]) runLoader(ctx context.Context, keys []K, load BatchLoaderFunc[K, V]) (List[K, V], error) {
 	loaded, err := load(ctx, keys)
 	if len(loaded) > 0 { // keeps a loader that answered with nothing off the store path entirely
-		c.storeLoadedBatch(ctx, loaded)
+		c.storeLoadedBatch(ctx, loaded, true)
 	}
 	return loaded, err
 }

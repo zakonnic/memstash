@@ -421,7 +421,7 @@ func (c *Cache[K, V]) getFromL2(ctx context.Context, key K) (V, bool, error) {
 		return zero, false, err
 	}
 	c.stats.addL2Hits(1)
-	c.setMemory(key, value, c.expireOffset())
+	c.setMemory(key, value, c.expireOffset(), true)
 	return value, true, nil
 }
 
@@ -560,7 +560,7 @@ func (c *Cache[K, V]) getLocked(sh *shard[K, V], keyHash uint64, key K) (V, bool
 // Set stores the value in memory and in L2 according to WritePolicy. An error can come only from a synchronous L2
 // write.
 func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
-	c.setMemory(key, value, c.expireOffset())
+	c.setMemory(key, value, c.expireOffset(), false)
 	c.stats.addSets(1)
 	if c.l2WritePolicy == WriteDisabled {
 		return nil
@@ -583,7 +583,7 @@ func (c *Cache[K, V]) SetWithTTL(ctx context.Context, key K, value V, ttl time.D
 		return ErrBadTTL
 	}
 	expireOff, effectiveTTL := c.expireOffsetFor(ttl, itemstore.ExpireMax-1)
-	c.setMemory(key, value, expireOff)
+	c.setMemory(key, value, expireOff, false)
 	c.stats.addSets(1)
 	if c.l2WritePolicy == WriteDisabled {
 		return nil
@@ -610,19 +610,28 @@ func (c *Cache[K, V]) expireOffsetFor(ttl time.Duration, maxUnits uint32) (uint3
 // want the configured TTL pass expireOffset()). An overwrite stores into the item in place (the item and its slot
 // stay put); a new key takes the first empty slot on its walk - deletions compact their runs, so an empty slot is
 // never followed by a key homed at or before it, and the walk ends there with certainty. Neither path allocates.
-func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
+//
+// fill is for a value read from L2 or a loader rather than written: it keeps a live value it finds, which was written
+// after the miss the fill answers. false means the fill lost to such a value.
+func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) bool {
 	weight := c.rawCost(key, value)
 	sh, keyHash := c.shardAndHash(key)
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	if weight > sh.cap {
 		// Does not fit at all; drop the older value too so it stops serving reads.
 		sh.mu.Lock()
+		if fill {
+			if _, item, ok := c.findSlot(sh, keyHash, key); ok && !expired(item.Metadata(), c.nowOff.Load()) {
+				sh.mu.Unlock()
+				return false
+			}
+		}
 		c.deleteLocked(sh, keyHash, key, CauseOverflow, &deletions)
 		sh.mu.Unlock()
 		if len(deletions) > 0 {
 			c.callOnDeletion(deletions)
 		}
-		return
+		return true
 	}
 
 	sh.mu.Lock()
@@ -651,6 +660,10 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 		if entry.Key != key {
 			continue
 		}
+		if fill && !expired(metaWord, c.nowOff.Load()) {
+			sh.mu.Unlock()
+			return false
+		}
 		// Overwrite in place; the old value is read for the weight delta before the store lands.
 		if weightDelta = weight - c.rawCost(key, entry.Value); weightDelta != 0 {
 			sh.policy.Reweigh(storage.Wrap(pos), weightDelta)
@@ -674,6 +687,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32) {
 	if len(deletions) > 0 {
 		c.callOnDeletion(deletions)
 	}
+	return true
 }
 
 // maybeGrow replaces the shard's table with a bigger one once the live items pass the growth threshold. The items
@@ -898,7 +912,7 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 		switch {
 		case err == nil && ok:
 			c.stats.addL2Hits(1)
-			c.setMemory(key, value, c.expireOffset())
+			c.setMemory(key, value, c.expireOffset(), true)
 			return value, nil
 		case err != nil:
 			// Fall back to the loader; report the L2 error via the callback.
@@ -913,14 +927,17 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 		var zero V
 		return zero, err
 	}
-	c.storeLoaded(ctx, key, value)
+	c.storeLoaded(ctx, key, value, true)
 	return value, nil
 }
 
-// storeLoaded caches a freshly loaded value and forwards it to L2 per WritePolicy. The value is already in hand, so
-// an L2 write error is reported rather than returned.
-func (c *Cache[K, V]) storeLoaded(ctx context.Context, key K, value V) {
-	c.setMemory(key, value, c.expireOffset())
+// storeLoaded caches a freshly loaded value and forwards it to L2 per WritePolicy; with fill it gives way to a value
+// written meanwhile, in L2 too, which that write reached itself. The value is already in hand, so an L2 write error
+// is reported rather than returned.
+func (c *Cache[K, V]) storeLoaded(ctx context.Context, key K, value V, fill bool) {
+	if !c.setMemory(key, value, c.expireOffset(), fill) {
+		return
+	}
 	c.stats.addSets(1)
 	switch c.l2WritePolicy {
 	case WriteDisabled:

@@ -183,7 +183,7 @@ func (c *Cache[K, V]) LoadFrom(
 				expireOff, ttl = c.expireOffsetFor(remaining, c.ttlOff)
 			}
 		}
-		c.setMemory(key, value, expireOff)
+		c.setMemory(key, value, expireOff, false)
 		if toL2 {
 			if err := c.writeLoadedToL2(ctx, key, value, ttl); err != nil {
 				return err

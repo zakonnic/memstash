@@ -92,7 +92,7 @@ func (c *Cache[K, V]) loadInto(ctx context.Context, key K, load LoaderFunc[K, V]
 		call.err, call.canceled = err, ctx.Err() != nil
 		return
 	}
-	c.storeLoaded(ctx, key, value)
+	c.storeLoaded(ctx, key, value, false)
 	call.val, call.ok, call.err = value, true, nil
 }
 
@@ -108,29 +108,40 @@ func (c *Cache[K, V]) loadBatchInto(ctx context.Context, keys []K, load BatchLoa
 	defer c.recoverLoaderBatch(fl.calls)
 
 	loaded, err := load(ctx, fl.owned)
-	c.storeLoadedBatch(ctx, loaded) // a partial result is still worth caching
+	c.storeLoadedBatch(ctx, loaded, false) // a partial result is still worth caching
 	assignLoaded(ctx, fl.calls, loaded, err, nil)
 }
 
-func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V]) {
-	if len(loaded) == 0 {
+// storeLoadedBatch is storeLoaded for a batch: with fill, L2 gets only the values memory took.
+func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V], fill bool) {
+	expireOff := c.expireOffset()
+	var kept List[K, V] // stays nil while memory takes every value: then loaded itself goes to L2
+	for i, item := range loaded {
+		stored := c.setMemory(item.Key, item.Value, expireOff, fill)
+		switch {
+		case !stored && kept == nil:
+			kept = append(make(List[K, V], 0, len(loaded)-1), loaded[:i]...)
+		case stored && kept != nil:
+			kept = append(kept, item)
+		}
+	}
+	if kept == nil {
+		kept = loaded
+	}
+	if len(kept) == 0 {
 		return
 	}
-	expireOff := c.expireOffset()
-	for _, item := range loaded {
-		c.setMemory(item.Key, item.Value, expireOff)
-	}
-	c.stats.addSets(int64(len(loaded)))
+	c.stats.addSets(int64(len(kept)))
 	switch c.l2WritePolicy {
 	case WriteDisabled:
 	case WriteThrough:
-		if err := c.l2Cache.BatchSet(ctx, loaded, c.ttl); err != nil {
-			for _, item := range loaded {
+		if err := c.l2Cache.BatchSet(ctx, kept, c.ttl); err != nil {
+			for _, item := range kept {
 				c.reportL2Err(item.Key, err)
 			}
 		}
 	default:
-		for _, item := range loaded {
+		for _, item := range kept {
 			c.enqueueWriteBack(item.Key, item.Value, c.ttl)
 		}
 	}

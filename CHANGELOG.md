@@ -222,6 +222,15 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   returned silently when `Close` began. It is now `Wait(ctx) error`: nil once everything enqueued before the call
   reached L2, `ctx.Err()` when the context ends first, and the new `ErrClosed` once the cache is closing. This changes
   its signature.
+  own context was live. A waiter now loads the key itself when the error is a context error and its own context is
+  fine.
+- **A value read from L2 or loaded could overwrite a newer `Set`.** `Get`, `BatchGet`, `GetBatched`, `GetOrLoad`
+  and `BatchGetOrLoad` put what L2 or the loader returned into memory; a `Set` that landed while that read was out
+  was overwritten by the older value, which then stayed in memory until its TTL or eviction while L2 held the new
+  one - and a loaded value went to L2 as well, over the `Set`. Such a value now only fills a key that memory holds no
+  live value for, and a loaded value that loses that way does not go to L2 either. The call that read it still
+  returns the value it read, as of that read. A value that loses is not counted in `Sets()`, replaces nothing (no
+  `CauseReplacement`) and leaves the TTL of the one in memory alone. `GetAndRefresh` still replaces: that is its job.
 
 ## [0.9.8] - 2026-08-13
 
