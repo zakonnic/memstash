@@ -248,8 +248,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **A NaN key could lose other keys.** A key unequal to itself (a NaN float, or a struct or interface holding one)
   hashes differently on every call. Each `Set` stored another copy nobody could read; worse, when such an item sat
   far enough from its home that the table rehashes it to find the home, its removal decremented the overflow counter
-  of a random group, and a live key there became unreachable. Such a key no longer enters memory. For key types that
-  cannot hold a NaN the check compiles away.
+  of a random group, and a live key there became unreachable. Such a key no longer enters memory, and its load is not
+  registered for coalescing either, where a full bucket's overflow map could never delete it. Whether the key type
+  can hold a NaN at all is decided once, at construction.
 - **An expired item nothing read or evicted came back to life.** Expiry offsets sit on an 18-bit wrapping scale and
   expired items were removed only by a read that found them or by eviction, which runs only over capacity. An item
   left alone for `ExpireMax+2` clock units past its deadline (about 36 hours at the 1 s unit every TTL up to 36 hours

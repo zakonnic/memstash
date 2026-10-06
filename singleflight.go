@@ -15,6 +15,10 @@ const flightSlots = 8
 // flightSpilled is the slot number of a call parked in a bucket's overflow map.
 const flightSpilled = 0xFF
 
+// flightAlone marks a call never registered: its key is unequal to itself, so nobody could join it and the overflow
+// map could never delete it.
+const flightAlone = 0xFFFF
+
 // flightCall is one singleflight flight. A flight nobody joined never synchronizes at all - it is released without a
 // finish, and val, err and ok stay private to its owner. Once somebody joins, those three are written before over
 // goes true and read after it, and the channel the waiter parks on is created on demand.
@@ -87,6 +91,10 @@ type flightBucket[K comparable, V any] struct {
 
 // claim registers call for key, or hands back the flight already running for it.
 func (c *Cache[K, V]) claim(keyHash uint64, key K, call *flightCall[K, V]) (winner *flightCall[K, V], running bool) {
+	if c.nanKeys && key != key {
+		call.key, call.at = key, flightAlone
+		return call, false
+	}
 	bucket := uint32(keyHash) & c.shardMask
 	b := &c.flights[bucket]
 
@@ -130,6 +138,9 @@ func (c *Cache[K, V]) claim(keyHash uint64, key K, call *flightCall[K, V]) (winn
 // call that is still registered, so reading joined under the same lock that unregisters it settles the question for
 // good: false means nobody can ever wait on this call.
 func (c *Cache[K, V]) release(call *flightCall[K, V]) {
+	if call.at == flightAlone {
+		return
+	}
 	b := &c.flights[call.at>>8]
 	b.mu.Lock()
 	if slot := call.at & 0xFF; slot != flightSpilled {

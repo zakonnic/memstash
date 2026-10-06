@@ -59,6 +59,23 @@ type sliceLen struct {
 	len int
 }
 
+// canBeNaN reports whether a value of t can be unequal to itself: it holds a float or an interface somewhere.
+func canBeNaN(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128, reflect.Interface:
+		return true
+	case reflect.Array:
+		return canBeNaN(t.Elem())
+	case reflect.Struct:
+		for i := range t.NumField() {
+			if canBeNaN(t.Field(i).Type) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // payloadSizer returns a fast estimator of the heap bytes a value of T references beyond unsafe.Sizeof(T):
 // nil (nothing referenced) for pointer-free types, len for strings and slices of pointer-free elements (spare
 // capacity is not counted), the pointee size for pointers to pointer-free types. ok=false means T's size cannot be

@@ -13,6 +13,7 @@ import (
 	"hash/maphash"
 	"iter"
 	"math"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,6 +109,7 @@ type Cache[K comparable, V any] struct {
 	shardMask uint32
 	// preallocated pins the table size: the whole capacity is already there, so the table never grows.
 	preallocated bool
+	nanKeys      bool // K can hold a NaN, and a key may be unequal to itself
 	// growthNum is Config.GrowthThreshold as a numerator over 1<<growthShift.
 	growthNum int
 	// onDeletion sits with the fields the write path already touches: every removal site tests it, so a cache without
@@ -246,6 +248,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		flights:           make([]flightBucket[K, V], numShards),
 		shardMask:         uint32(numShards - 1),
 		preallocated:      cfg.PreallocateMap,
+		nanKeys:           canBeNaN(reflect.TypeFor[K]()),
 		growthNum:         int(math.Round(cfg.growthThreshold() * (1 << growthShift))),
 		seed:              maphash.MakeSeed(),
 		epoch:             time.Now(),
@@ -627,7 +630,7 @@ func (c *Cache[K, V]) expireOffsetFor(ttl time.Duration, maxUnits uint32) (uint3
 // fill is for a value read from L2 or a loader rather than written: it keeps a live value it finds, which was written
 // after the miss the fill answers. false means the fill lost to such a value.
 func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) bool {
-	if key != key { // a NaN: no read could find it, and its hash changes from call to call. Folded away for most K.
+	if c.nanKeys && key != key { // no read could find it, and its hash changes from call to call
 		return true
 	}
 	weight := c.rawCost(key, value)
