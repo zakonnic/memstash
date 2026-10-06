@@ -234,8 +234,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **A table that could not grow was filled to the last slot and then written past its end.** `EvictionPolicy.Evict`
   may answer "nothing to evict", and a custom policy that did so kept the shard over capacity; a preallocated table
   (or one at the size cap) then filled up, and the next new key walked past the last slot and was published outside
-  the table - memory corruption, or an index panic. A new key is now not stored while only one free slot is left,
-  so every probe still has an empty slot to end at; an overwrite or a delete works as before.
+  the table - memory corruption, or an index panic. A table that can grow now grows before its last free slot is
+  needed, whatever the growth threshold; one that cannot drops a new key silently while only one free slot is left,
+  so every probe still has an empty slot to end at. An overwrite or a delete works as before.
 - **A write could be expired at birth once every 2^18 clock units.** An expiry offset that wrapped onto 0 ("no TTL")
   was moved to 1, one unit later than asked. For a lifetime at the cap - a cache TTL of 131070-131071 s, or any
   `SetWithTTL` of 36 hours and more on a 1 s-unit cache - that put the offset past `ExpireMax`, which reads as

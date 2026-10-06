@@ -717,7 +717,8 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) boo
 // A preallocated table never grows: it already fits the whole capacity, and growing would double a footprint the
 // caller sized up front.
 func (c *Cache[K, V]) maybeGrow(sh *shard[K, V], t *itemstore.FlatHashMap[K, V]) {
-	if c.preallocated || sh.live<<growthShift < t.Len()*c.growthNum || int64(t.Len()) >= maxTableSlots {
+	lastSlot := sh.live+1 >= t.Len() // setMemory keeps it free: at a threshold near 1 the table must grow first
+	if c.preallocated || (!lastSlot && sh.live<<growthShift < t.Len()*c.growthNum) || int64(t.Len()) >= maxTableSlots {
 		return
 	}
 	grown := t.Grow(min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), sh.evicted)

@@ -46,3 +46,15 @@ func TestFullTableKeepsASlotFree(t *testing.T) {
 	_, ok = c.GetFromMemory(2 * slots)
 	require.True(t, ok)
 }
+
+// A table that can grow does so before its last free slot is needed, whatever the growth threshold.
+func TestHighGrowthThresholdStillGrows(t *testing.T) {
+	ctx := context.Background()
+	c, err := New[int, int](WithMemoryCapacity(1000), WithShardsCount(1), WithGrowthThreshold(0.999))
+	require.NoError(t, err)
+	defer c.Close()
+	for k := range 1000 {
+		require.NoError(t, c.Set(ctx, k, k))
+	}
+	require.Equal(t, 1000, c.Len())
+}
