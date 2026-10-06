@@ -82,8 +82,8 @@ const (
 	CauseExpiration
 	// CauseEviction is capacity pressure: the policy picked this item as its victim.
 	CauseEviction
-	// CauseOverflow is a Set whose item alone outweighs the whole shard: the new value is not stored, and the value
-	// already under that key is dropped so it stops serving reads.
+	// CauseOverflow is a Set whose item alone outweighs the whole shard: the new value is not stored (Stats.Rejected),
+	// and the value already under that key is dropped so it stops serving reads. The handler gets that old value.
 	CauseOverflow
 )
 

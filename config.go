@@ -48,10 +48,12 @@ type PanicHandler func(recovered any, handled bool)
 type Config[K comparable, V any] struct {
 	// MemoryCapacity is the first-level capacity in weight units. When CostFunc == nil every item weighs 1 and the capacity
 	// means the number of items. If CostFunc != nil it is required field, must be > 0. Mutually exclusive with MemoryBudget.
+	// Each shard gets an equal share, and an item heavier than its share is not kept in memory (Stats.Rejected).
 	MemoryCapacity int64
 
 	// MemoryBudget bounds the cached elements size in bytes. When CostFunc == nil a cost function is derived automatically.
-	// Require CostFunc for complex types.
+	// Require CostFunc for complex types. Split between the shards like MemoryCapacity: an item larger than its shard's
+	// share is not kept in memory.
 	MemoryBudget int64
 
 	// CostFunc is the item weight function. It must be deterministic (the weight is recomputed during eviction) and the

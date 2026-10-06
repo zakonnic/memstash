@@ -20,7 +20,7 @@ func (keepAll[K, V]) Bytes() int64                { return 0 }
 // for an absent key, and an insert, need an empty slot to end at.
 func TestFullTableKeepsASlotFree(t *testing.T) {
 	ctx := context.Background()
-	c, err := New[int, int](WithMemoryCapacity(100), WithShardsCount(1), WithPreallocatedSize(),
+	c, err := New[int, int](WithMemoryCapacity(100), WithShardsCount(1), WithPreallocatedSize(), WithStats(),
 		WithCustomEvictionPolicy(func(Items[int, int], int64) EvictionPolicy[int, int] { return keepAll[int, int]{} }))
 	require.NoError(t, err)
 	defer c.Close()
@@ -30,6 +30,7 @@ func TestFullTableKeepsASlotFree(t *testing.T) {
 		require.NoError(t, c.Set(ctx, k, k))
 	}
 	require.Equal(t, slots-1, c.Len())
+	require.EqualValues(t, slots+1, c.Stats().Rejected())
 	for k := range slots - 1 {
 		v, ok := c.GetFromMemory(k)
 		require.True(t, ok, k)

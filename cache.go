@@ -647,6 +647,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) boo
 		}
 		c.deleteLocked(sh, keyHash, key, CauseOverflow, &deletions)
 		sh.mu.Unlock()
+		c.stats.addRejected(1)
 		if len(deletions) > 0 {
 			c.callOnDeletion(deletions)
 		}
@@ -664,6 +665,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) boo
 		if empty(metaWord) { // deletions compact their runs, so the key cannot live past an empty slot
 			if sh.live+1 >= storage.Len() { // the last free slot stays free: a probe needs one to end at
 				weightDelta = 0
+				c.stats.addRejected(1)
 				break
 			}
 			idx := storage.Wrap(pos)

@@ -14,6 +14,7 @@ type counters struct {
 	sets         xsync.Counter
 	deletes      xsync.Counter
 	tableGrowths xsync.Counter
+	rejected     xsync.Counter
 }
 
 func newCounters(enabled bool) counters {
@@ -29,6 +30,7 @@ func newCounters(enabled bool) counters {
 		sets:         *xsync.NewCounter(),
 		deletes:      *xsync.NewCounter(),
 		tableGrowths: *xsync.NewCounter(),
+		rejected:     *xsync.NewCounter(),
 	}
 }
 
@@ -74,6 +76,12 @@ func (s *counters) addTableGrowths(n int64) {
 	}
 }
 
+func (s *counters) addRejected(n int64) {
+	if s.enabled {
+		s.rejected.Add(n)
+	}
+}
+
 // snapshot reads every counter once; a disabled set reads all zero.
 func (s *counters) snapshot() Stats {
 	if !s.enabled {
@@ -87,13 +95,14 @@ func (s *counters) snapshot() Stats {
 		sets:         s.sets.Value(),
 		deletes:      s.deletes.Value(),
 		tableGrowths: s.tableGrowths.Value(),
+		rejected:     s.rejected.Value(),
 	}
 }
 
 // Stats is a snapshot of the cache's operation counters (see Cache.Stats): it does not change after it is taken, so
 // two of them subtract to what happened in between. Batch operations count once per key.
 type Stats struct {
-	memHits, memMisses, l2Hits, l2Misses, sets, deletes, tableGrowths int64
+	memHits, memMisses, l2Hits, l2Misses, sets, deletes, tableGrowths, rejected int64
 }
 
 // MemoryHits is the number of read keys served from memory.
@@ -129,6 +138,11 @@ func (s Stats) Deletes() int64 { return s.deletes }
 // TableGrowths is the number of shard item tables rebuilt into a larger table. Always 0 with WithPreallocatedSize:
 // a preallocated table is never grown.
 func (s Stats) TableGrowths() int64 { return s.tableGrowths }
+
+// Rejected is the number of values memory did not take, though they count in Sets() and went to L2: heavier than
+// their shard's capacity (MemoryCapacity or MemoryBudget over the shard count), or bound for a table that cannot grow
+// with one free slot left.
+func (s Stats) Rejected() int64 { return s.rejected }
 
 // TablePurges is always 0: a deletion compacts its probe run on the spot, so a table is never rebuilt at the same
 // size. Kept for callers that read it.

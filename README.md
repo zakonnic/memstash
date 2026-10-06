@@ -246,7 +246,7 @@ stats:
 c, _ := memstash.New[string, User](
 	memstash.WithStats(),
 )
-s := c.Stats() // s.Hits(), s.Misses(), s.Sets(), s.Deletes(), s.Gets(), s.HitRate(), s.MissRate(), ...
+s := c.Stats() // s.Hits(), s.Misses(), s.Sets(), s.Deletes(), s.Rejected(), s.HitRate(), s.MissRate(), ...
 for key, value := range c.Iterator() {
 	fmt.Println(key, value)
 }

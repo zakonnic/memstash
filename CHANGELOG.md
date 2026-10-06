@@ -258,6 +258,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   every 36 hours from then on. The clock goroutine now sweeps each table for expired items, a small slice per clock
   unit: a lap takes under 32768 units, a quarter of the wrap. A process suspended for longer than the wrap can still
   meet such an item: 18 bits cannot tell.
+- **A value too heavy for memory vanished from it without a trace.** An item heavier than its shard's share of
+  `MemoryCapacity`/`MemoryBudget` (the limit is per shard, not per cache) was not stored, and for a new key nothing
+  said so: no handler call, counted in `Sets()`, while every `Get` fetched it from L2, promoted it and dropped it again.
+  `Stats.Rejected()` now counts the values memory did not take - these, and new keys refused by a table that cannot
+  grow - and the capacity docs name the per-shard limit. `OnDeletion` still hears only about values that were in
+  memory: the refused one is the caller's.
 
 ## [0.9.8] - 2026-08-13
 

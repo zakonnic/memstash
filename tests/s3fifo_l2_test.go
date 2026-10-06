@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -429,4 +430,29 @@ func TestConcurrentMixed(t *testing.T) {
 			require.GreaterOrEqual(t, c.Weight(), int64(0), "negative weight - double subtraction")
 		})
 	}
+}
+
+// An item heavier than its shard stays out of memory, counted as rejected; L2 keeps serving it.
+func TestOversizedItemIsCountedAsRejected(t *testing.T) {
+	ctx := context.Background()
+	c, err := memstash.New[string, string](
+		memstash.WithMemoryCapacity(1000),
+		memstash.WithShardsCount(1),
+		memstash.WithCostFunc(func(_, v string) uint32 { return uint32(len(v)) }),
+		memstash.WithL2Cache[string, string](newL2Stub()),
+		memstash.WithWritePolicy(memstash.WriteThrough),
+		memstash.WithStats(),
+	)
+	require.NoError(t, err)
+	defer c.Close()
+
+	big := strings.Repeat("x", 2000)
+	require.NoError(t, c.Set(ctx, "big", big))
+	_, inMemory := c.GetFromMemory("big")
+	assert.False(t, inMemory)
+	v, found, err := c.Get(ctx, "big")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, big, v)
+	assert.EqualValues(t, 2, c.Stats().Rejected(), "the Set and the promotion")
 }
