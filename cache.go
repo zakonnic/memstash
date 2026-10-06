@@ -1112,9 +1112,9 @@ func (c *Cache[K, V]) rawCost(key K, value V) int64 {
 	return 1
 }
 
-// expireOffset returns the expiration offset for a new item: 0 when TTL is disabled ("never expires"). The +1
-// compensates for the coarse clock: nowOff may be up to a tick behind real time, and without it an item written just
-// before a tick would expire almost immediately. An item lives at least its TTL and at most one extra clock unit.
+// expireOffset returns a new item's expiration offset, 0 when TTL is disabled. An item lives at least its TTL and at
+// most one clock unit more. The exception is the one unit in 2^18 where the offset would wrap onto 0: then it lives
+// up to a unit short.
 func (c *Cache[K, V]) expireOffset() uint32 {
 	if c.ttlOff == 0 {
 		return 0
