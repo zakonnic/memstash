@@ -92,11 +92,12 @@ type shard[K comparable, V any] struct {
 	cap     int64
 	live    int                    // alive items; guarded by mu
 	scratch []itemstore.ShiftEntry // Reclaim's buffer for the run it compacts; guarded by mu
+	sweepAt uint32                 // the next slot the TTL sweep looks at; guarded by mu
 	// evicted is set once the policy has picked a victim. From then on its queues carry more than insertion order,
 	// and growth must keep the queue order. Guarded by mu.
 	evicted bool
 
-	_ [55]byte
+	_ [51]byte
 }
 
 // Cache is a two-level cache.
@@ -719,7 +720,9 @@ func (c *Cache[K, V]) maybeGrow(sh *shard[K, V], t *itemstore.FlatHashMap[K, V])
 	if c.preallocated || sh.live<<growthShift < t.Len()*c.growthNum || int64(t.Len()) >= maxTableSlots {
 		return
 	}
-	sh.items.Store(t.Grow(min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), sh.evicted))
+	grown := t.Grow(min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), sh.evicted)
+	sh.items.Store(grown)
+	sh.sweepAt = uint32(uint64(sh.sweepAt) * uint64(grown.Len()) / uint64(t.Len())) // homes scale with the table
 	c.stats.addTableGrowths(1)
 }
 
@@ -1047,7 +1050,7 @@ func ceilDiv(d, unit time.Duration) int64 {
 	return q
 }
 
-// Len returns the number of first-level items (including expired ones not yet swept).
+// Len returns the number of first-level items, expired ones not yet removed included.
 func (c *Cache[K, V]) Len() int {
 	total := 0
 	for i := range c.shards {
@@ -1170,11 +1173,52 @@ func (c *Cache[K, V]) clockLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			c.nowOff.Store(uint32(time.Since(c.epoch)/c.expireUnit) & itemstore.ExpireWrapMask)
+			nowOff := uint32(time.Since(c.epoch)/c.expireUnit) & itemstore.ExpireWrapMask
+			if units := (nowOff - c.nowOff.Load()) & itemstore.ExpireWrapMask; units > 0 {
+				c.nowOff.Store(nowOff)
+				c.sweep(nowOff, units)
+			}
 		case <-c.stop:
 			return
 		}
 	}
+}
+
+// sweepUnits paces the TTL sweep: a lap over a table takes that many clock units plus one per item it removes. An
+// expired offset reads as live again ExpireMax+2 units on; a clock that jumps further than that (a process suspended
+// for as long) cannot be helped with 18 bits.
+const sweepUnits = 1 << 14
+
+// sweep kills the expired items in the next stretch of every table, sized for units clock units of the pass.
+func (c *Cache[K, V]) sweep(nowOff, units uint32) {
+	for i := range c.shards {
+		c.sweepShard(&c.shards[i], nowOff, units)
+	}
+}
+
+func (c *Cache[K, V]) sweepShard(sh *shard[K, V], nowOff, units uint32) {
+	defer c.recoverWorker()
+	if deletions := c.sweepLocked(sh, nowOff, units); len(deletions) > 0 {
+		c.callOnDeletion(deletions)
+	}
+}
+
+func (c *Cache[K, V]) sweepLocked(sh *shard[K, V], nowOff, units uint32) (deletions []deletion[K, V]) {
+	sh.mu.Lock()
+	defer sh.mu.Unlock() // killAt runs user code: CostFunc, a custom policy
+	storage := sh.items.GetStorage()
+	size := uint32(storage.Len())
+	for n := min(uint64(size), (uint64(size)*uint64(units)+sweepUnits-1)/sweepUnits); n > 0; n-- {
+		if sh.sweepAt >= size {
+			sh.sweepAt = 0
+		}
+		if item := storage.At(sh.sweepAt); expired(item.Metadata(), nowOff) {
+			c.killAt(sh, sh.sweepAt, item, CauseExpiration, &deletions)
+			continue // the compaction may have moved the next item into this slot
+		}
+		sh.sweepAt++
+	}
+	return deletions
 }
 
 // WriteBackBatchMax caps one drain batch: the writes are flushed through the adapter's BatchSet.

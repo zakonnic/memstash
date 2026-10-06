@@ -78,7 +78,7 @@ const (
 	// CauseReplacement is a Set over a live key; the handler receives the value that was replaced.
 	CauseReplacement
 	// CauseExpiration is an elapsed TTL. It is reported when the item is actually reclaimed - by the read that finds
-	// it expired, or by the eviction pass that reaches it - not at the instant the deadline passes.
+	// it expired, the eviction pass or the background sweep that reaches it - not at the instant the deadline passes.
 	CauseExpiration
 	// CauseEviction is capacity pressure: the policy picked this item as its victim.
 	CauseEviction

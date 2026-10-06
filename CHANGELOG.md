@@ -249,6 +249,13 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   far enough from its home that the table rehashes it to find the home, its removal decremented the overflow counter
   of a random group, and a live key there became unreachable. Such a key no longer enters memory. For key types that
   cannot hold a NaN the check compiles away.
+- **An expired item nothing read or evicted came back to life.** Expiry offsets sit on an 18-bit wrapping scale and
+  expired items were removed only by a read that found them or by eviction, which runs only over capacity. An item
+  left alone for `ExpireMax+2` clock units past its deadline (about 36 hours at the 1 s unit every TTL up to 36 hours
+  gets) read as live again: `Get` served it, `Iterator` and `SaveTo` yielded it, and it flipped between dead and live
+  every 36 hours from then on. The clock goroutine now sweeps each table for expired items, a small slice per clock
+  unit: a lap takes under 32768 units, a quarter of the wrap. A process suspended for longer than the wrap can still
+  meet such an item: 18 bits cannot tell.
 
 ## [0.9.8] - 2026-08-13
 

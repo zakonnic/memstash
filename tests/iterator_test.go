@@ -93,7 +93,8 @@ func TestIteratorSkipsExpired(t *testing.T) {
 	time.Sleep(3 * time.Second) // same margin TestTTLExpiry relies on
 
 	assert.Empty(t, maps.Collect(c.Iterator()), "expired items must not be yielded")
-	assert.Equal(t, 50, c.Len(), "Len counts expired items until they are swept - Iterator must not")
+	assert.LessOrEqual(t, c.Len(), 50)
+	assert.Positive(t, c.Len(), "Len counts expired items the sweep has not reached yet - Iterator must not")
 
 	want := map[string]string{}
 	for i := range 10 {
