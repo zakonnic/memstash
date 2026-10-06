@@ -117,11 +117,13 @@ func TestSweepUnderConcurrentChurn(t *testing.T) {
 		}(uint64(w+1) << 32)
 	}
 	writersWG.Wait()
+	// The churn keys left behind expire as the sweeper moves the clock; the readers race those kills too.
+	require.Eventually(t, func() bool { return swept.Load() > 0 }, 10*time.Second, time.Millisecond,
+		"the sweep removed nothing: the race was never run")
 	close(stop)
 	background.Wait()
 	require.Zero(t, falseMisses.Load(), "a pinned key was not found by a read racing the sweep")
 	require.Zero(t, wrongValues.Load(), "a pinned key was read with a wrong value")
-	require.NotZero(t, swept.Load(), "the sweep removed nothing: the race was never run")
 }
 
 // A CostFunc that panics under the sweep costs that sweep, not the shard: the mutex comes back.
