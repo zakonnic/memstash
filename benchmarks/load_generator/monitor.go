@@ -58,6 +58,14 @@ type meter struct {
 	cpu                                      time.Duration
 }
 
+// percent is part of whole in percent, 0 for an empty whole.
+func percent(part, whole int64) float64 {
+	if whole <= 0 {
+		return 0
+	}
+	return float64(part) / float64(whole) * 100
+}
+
 func (r *runner[K, V]) logStats(logger *slog.Logger, start time.Time, prev meter) meter {
 	now := time.Now()
 	wall := now.Sub(prev.t).Seconds()
@@ -66,7 +74,8 @@ func (r *runner[K, V]) logStats(logger *slog.Logger, start time.Time, prev meter
 	st := r.cache.Stats()
 	gets, sets := st.Gets(), st.Sets()
 	memHits, l2Gets, l2Hits, hits, misses := st.MemoryHits(), st.L2Gets(), st.L2Hits(), st.Hits(), st.Misses()
-	hitRate, memHitRate, l2HitRate := st.HitRate()*100, st.MemoryHitRate()*100, st.L2HitRate()*100
+	hitRate, memHitRate := percent(hits-prev.hits, gets-prev.gets), percent(memHits-prev.memHits, gets-prev.gets)
+	l2HitRate := percent(l2Hits-prev.l2Hits, l2Gets-prev.l2Gets)
 
 	opsPerSec := float64(0)
 	if wall > 0 {

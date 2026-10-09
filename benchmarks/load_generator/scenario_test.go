@@ -115,3 +115,24 @@ func TestServerTypeValidation(t *testing.T) {
 		assert.ErrorContains(t, s.withDefaults().validate(), "takes one address, got 2")
 	})
 }
+
+// The hit rates cover the interval since the previous line, as ops_per_sec does, not the run so far.
+func TestStatsHitRatesAreWindowed(t *testing.T) {
+	s := newTestScenario(t, newLogSink(t), nil)
+	ctx := context.Background()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	prev := s.logStats(logger, time.Now(), meter{t: time.Now()}) // its probe misses on the empty cache
+	st := s.cache.Stats()
+	prev.gets, prev.hits, prev.memHits = st.Gets(), st.Hits(), st.MemoryHits() // the window starts after the probe
+	for k := range 10 {
+		s.doSet(ctx, k)
+		s.doGet(ctx, k)
+	}
+	buf.Reset()
+	s.logStats(logger, time.Now(), prev)
+	var record map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &record))
+	assert.InDelta(t, 100, record["hit_rate_pct"], 0.001, "the window read what it wrote")
+	assert.InDelta(t, 100, record["mem_hit_rate_pct"], 0.001)
+}

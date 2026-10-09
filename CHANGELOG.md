@@ -304,6 +304,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   the default while negative worker counts were rejected. The ratio option now preallocates by itself, the growth
   line never rounds below one item in 4096 slots, and negative values are rejected (`ErrBadShardsCount`,
   `ErrBadGhostSize`, `ErrBadBufferSize`). `RefreshTTLOnGet` without a TTL is documented as having nothing to extend.
+- **The load generator's hit rates were totals since start, not per interval.** `hit_rate_pct`, `mem_hit_rate_pct`
+  and `l2_hit_rate_pct` came straight from the cache's counters while `ops_per_sec` and the CPU figures covered the
+  interval since the previous line, and the snapshot kept for that window went unused; a shift in the working set
+  showed up in the rates only as a slow drift. The rates now cover the interval too.
 
 ## [0.9.8] - 2026-08-13
 
