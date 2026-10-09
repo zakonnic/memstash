@@ -6,6 +6,7 @@ import (
 	"maps"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -538,20 +539,25 @@ func TestGetBatchedStartsWorkersLazily(t *testing.T) {
 	l2 := newCoalesceL2(map[string]string{"k": "v"})
 	l2.release()
 
-	before := runtime.NumGoroutine()
 	cache := newBatchedCache(t, l2, memstash.WithGetBatchedWorkers(3))
-	require.Equal(t, before, runtime.NumGoroutine(), "an unused cache must run no goroutines")
+	require.Zero(t, readWorkers(), "an unused cache must run no read workers")
 
 	_, _, err := cache.GetBatched(context.Background(), "k")
 	require.NoError(t, err)
-	assert.Equal(t, before+3, runtime.NumGoroutine(), "the first read that misses memory starts the pool")
+	assert.Equal(t, 3, readWorkers(), "the first read that misses memory starts the pool")
 
 	cache.Close()
-	deadline := time.Now().Add(3 * time.Second) // polled by hand: assert.Eventually runs its condition in a goroutine
-	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+	deadline := time.Now().Add(3 * time.Second) // a worker past wg.Done may still be on its way out
+	for readWorkers() > 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	assert.LessOrEqual(t, runtime.NumGoroutine(), before, "Close must stop the read pool")
+	assert.Zero(t, readWorkers(), "Close must stop the read pool")
+}
+
+// readWorkers counts the goroutines running a read pool's loop: the process's total moves with whatever else runs.
+func readWorkers() int {
+	buf := make([]byte, 1<<20)
+	return strings.Count(string(buf[:runtime.Stack(buf, true)]), ").getBatchLoop(")
 }
 
 // TestGetBatchedStress exercises the slot hand-off the way the race detector needs it: readers that take their
