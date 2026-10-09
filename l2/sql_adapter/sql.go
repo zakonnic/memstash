@@ -12,6 +12,7 @@ package sql_adapter
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -216,17 +217,18 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	}
 	now := time.Now().Unix()
 	const chunkKeys = maxStatementParams - 1 // one parameter is the expiry deadline
+	var errs []error
 	for start := 0; start < len(storageKeys); start += chunkKeys {
 		chunk := storageKeys[start:min(start+chunkKeys, len(storageKeys))]
-		if err := c.batchGetChunk(ctx, chunk, now, byStorageKey, &found); err != nil {
-			return found, err
+		if err := c.batchGetChunk(ctx, chunk, now, byStorageKey, &found, &errs); err != nil {
+			return found, errors.Join(append(errs, err)...)
 		}
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
-// batchGetChunk runs one IN statement and appends the hits to found.
-func (c *Cache[K, V]) batchGetChunk(ctx context.Context, chunk []string, now int64, byStorageKey map[string]K, found *memstash.List[K, V]) error {
+// batchGetChunk runs one IN statement and appends the hits to found, the codec's failures to errs.
+func (c *Cache[K, V]) batchGetChunk(ctx context.Context, chunk []string, now int64, byStorageKey map[string]K, found *memstash.List[K, V], errs *[]error) error {
 	ph := c.dialect.Placeholder
 	var query strings.Builder
 	query.WriteString("SELECT cache_key, value FROM ")
@@ -262,7 +264,8 @@ func (c *Cache[K, V]) batchGetChunk(ctx context.Context, chunk []string, now int
 		}
 		value, err := c.codec.Unmarshal(data)
 		if err != nil {
-			return err
+			*errs = append(*errs, l2.KeyErr(key, err))
+			continue
 		}
 		*found = append(*found, memstash.KeyVal[K, V]{Key: key, Value: value})
 	}
@@ -286,10 +289,12 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	}
 	rows := make([]kvRow, 0, len(items))
 	rowIndex := make(map[string]int, len(items))
+	var errs []error
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		storageKey := c.keyFunc(item.Key)
 		if i, seen := rowIndex[storageKey]; seen {
@@ -325,10 +330,10 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		query.WriteString(" ")
 		query.WriteString(c.dialect.Upsert)
 		if _, err := c.db.ExecContext(ctx, query.String(), args...); err != nil {
-			return err
+			return errors.Join(append(errs, err)...)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // BatchDelete removes all keys with "DELETE ... WHERE cache_key IN (...)" statements, split into chunks of

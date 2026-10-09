@@ -4,6 +4,7 @@ package redispipe_adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -209,21 +210,24 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		if !ok {
 			return found, fmt.Errorf("memstash/l2/redispipe: unexpected MGET reply type %T", result)
 		}
+		var errs []error
 		for i, reply := range replies {
 			if reply == nil { // a miss
 				continue
 			}
 			data, ok := reply.([]byte)
 			if !ok {
-				return found, fmt.Errorf("memstash/l2/redispipe: unexpected MGET element type %T", reply)
+				errs = append(errs, fmt.Errorf("memstash/l2/redispipe: unexpected MGET element type %T", reply))
+				return found, errors.Join(errs...)
 			}
 			value, err := c.codec.Unmarshal(data)
 			if err != nil {
-				return found, err
+				errs = append(errs, l2.KeyErr(keys[i], err))
+				continue
 			}
 			found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 		}
-		return found, nil
+		return found, errors.Join(errs...)
 	}
 	return c.batchGetSendMany(ctx, keys, storageKeys)
 }
@@ -236,24 +240,27 @@ func (c *Cache[K, V]) batchGetSendMany(ctx context.Context, keys []K, storageKey
 	for i, storageKey := range storageKeys {
 		requests[i] = redispiperedis.Req("GET", storageKey)
 	}
+	var errs []error
 	for i, result := range c.sync.SendMany(ctx, requests) {
 		if err := redispiperedis.AsError(result); err != nil {
-			return found, err
+			return found, errors.Join(append(errs, err)...)
 		}
 		if result == nil {
 			continue
 		}
 		data, ok := result.([]byte)
 		if !ok {
-			return found, fmt.Errorf("memstash/l2/redispipe: unexpected GET reply type %T", result)
+			errs = append(errs, fmt.Errorf("memstash/l2/redispipe: unexpected GET reply type %T", result))
+			return found, errors.Join(errs...)
 		}
 		value, err := c.codec.Unmarshal(data)
 		if err != nil {
-			return found, err
+			errs = append(errs, l2.KeyErr(keys[i], err))
+			continue
 		}
 		found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
 // BatchSet stores all items in one round trip; ttl == 0 means "no expiration". A no-TTL batch on a plain connection
@@ -262,26 +269,31 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	if len(items) == 0 {
 		return nil
 	}
+	var errs []error
 	if c.singleNode && ttl <= 0 && len(items) <= MaxMsetItems {
 		args := make([]interface{}, 0, 2*len(items))
 		size := 0
 		for _, item := range items {
 			data, err := c.codec.Marshal(item.Value)
 			if err != nil {
-				return err
+				errs = append(errs, l2.KeyErr(item.Key, err))
+				continue
 			}
 			storageKey := c.keyFunc(item.Key)
 			args = append(args, storageKey, data)
 			size += len(storageKey) + len(data) + 2*argWireOverhead
 		}
+		if len(args) == 0 {
+			return errors.Join(errs...)
+		}
 		if size <= multiKeyBudget {
-			return redispiperedis.AsError(c.sync.Do(ctx, "MSET", args...))
+			return errors.Join(append(errs, redispiperedis.AsError(c.sync.Do(ctx, "MSET", args...)))...)
 		}
 		requests := make([]redispiperedis.Request, 0, len(items))
 		for i := 0; i < len(args); i += 2 {
 			requests = append(requests, redispiperedis.Req("SET", args[i], args[i+1]))
 		}
-		return sendManyErr(c.sync.SendMany(ctx, requests))
+		return errors.Join(append(errs, sendManyErr(c.sync.SendMany(ctx, requests)))...)
 	}
 	// A plain connection keeps SendMany's order (one futures queue, one writer); a cluster spreads the SETs over
 	// several connections in no fixed order.
@@ -296,7 +308,8 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		if ttl > 0 {
 			requests = append(requests, redispiperedis.Req("SET", c.keyFunc(item.Key), data, "PX", millis))
@@ -304,7 +317,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 			requests = append(requests, redispiperedis.Req("SET", c.keyFunc(item.Key), data))
 		}
 	}
-	return sendManyErr(c.sync.SendMany(ctx, requests))
+	return errors.Join(append(errs, sendManyErr(c.sync.SendMany(ctx, requests)))...) // an empty SendMany sends nothing
 }
 
 // sendManyErr returns the first error of a SendMany result set.

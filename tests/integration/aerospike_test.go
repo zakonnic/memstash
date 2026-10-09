@@ -27,7 +27,7 @@ func TestAerospikeAdapter(t *testing.T) {
 	runSuite(t, func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string] {
 		opts = append(opts, l2.WithKeyFunc(l2.PrefixedString(prefix)))
 		// The "memstash" namespace comes from docker/aerospike/aerospike.conf.
-		c, err := aerospike_adapter.NewCache[string, string](client, l2.StringCodec(), "memstash", "cache", opts...)
+		c, err := aerospike_adapter.NewCache[string, string](client, suiteCodec, "memstash", "cache", opts...)
 		require.NoError(t, err, "NewCache")
 		t.Cleanup(c.Close)
 		return c

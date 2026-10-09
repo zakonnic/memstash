@@ -5,6 +5,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zakonnic/memstash"
+	"github.com/zakonnic/memstash/l2"
 )
 
 // envAddr returns the server address from the environment (for setups with remapped ports, see
@@ -61,9 +63,30 @@ func uniquePrefix(tb testing.TB) string {
 	return fmt.Sprintf("%s|%d|", tb.Name(), time.Now().UnixNano())
 }
 
-// cacheFactory builds a two-level cache over the adapter under test. Caches created with the same prefix share the
-// same L2 namespace; the factory must register Close via t.Cleanup (double Close is safe).
+// cacheFactory builds a two-level cache over the adapter under test, with suiteCodec. Caches created with the same
+// prefix share the same L2 namespace; the factory must register Close via t.Cleanup (double Close is safe).
 type cacheFactory func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string]
+
+// suiteCodec is the string codec, except that it cannot encode "unencodable" nor decode "poison".
+var suiteCodec = pickyCodec{l2.StringCodec()}
+
+var errRefused = errors.New("the test codec refuses this value")
+
+type pickyCodec struct{ memstash.Codec[string] }
+
+func (c pickyCodec) Marshal(value string) ([]byte, error) {
+	if value == "unencodable" {
+		return nil, errRefused
+	}
+	return c.Codec.Marshal(value)
+}
+
+func (c pickyCodec) Unmarshal(data []byte) (string, error) {
+	if string(data) == "poison" {
+		return "", errRefused
+	}
+	return c.Codec.Unmarshal(data)
+}
 
 // suiteScenarios is the table of L1+L2 contract scenarios executed for every adapter.
 var suiteScenarios = []struct {
@@ -78,6 +101,7 @@ var suiteScenarios = []struct {
 	{name: "BatchSetGet", run: suiteBatchSetGet},
 	{name: "BatchOverBudget", run: suiteBatchOverBudget},
 	{name: "BatchSetRepeatedKey", run: suiteBatchSetRepeatedKey},
+	{name: "CodecErrorsStayWithTheirKey", run: suiteCodecErrorsStayWithTheirKey},
 	{name: "EvictedItemsServedFromL2", run: suiteEvictedItemsServedFromL2},
 	{name: "GetOrLoadPrefersL2", run: suiteGetOrLoadPrefersL2},
 	{name: "TTLReachesL2", run: suiteTTLReachesL2},
@@ -255,6 +279,33 @@ func suiteBatchSetRepeatedKey(t *testing.T, newCache cacheFactory) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, "v31", v)
+}
+
+// suiteCodecErrorsStayWithTheirKey: a value the codec rejects fails its own key, not the batch around it, and the
+// error names the key so the bad entry can be found. The Redis adapters batch differently with a TTL.
+func suiteCodecErrorsStayWithTheirKey(t *testing.T, newCache cacheFactory) {
+	for _, ttl := range []time.Duration{0, time.Minute} {
+		t.Run(ttl.String(), func(t *testing.T) {
+			ctx := context.Background()
+			prefix := uniquePrefix(t)
+			writer := newCache(t, prefix, memstash.WithWritePolicy(memstash.WriteThrough), memstash.WithTTL(ttl))
+
+			err := writer.BatchSet(ctx, memstash.List[string, string]{
+				{Key: "a", Value: "1"}, {Key: "broken", Value: "unencodable"}, {Key: "c", Value: "3"},
+			})
+			assert.ErrorIs(t, err, errRefused)
+			assert.ErrorContains(t, err, "broken")
+			got, err := newCache(t, prefix).BatchGet(ctx, []string{"a", "c"})
+			require.NoError(t, err)
+			assert.Equal(t, map[string]string{"a": "1", "c": "3"}, got.ToMap(), "the rest of the batch was not written")
+
+			require.NoError(t, writer.Set(ctx, "poisoned", "poison"))
+			got, err = newCache(t, prefix).BatchGet(ctx, []string{"a", "poisoned", "c"})
+			assert.ErrorIs(t, err, errRefused)
+			assert.ErrorContains(t, err, "poisoned")
+			assert.Equal(t, map[string]string{"a": "1", "c": "3"}, got.ToMap(), "the rest of the batch was not read")
+		})
+	}
 }
 
 // suiteBatchOverBudget drives batches past the adapters' multi-key byte budget, where one command turns into several

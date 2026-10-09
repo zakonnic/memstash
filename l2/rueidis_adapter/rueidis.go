@@ -3,6 +3,7 @@ package rueidis_adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -197,6 +198,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		if err != nil {
 			return found, err
 		}
+		var errs []error
 		for i, key := range keys {
 			msg, ok := replies[storageKeys[i]]
 			if !ok || msg.IsNil() {
@@ -204,35 +206,38 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 			}
 			data, err := msg.AsBytes() // a zero-copy view into the reply
 			if err != nil {
-				return found, err
+				return found, errors.Join(append(errs, err)...)
 			}
 			value, err := c.codec.Unmarshal(data)
 			if err != nil {
-				return found, err
+				errs = append(errs, l2.KeyErr(key, err))
+				continue
 			}
 			found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
 		}
-		return found, nil
+		return found, errors.Join(errs...)
 	}
 	cmds := make([]rueidislib.Completed, length)
 	for i, storageKey := range storageKeys {
 		cmds[i] = c.client.B().Get().Key(storageKey).Build()
 	}
+	var errs []error
 	for i, resp := range c.doMultiLargeResults(ctx, cmds) {
 		data, err := resp.AsBytes()
 		if err != nil {
 			if rueidislib.IsRedisNil(err) {
 				continue
 			}
-			return found, err
+			return found, errors.Join(append(errs, err)...)
 		}
 		value, err := c.codec.Unmarshal(data)
 		if err != nil {
-			return found, err
+			errs = append(errs, l2.KeyErr(keys[i], err))
+			continue
 		}
 		found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
 // batchGetOrdered reads the batch with one MGET and walks the reply array by position, so no key-to-reply map is
@@ -246,21 +251,23 @@ func (c *Cache[K, V]) batchGetOrdered(ctx context.Context, keys []K, storageKeys
 	if len(replies) != len(keys) {
 		return found, fmt.Errorf("memstash/l2/rueidis: MGET returned %d replies for %d keys", len(replies), len(keys))
 	}
+	var errs []error
 	for i := range replies {
 		if replies[i].IsNil() {
 			continue
 		}
 		data, err := replies[i].AsBytes() // a zero-copy view into the reply
 		if err != nil {
-			return found, err
+			return found, errors.Join(append(errs, err)...)
 		}
 		value, err := c.codec.Unmarshal(data)
 		if err != nil {
-			return found, err
+			errs = append(errs, l2.KeyErr(keys[i], err))
+			continue
 		}
 		found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
 // BatchSet stores all items in one round trip; ttl == 0 means "no expiration". A no-TTL batch within multiKeyBudget
@@ -277,46 +284,53 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	}
 	kvs := make(map[string]string, len(items))
 	size := 0
+	var errs []error
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		storageKey := c.keyFunc(item.Key)
 		kvs[storageKey] = rueidislib.BinaryString(data)
 		size += len(storageKey) + len(data) + 2*argWireOverhead
 	}
 	if size <= multiKeyBudget {
-		for _, err := range rueidislib.MSet(c.client, ctx, kvs) {
+		for _, err := range rueidislib.MSet(c.client, ctx, kvs) { // an empty MSet sends nothing
 			if err != nil {
-				return err
+				return errors.Join(append(errs, err)...)
 			}
 		}
-		return nil
+		return errors.Join(errs...)
 	}
 	cmds := make([]rueidislib.Completed, 0, len(kvs))
 	for storageKey, data := range kvs {
 		cmds = append(cmds, c.client.B().Set().Key(storageKey).Value(data).Build())
 	}
-	return c.doMultiLarge(ctx, cmds)
+	return errors.Join(append(errs, c.doMultiLarge(ctx, cmds))...)
 }
 
 // pipelineSet sends one SET per item through DoMulti; millis == 0 stores them without expiration.
 func (c *Cache[K, V]) pipelineSet(ctx context.Context, items memstash.List[K, V], millis int64) error {
-	cmds := make([]rueidislib.Completed, len(items))
-	for i, item := range items {
+	cmds := make([]rueidislib.Completed, 0, len(items))
+	var errs []error
+	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		set := c.client.B().Set().Key(c.keyFunc(item.Key)).Value(rueidislib.BinaryString(data))
 		if millis > 0 {
-			cmds[i] = set.PxMilliseconds(millis).Build()
+			cmds = append(cmds, set.PxMilliseconds(millis).Build())
 		} else {
-			cmds[i] = set.Build()
+			cmds = append(cmds, set.Build())
 		}
 	}
-	return c.doMultiLarge(ctx, cmds)
+	if len(cmds) == 0 {
+		return errors.Join(errs...)
+	}
+	return errors.Join(append(errs, c.doMultiLarge(ctx, cmds))...)
 }
 
 // doMultiLarge sends a pipeline that busted multiKeyBudget, on a connection of its own where the client allows it.

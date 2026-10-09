@@ -197,11 +197,8 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	wg.Wait()
 	for i := 0; i < numChunks; i++ {
 		found = append(found, results[i]...)
-		if errs[i] != nil {
-			return found, errs[i]
-		}
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
 // batchGetChunk resolves one BatchGetItem request, retrying UnprocessedKeys, and appends the hits to found.
@@ -212,6 +209,7 @@ func (c *Cache[K, V]) batchGetChunk(ctx context.Context, storageKeys []string, b
 	}
 	pending := getRequests{c.table: {Keys: req}}
 	size := func(p getRequests) int { return len(p[c.table].Keys) }
+	var errs []error
 	err := drain(ctx, pending, size, func(pending getRequests) (getRequests, error) {
 		out, err := c.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: pending})
 		if err != nil {
@@ -228,7 +226,8 @@ func (c *Cache[K, V]) batchGetChunk(ctx context.Context, storageKeys []string, b
 			}
 			value, present, err := c.decodeItem(item)
 			if err != nil {
-				return nil, err
+				errs = append(errs, l2.KeyErr(key, err))
+				continue
 			}
 			if present {
 				found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
@@ -236,7 +235,7 @@ func (c *Cache[K, V]) batchGetChunk(ctx context.Context, storageKeys []string, b
 		}
 		return out.UnprocessedKeys, nil
 	})
-	return found, err
+	return found, errors.Join(append(errs, err)...)
 }
 
 // BatchSet stores the items with concurrent BatchWriteItem chunks of 25 (the API's hard limit), retrying
@@ -280,14 +279,16 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 // batchSetChunk stores one BatchWriteItem request, retrying UnprocessedItems.
 func (c *Cache[K, V]) batchSetChunk(ctx context.Context, items memstash.List[K, V], ttl time.Duration) error {
 	writes := make([]types.WriteRequest, 0, len(items))
+	var errs []error
 	for _, item := range items {
 		encoded, err := c.encodeItem(c.keyFunc(item.Key), item.Value, ttl)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		writes = append(writes, types.WriteRequest{PutRequest: &types.PutRequest{Item: encoded}})
 	}
-	return c.writeBatch(ctx, writes)
+	return errors.Join(append(errs, c.writeBatch(ctx, writes))...)
 }
 
 // writeBatch sends one BatchWriteItem request and re-sends what it leaves unprocessed.

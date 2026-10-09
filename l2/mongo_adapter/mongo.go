@@ -168,6 +168,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	if err := cursor.All(ctx, &docs); err != nil {
 		return found, err
 	}
+	var errs []error
 	for i := range docs {
 		if isExpired(docs[i]) {
 			continue
@@ -178,11 +179,12 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		}
 		value, err := c.codec.Unmarshal(docs[i].Value)
 		if err != nil {
-			return found, err
+			errs = append(errs, l2.KeyErr(key, err))
+			continue
 		}
 		found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
 // BatchSet stores all items in one unordered BulkWrite of upserts; duplicate keys collapse to the last value.
@@ -193,10 +195,12 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	}
 	models := make([]mongo.WriteModel, 0, len(items))
 	modelIndex := make(map[string]int, len(items))
+	var errs []error
 	for _, item := range items {
 		update, err := c.updateDoc(item.Value, ttl)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		storageKey := c.keyFunc(item.Key)
 		model := mongo.NewUpdateOneModel().
@@ -210,8 +214,11 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		modelIndex[storageKey] = len(models)
 		models = append(models, model)
 	}
+	if len(models) == 0 {
+		return errors.Join(errs...)
+	}
 	_, err := c.coll.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
-	return err
+	return errors.Join(append(errs, err)...)
 }
 
 // updateDoc builds the $set/$unset update for a value and TTL. With no TTL it clears any previous expiry so the item

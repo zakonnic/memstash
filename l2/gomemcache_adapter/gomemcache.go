@@ -138,17 +138,19 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	if err != nil {
 		return found, err
 	}
+	var errs []error
 	for storageKey, item := range items {
 		value, err := c.codec.Unmarshal(item.Value)
 		if err != nil {
-			return found, err
+			errs = append(errs, l2.KeyErr(byStorageKey[storageKey], err))
+			continue
 		}
 		found = append(found, memstash.KeyVal[K, V]{
 			Key:   byStorageKey[storageKey],
 			Value: value,
 		})
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
 // BatchWorkers is the number of goroutines the concurrent batch fallback runs. Raise memcache.Client.MaxIdleConns

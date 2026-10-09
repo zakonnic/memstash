@@ -27,7 +27,7 @@ func TestPgxAdapter(t *testing.T) {
 
 	runSuite(t, func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string] {
 		opts = append(opts, l2.WithKeyFunc(l2.PrefixedString(prefix)))
-		c, err := pgx_adapter.NewCache[string, string](pool, l2.StringCodec(), "memstash_pgx", opts...)
+		c, err := pgx_adapter.NewCache[string, string](pool, suiteCodec, "memstash_pgx", opts...)
 		require.NoError(t, err, "NewCache")
 		t.Cleanup(c.Close)
 		return c

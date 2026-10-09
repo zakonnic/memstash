@@ -139,6 +139,15 @@ func ResolveOrderedMget(mode memstash.DetectMode, probe func() bool) bool {
 
 // --- sequential batch fallbacks ---
 
+// KeyErr ties err to the batch item it concerns, so a joined batch error names the items that failed. A nil err stays
+// nil.
+func KeyErr(key any, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("memstash/l2: key %v: %w", key, err)
+}
+
 // BatchGetSequential implements L2Cache.BatchGet for backends without a native multi-get by looping over Get. The
 // partial result gathered so far is returned alongside the first error.
 func BatchGetSequential[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], keys []K) (memstash.List[K, V], error) {
@@ -146,7 +155,7 @@ func BatchGetSequential[K comparable, V any](ctx context.Context, store memstash
 	for _, key := range keys {
 		value, ok, err := store.Get(ctx, key)
 		if err != nil {
-			return found, err
+			return found, KeyErr(key, err)
 		}
 		if ok {
 			found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
@@ -159,7 +168,7 @@ func BatchGetSequential[K comparable, V any](ctx context.Context, store memstash
 // failed item does not stop the rest, which belong to unrelated keys; the failures come back joined.
 func BatchSetSequential[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], items memstash.List[K, V], ttl time.Duration) error {
 	return runSequential(ctx, len(items), func(i int) error {
-		return store.Set(ctx, items[i].Key, items[i].Value, ttl)
+		return KeyErr(items[i].Key, store.Set(ctx, items[i].Key, items[i].Value, ttl))
 	})
 }
 
@@ -167,7 +176,7 @@ func BatchSetSequential[K comparable, V any](ctx context.Context, store memstash
 // Delete. A failed key does not stop the rest; the failures come back joined.
 func BatchDeleteSequential[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], keys []K) error {
 	return runSequential(ctx, len(keys), func(i int) error {
-		return store.Delete(ctx, keys[i])
+		return KeyErr(keys[i], store.Delete(ctx, keys[i]))
 	})
 }
 
@@ -201,7 +210,7 @@ func BatchGetConcurrent[K comparable, V any](ctx context.Context, store memstash
 	firstErr := runConcurrent(ctx, len(keys), workers, true, func(i int) error {
 		value, ok, err := store.Get(ctx, keys[i])
 		if err != nil {
-			return err
+			return KeyErr(keys[i], err)
 		}
 		results[i] = slot{value: value, ok: ok}
 		return nil
@@ -224,7 +233,7 @@ func BatchSetConcurrent[K comparable, V any](ctx context.Context, store memstash
 		return BatchSetSequential(ctx, store, items, ttl)
 	}
 	return runConcurrent(ctx, len(items), workers, false, func(i int) error {
-		return store.Set(ctx, items[i].Key, items[i].Value, ttl)
+		return KeyErr(items[i].Key, store.Set(ctx, items[i].Key, items[i].Value, ttl))
 	})
 }
 
@@ -235,7 +244,7 @@ func BatchDeleteConcurrent[K comparable, V any](ctx context.Context, store memst
 		return BatchDeleteSequential(ctx, store, keys)
 	}
 	return runConcurrent(ctx, len(keys), workers, false, func(i int) error {
-		return store.Delete(ctx, keys[i])
+		return KeyErr(keys[i], store.Delete(ctx, keys[i]))
 	})
 }
 

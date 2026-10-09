@@ -20,7 +20,7 @@ func TestRueidisAdapter(t *testing.T) {
 
 	runSuite(t, func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string] {
 		opts = append(opts, l2.WithKeyFunc(l2.PrefixedString(prefix)))
-		c, err := rueidis_adapter.NewCache[string, string](client, l2.StringCodec(), opts...)
+		c, err := rueidis_adapter.NewCache[string, string](client, suiteCodec, opts...)
 		require.NoError(t, err, "NewCache")
 		t.Cleanup(c.Close)
 		return c

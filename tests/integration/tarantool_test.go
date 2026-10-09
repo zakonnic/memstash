@@ -28,7 +28,7 @@ func TestTarantoolAdapter(t *testing.T) {
 
 	runSuite(t, func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string] {
 		opts = append(opts, l2.WithKeyFunc(l2.PrefixedString(prefix)))
-		c, err := tarantool_adapter.NewCache[string, string](conn, l2.StringCodec(), "", opts...) // DefaultSpace
+		c, err := tarantool_adapter.NewCache[string, string](conn, suiteCodec, "", opts...) // DefaultSpace
 		require.NoError(t, err, "NewCache")
 		t.Cleanup(c.Close)
 		return c

@@ -137,6 +137,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	if len(keys) == 0 {
 		return found, nil
 	}
+	var errs []error
 	err := c.db.View(func(txn *badger.Txn) error {
 		for _, key := range keys {
 			item, err := txn.Get([]byte(c.keyFunc(key)))
@@ -152,16 +153,14 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 			}
 			value, err := c.codec.Unmarshal(data)
 			if err != nil {
-				return err
+				errs = append(errs, l2.KeyErr(key, err))
+				continue
 			}
 			found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
 		}
 		return nil
 	})
-	if err != nil {
-		return found[:0], err
-	}
-	return found, nil
+	return found, errors.Join(append(errs, err)...)
 }
 
 // BatchSet stores all items through a single WriteBatch (Badger's bulk-write path); ttl == 0 means "no expiration".
@@ -171,16 +170,18 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	}
 	wb := c.db.NewWriteBatch()
 	defer wb.Cancel()
+	var errs []error
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		if err := wb.SetEntry(newEntry(c.keyFunc(item.Key), data, ttl)); err != nil {
-			return err
+			return errors.Join(append(errs, err)...)
 		}
 	}
-	return wb.Flush()
+	return errors.Join(append(errs, wb.Flush())...)
 }
 
 // BatchDelete removes all keys through a single WriteBatch (Badger's bulk-write path).

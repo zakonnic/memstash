@@ -47,7 +47,7 @@ func TestDynamoAdapter(t *testing.T) {
 
 	runSuite(t, func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string] {
 		opts = append(opts, l2.WithKeyFunc(l2.PrefixedString(prefix)))
-		c, err := dynamo_adapter.NewCache[string, string](client, l2.StringCodec(), "memstash_cache", opts...)
+		c, err := dynamo_adapter.NewCache[string, string](client, suiteCodec, "memstash_cache", opts...)
 		require.NoError(t, err, "NewCache")
 		t.Cleanup(c.Close)
 		return c

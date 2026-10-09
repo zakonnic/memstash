@@ -9,6 +9,7 @@ package aerospike_adapter
 
 import (
 	"context"
+	"errors"
 	"math"
 	"time"
 
@@ -150,19 +151,21 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 	if aerr != nil {
 		return found, aerr
 	}
+	var errs []error
 	for i, rec := range records {
 		if rec == nil {
 			continue
 		}
 		value, ok, err := c.decode(rec)
 		if err != nil {
-			return found, err
+			errs = append(errs, l2.KeyErr(keys[i], err))
+			continue
 		}
 		if ok {
 			found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 		}
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
 // BatchSet stores all items in one BatchOperate round trip, falling back to per-item Sets on servers without batch
@@ -176,10 +179,12 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	policy := as.NewBatchWritePolicy()
 	policy.Expiration = expiration(ttl)
 	records := make([]as.BatchRecordIfc, 0, len(items))
+	var errs []error
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		asKey, aerr := c.newKey(item.Key)
 		if aerr != nil {
@@ -191,14 +196,14 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		if aerr.Matches(astypes.UNSUPPORTED_FEATURE) {
 			return l2.BatchSetSequential(ctx, c, items, ttl)
 		}
-		return aerr
+		return errors.Join(append(errs, aerr)...)
 	}
 	for _, record := range records {
 		if err := record.BatchRec().Err; err != nil {
-			return err
+			return errors.Join(append(errs, err)...)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // BatchDelete removes all keys in one BatchOperate round trip, falling back to per-key Deletes on servers without

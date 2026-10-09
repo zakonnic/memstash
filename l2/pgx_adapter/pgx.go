@@ -183,11 +183,12 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		return found, err
 	}
 	defer rows.Close()
+	var errs []error
 	for rows.Next() {
 		var storageKey string
 		var data []byte
 		if err := rows.Scan(&storageKey, &data); err != nil {
-			return found, err
+			return found, errors.Join(append(errs, err)...)
 		}
 		key, ok := byStorageKey[storageKey]
 		if !ok {
@@ -195,11 +196,12 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		}
 		value, err := c.codec.Unmarshal(data)
 		if err != nil {
-			return found, err
+			errs = append(errs, l2.KeyErr(key, err))
+			continue
 		}
 		found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
 	}
-	return found, rows.Err()
+	return found, errors.Join(append(errs, rows.Err())...)
 }
 
 // BatchSet stores all items in one "INSERT ... SELECT FROM unnest(...)" upsert with three array parameters;
@@ -212,10 +214,12 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	storageKeys := make([]string, 0, len(items))
 	values := make([][]byte, 0, len(items))
 	rowIndex := make(map[string]int, len(items))
+	var errs []error
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		storageKey := c.keyFunc(item.Key)
 		if i, seen := rowIndex[storageKey]; seen {
@@ -226,13 +230,16 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		storageKeys = append(storageKeys, storageKey)
 		values = append(values, data)
 	}
+	if len(storageKeys) == 0 {
+		return errors.Join(errs...)
+	}
 	deadlines := make([]int64, len(storageKeys))
 	deadline := expiresAt(ttl)
 	for i := range deadlines {
 		deadlines[i] = deadline
 	}
 	_, err := c.db.Exec(ctx, c.batchSetQuery, storageKeys, values, deadlines)
-	return err
+	return errors.Join(append(errs, err)...)
 }
 
 // BatchDelete removes all keys in one "WHERE cache_key = ANY($1)" statement, the keys passed as one text[] parameter.

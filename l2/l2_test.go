@@ -316,11 +316,13 @@ func TestBatchConcurrentFallbacks(t *testing.T) {
 			store.failSetKey = "k3"
 			err := l2.BatchSetConcurrent[string, string](ctx, store, items[:10], 0, workers)
 			require.ErrorIs(t, err, errBoom)
+			assert.ErrorContains(t, err, "key k3:")
 			assert.Len(t, store.m, 9, "workers=%d: the other nine were not written", workers)
 
 			store.failDeleteKey = "k5"
 			err = l2.BatchDeleteConcurrent[string, string](ctx, store, keys[:10], workers)
 			require.ErrorIs(t, err, errBoom)
+			assert.ErrorContains(t, err, "key k5:")
 			assert.Equal(t, map[string]string{"k5": "v5"}, store.m, "workers=%d: the other deletes did not run", workers)
 		}
 	})
@@ -332,6 +334,7 @@ func TestBatchConcurrentFallbacks(t *testing.T) {
 
 		found, err := l2.BatchGetConcurrent[string, string](ctx, store, []string{"a", "b", "c"}, 4)
 		require.ErrorIs(t, err, errBoom)
+		assert.ErrorContains(t, err, "key b:")
 		assert.LessOrEqual(t, len(found), 1, "only hits, never the failed key")
 	})
 }
@@ -364,6 +367,7 @@ func TestBatchSequentialFallbacks(t *testing.T) {
 
 		found, err := store.BatchGet(ctx, []string{"a", "b", "c"})
 		require.ErrorIs(t, err, errBoom)
+		assert.ErrorContains(t, err, "key b:")
 		assert.Equal(t, map[string]string{"a": "1"}, found.ToMap(),
 			"the result gathered before the error must still be returned")
 	})

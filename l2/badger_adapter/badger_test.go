@@ -3,6 +3,9 @@ package badger_adapter_test
 import (
 	"bytes"
 	"context"
+	"errors"
+	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,5 +107,54 @@ func TestGetReturnsItsOwnCopy(t *testing.T) {
 	}
 	if !bytes.Equal(first, want) {
 		t.Fatal("Get returned a different value")
+	}
+}
+
+var errRefused = errors.New("the test codec refuses this value")
+
+// pickyCodec is a string codec that cannot encode "unencodable" nor decode "poison".
+type pickyCodec struct{}
+
+func (pickyCodec) Marshal(value string) ([]byte, error) {
+	if value == "unencodable" {
+		return nil, errRefused
+	}
+	return []byte(value), nil
+}
+
+func (pickyCodec) Unmarshal(data []byte) (string, error) {
+	if string(data) == "poison" {
+		return "", errRefused
+	}
+	return string(data), nil
+}
+
+// A value the codec rejects fails its own key, not the batch around it, and the error names the key.
+func TestCodecErrorsStayWithTheirKey(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := badger_adapter.New[string, string](db, pickyCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	err = c.BatchSet(ctx, memstash.List[string, string]{
+		{Key: "a", Value: "1"}, {Key: "broken", Value: "unencodable"}, {Key: "c", Value: "3"},
+	}, 0)
+	if !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("BatchSet: %v", err)
+	}
+	if err := c.Set(ctx, "poisoned", "poison", 0); err != nil {
+		t.Fatal(err)
+	}
+	found, err := c.BatchGet(ctx, []string{"a", "poisoned", "c"})
+	if !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "poisoned") {
+		t.Fatalf("BatchGet: %v", err)
+	}
+	if want := map[string]string{"a": "1", "c": "3"}; !maps.Equal(found.ToMap(), want) {
+		t.Fatalf("BatchGet found %v, want %v", found.ToMap(), want)
 	}
 }

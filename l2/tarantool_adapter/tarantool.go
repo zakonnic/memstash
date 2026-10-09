@@ -17,6 +17,7 @@ package tarantool_adapter
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	tarantool "github.com/tarantool/go-tarantool/v2"
@@ -181,21 +182,23 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		req := tarantool.NewSelectRequest(c.space).Context(ctx).Index(primaryIndex).Limit(1).Key([]any{c.keyFunc(key)})
 		futures[i] = c.doer.Do(req)
 	}
+	var errs []error
 	for i, future := range futures {
 		var rows []row
 		if err := future.GetTyped(&rows); err != nil {
-			return found, err
+			return found, errors.Join(append(errs, err)...)
 		}
 		if len(rows) == 0 || expired(rows[0]) {
 			continue
 		}
 		value, err := c.codec.Unmarshal(rows[0].Value)
 		if err != nil {
-			return found, err
+			errs = append(errs, l2.KeyErr(keys[i], err))
+			continue
 		}
 		found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
 // BatchSet issues all replaces up front (async futures) and then resolves them; ttl == 0 means "no expiration".
@@ -207,20 +210,22 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	items = l2.LastValues(items)
 	deadline := expiresAt(ttl)
 	futures := make([]*tarantool.Future, 0, len(items))
+	var errs []error
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
 		if err != nil {
-			return err
+			errs = append(errs, l2.KeyErr(item.Key, err))
+			continue
 		}
 		req := tarantool.NewReplaceRequest(c.space).Context(ctx).Tuple([]any{c.keyFunc(item.Key), binary(data), deadline})
 		futures = append(futures, c.doer.Do(req))
 	}
 	for _, future := range futures {
 		if _, err := future.Get(); err != nil {
-			return err
+			return errors.Join(append(errs, err)...)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func expired(r row) bool {

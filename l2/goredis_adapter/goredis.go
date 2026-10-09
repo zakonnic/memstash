@@ -190,6 +190,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 		storageKeys[i] = c.keyFunc(key)
 		size += len(storageKeys[i]) + argWireOverhead
 	}
+	var errs []error
 	if c.orderedMget && size <= MultiKeyBudget {
 		replies, err := c.client.MGet(ctx, storageKeys...).Result()
 		if err != nil {
@@ -202,11 +203,12 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 			}
 			value, err := c.codec.Unmarshal(stringToBytes(data))
 			if err != nil {
-				return found, err
+				errs = append(errs, l2.KeyErr(keys[i], err))
+				continue
 			}
 			found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 		}
-		return found, nil
+		return found, errors.Join(errs...)
 	}
 	cmds := make([]*redis.StringCmd, length)
 	if _, err := c.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -223,15 +225,16 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 			if errors.Is(err, redis.Nil) {
 				continue
 			}
-			return found, err
+			return found, errors.Join(append(errs, err)...)
 		}
 		value, err := c.codec.Unmarshal(data)
 		if err != nil {
-			return found, err
+			errs = append(errs, l2.KeyErr(keys[i], err))
+			continue
 		}
 		found = append(found, memstash.KeyVal[K, V]{Key: keys[i], Value: value})
 	}
-	return found, nil
+	return found, errors.Join(errs...)
 }
 
 // BatchSet stores all items in one round trip; ttl == 0 means "no expiration". A no-TTL batch on a single-node
@@ -241,20 +244,25 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	if len(items) == 0 {
 		return nil
 	}
+	var errs []error
 	if c.singleNode && ttl <= 0 && len(items) <= MaxMsetItems {
 		pairs := make([]any, 0, 2*len(items))
 		size := 0
 		for _, item := range items {
 			data, err := c.codec.Marshal(item.Value)
 			if err != nil {
-				return err
+				errs = append(errs, l2.KeyErr(item.Key, err))
+				continue
 			}
 			storageKey := c.keyFunc(item.Key)
 			pairs = append(pairs, storageKey, data)
 			size += len(storageKey) + len(data) + 2*argWireOverhead
 		}
+		if len(pairs) == 0 {
+			return errors.Join(errs...)
+		}
 		if size <= MultiKeyBudget {
-			return c.client.MSet(ctx, pairs...).Err()
+			return errors.Join(append(errs, c.client.MSet(ctx, pairs...).Err())...)
 		}
 		_, err := c.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for i := 0; i < len(pairs); i += 2 {
@@ -262,17 +270,18 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 			}
 			return nil
 		})
-		return err
+		return errors.Join(append(errs, err)...)
 	}
-	_, err := c.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+	_, err := c.client.Pipelined(ctx, func(pipe redis.Pipeliner) error { // an empty pipeline sends nothing
 		for _, item := range items {
 			data, err := c.codec.Marshal(item.Value)
 			if err != nil {
-				return err
+				errs = append(errs, l2.KeyErr(item.Key, err))
+				continue
 			}
 			pipe.Set(ctx, c.keyFunc(item.Key), data, ttl)
 		}
 		return nil
 	})
-	return err
+	return errors.Join(append(errs, err)...)
 }

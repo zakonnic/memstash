@@ -23,7 +23,7 @@ func runSQLSuite(t *testing.T, driver, dsn, ddl, table string, dialect sql_adapt
 
 	runSuite(t, func(t *testing.T, prefix string, opts ...memstash.Option) *memstash.Cache[string, string] {
 		opts = append(opts, l2.WithKeyFunc(l2.PrefixedString(prefix)))
-		c, err := sql_adapter.NewCache[string, string](db, l2.StringCodec(), table, dialect, opts...)
+		c, err := sql_adapter.NewCache[string, string](db, suiteCodec, table, dialect, opts...)
 		require.NoError(t, err, "NewCache")
 		t.Cleanup(c.Close)
 		return c
