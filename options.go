@@ -199,7 +199,10 @@ func WithPreallocatedSize() Option {
 // average - 2.5 at 0.75, 5.5 at 0.9 - and a miss up to (1 + 1/(1-r)^2)/2 before the group filter cuts it short. The
 // table never holds anything but live items, so those are the walks the cache keeps, however long it churns.
 func WithPreallocationRatio(ratio float64) Option {
-	return Option{ApplyField: func(f *FieldOverrides) { f.preallocationRatio = &ratio }}
+	return Option{ApplyField: func(f *FieldOverrides) {
+		on := true
+		f.preallocateTable, f.preallocationRatio = &on, &ratio
+	}}
 }
 
 // WithGrowthThreshold sets Config.GrowthThreshold: the occupancy - live items over slots - a shard table grows at, in

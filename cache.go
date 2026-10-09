@@ -275,8 +275,17 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.GetBatchedWorkers < 0 {
 		return nil, ErrBadGetBatchedWorkers
 	}
+	switch {
+	case cfg.ShardsCount < 0:
+		return nil, ErrBadShardsCount
+	case cfg.GhostSize < 0:
+		return nil, ErrBadGhostSize
+	case cfg.WriteBackBufferSize < 0 || cfg.GetBatchedBufferSize < 0:
+		return nil, ErrBadBufferSize
+	}
 
 	numShards := cfg.shardCount()
+	growthNum := max(int(math.Round(cfg.growthThreshold()*(1<<growthShift))), 1) // 0 would grow on every insert
 	c := &Cache[K, V]{
 		costFunc:          cfg.CostFunc,
 		shards:            make([]shard[K, V], numShards),
@@ -284,7 +293,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		shardMask:         uint32(numShards - 1),
 		preallocated:      cfg.PreallocateMap,
 		nanKeys:           canBeNaN(reflect.TypeFor[K]()),
-		growthNum:         int(math.Round(cfg.growthThreshold() * (1 << growthShift))),
+		growthNum:         growthNum,
 		seed:              maphash.MakeSeed(),
 		epoch:             time.Now(),
 		ttl:               cfg.TTL,

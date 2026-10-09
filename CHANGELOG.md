@@ -298,6 +298,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   23-byte truncated file cost 1 GiB, two chunks per item twice that. Chunks past 64 KiB now grow as their bytes
   arrive. `ctx` now ends a load between items (before, it reached only the L2 writes), and an L2 write error comes
   back wrapped; the doc names every reason a load stops early, the items before it staying in the cache.
+- **Three options did not do what their docs said.** `WithPreallocationRatio(0)` was documented to preallocate at
+  the default ratio but did not preallocate at all; a `GrowthThreshold` below 1/8192 rounded to zero and grew the
+  table on every insert, towards gigabytes; and a negative `ShardsCount`, `GhostSize` or buffer size quietly meant
+  the default while negative worker counts were rejected. The ratio option now preallocates by itself, the growth
+  line never rounds below one item in 4096 slots, and negative values are rejected (`ErrBadShardsCount`,
+  `ErrBadGhostSize`, `ErrBadBufferSize`). `RefreshTTLOnGet` without a TTL is documented as having nothing to extend.
 
 ## [0.9.8] - 2026-08-13
 

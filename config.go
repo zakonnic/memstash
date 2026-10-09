@@ -32,6 +32,9 @@ var (
 	ErrNilLoader             = fmt.Errorf("%w: loader must not be nil", Error)
 	ErrBadWorkers            = fmt.Errorf("%w: WriteBackWorkers must not be negative", Error)
 	ErrBadGetBatchedWorkers  = fmt.Errorf("%w: GetBatchedWorkers must not be negative", Error)
+	ErrBadShardsCount        = fmt.Errorf("%w: ShardsCount must not be negative", Error)
+	ErrBadGhostSize          = fmt.Errorf("%w: GhostSize must not be negative", Error)
+	ErrBadBufferSize         = fmt.Errorf("%w: a buffer size must not be negative", Error)
 	ErrBadTTL                = fmt.Errorf("%w: TTL must not be negative", Error)
 	ErrTTLDisabled           = fmt.Errorf("%w: TTL must be enabled - see WithTTL option", Error)
 	ErrPanic                 = fmt.Errorf("%w: panic recovered", Error)
@@ -66,7 +69,8 @@ type Config[K comparable, V any] struct {
 	TTL time.Duration
 
 	// RefreshTTLOnGet makes every first-level hit extend the item's lifetime by a full TTL (sliding expiration).
-	// The extension always uses the cache's global TTL, not the one provided by SetWithTTL.
+	// The extension always uses the cache's global TTL, not the one provided by SetWithTTL; without a TTL there is
+	// nothing to extend.
 	RefreshTTLOnGet bool
 
 	// Policy is the eviction policy. Defaults to PolicyS3FIFO.
