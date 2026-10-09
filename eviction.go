@@ -95,7 +95,7 @@ func ItemExpired(metaWord uint64, nowOff uint32) bool { return itemstore.Expired
 // SIEVE) implement and a custom policy plugged in through WithCustomEvictionPolicy must satisfy. Every method is
 // called strictly under the owning shard's mutex, so implementations need no synchronization of their own - but
 // item reference counters are set concurrently by lock-free readers, so meta words must be read through
-// Item.Metadata.
+// Item.Metadata. A method must not panic: the mutex stays locked, and the shard with it.
 type EvictionPolicy[K comparable, V any] interface {
 	// Add registers a newly inserted item, already enqueued at the back of queue 0.
 	Add(node QNode)

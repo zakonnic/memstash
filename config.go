@@ -57,7 +57,8 @@ type Config[K comparable, V any] struct {
 	MemoryBudget int64
 
 	// CostFunc is the item weight function. It must be deterministic (the weight is recomputed during eviction) and the
-	// values must be immutable. A result of 0 is treated as 1. nil means weight 1 for every item.
+	// values must be immutable. A result of 0 is treated as 1. nil means weight 1 for every item. It must not panic:
+	// it also runs under the shard mutex, which a panic leaves locked.
 	CostFunc func(key K, value V) uint32
 
 	// TTL is the lifetime of first-level items with one-second resolution. 0 means no TTL. The same TTL is passed to L2Cache
