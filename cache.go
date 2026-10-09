@@ -401,8 +401,9 @@ func (c *Cache[K, V]) writeQueueOf(key K) chan l2Write[K, V] {
 	return c.writeQueues[(c.keyHash(key)>>32)%uint64(len(c.writeQueues))]
 }
 
-// Get returns the value from memory, or - on a miss - from L2 (if configured), promoting the found value into memory. A
-// memory hit is a lock-free, allocation-free path.
+// Get returns the value from memory or, on a miss, from L2 if one is configured, and promotes a value found there into
+// memory. A memory hit takes no lock and allocates nothing. A promoted value gets the cache's full TTL, whatever L2 had
+// left, so memory may serve it up to a TTL after L2 dropped it.
 func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	if value, ok := c.getMemory(key); ok {
 		c.stats.addMemHits(1)
@@ -588,9 +589,10 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 	return nil
 }
 
-// SetWithTTL sets a per-entry lifetime. The cache must have been built with a TTL option; ttl is rounded up to the
-// scale's unit. A non-positive ttl is an error.
-// WithRefreshTTLOnGet extends by the cache's TTL: this ttl lasts only until the first read that refreshes it.
+// SetWithTTL is Set with a lifetime of its own for this entry. The cache must have a TTL (ErrTTLDisabled otherwise),
+// and ttl must be positive (ErrBadTTL); it is rounded up to the expiry unit. A write-back batch carries one TTL, so
+// writes with different TTLs reach L2 in separate batches. With WithRefreshTTLOnGet, the first read that refreshes
+// the entry gives it the cache's TTL instead.
 func (c *Cache[K, V]) SetWithTTL(ctx context.Context, key K, value V, ttl time.Duration) error {
 	if c.ttlOff == 0 {
 		return ErrTTLDisabled

@@ -81,7 +81,8 @@ const (
 	WriteDisabled
 )
 
-// WriteBackBatching defines how a write-back worker drains its queue into L2.
+// WriteBackBatching defines how a write-back worker drains its queue into L2. A batch carries one TTL: writes with
+// different TTLs (SetWithTTL, LoadFrom with LoadWithTTL) break a batch where their TTL changes.
 type WriteBackBatching uint8
 
 const (

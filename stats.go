@@ -128,11 +128,12 @@ func (s Stats) Hits() int64 { return s.memHits + s.l2Hits }
 // Misses is the number of read keys found in neither level: MemoryMisses() + L2Misses().
 func (s Stats) Misses() int64 { return s.memMisses + s.l2Misses }
 
-// Sets is the number of values written into the cache: Set, BatchSet and stored loader results. L2-to-memory
-// promotions are not counted - the value was already in the cache.
+// Sets is the number of values written into the cache, per key: Set, SetWithTTL, BatchSet and stored loader results,
+// whether or not memory kept them (see Rejected) or an L2 write failed (see OnL2Error). L2-to-memory promotions are
+// not counted - the value was already in the cache.
 func (s Stats) Sets() int64 { return s.sets }
 
-// Deletes is the number of keys removed by Delete and BatchDelete.
+// Deletes is the number of keys passed to Delete and BatchDelete, whether or not the cache held them.
 func (s Stats) Deletes() int64 { return s.deletes }
 
 // TableGrowths is the number of shard item tables rebuilt into a larger table. Always 0 with WithPreallocatedSize:

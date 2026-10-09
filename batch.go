@@ -204,9 +204,9 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 	}
 }
 
-// BatchGet returns the values for keys found in memory or in L2: the memory hits are collected first, the misses go
-// to L2 in a single BatchGet and are promoted into memory. A missing key is simply absent from the result. An L2 error
-// comes with everything that was read.
+// BatchGet returns the pairs found in memory or in L2. The memory misses go to L2 in one BatchGet and are promoted
+// into memory, as in Get. A missing key is absent from the result; a repeated key yields a repeated pair and reaches
+// L2 as often as it appears. An L2 error comes with everything that was read.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error) {
 	if c.l2Cache == nil {
 		found, _, hits := c.batchGetMemory(keys, nil, false)
@@ -298,7 +298,7 @@ func (c *Cache[K, V]) enqueueL2(write l2Write[K, V]) {
 // BatchDelete removes the keys from memory and forwards the deletions to L2 according to WritePolicy:
 // WriteThrough issues one synchronous BatchDelete, WriteBack enqueues the deletes for the background worker,
 // which always coalesces them into BatchDelete batches regardless of WriteBackBatching. An error can come only
-// from the synchronous batch delete.
+// from the synchronous batch delete. Keys go to L2 as given, repeats included.
 func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	if len(keys) == 0 {
 		return nil
