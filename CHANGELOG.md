@@ -293,6 +293,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   or a panic under the shard mutex that leaves the shard locked for good), and an empty slot was killed as if it held
   an item, so the shard undercounted its items and held more than its capacity. An index that names no live item now
   ends the eviction round, as "nothing to evict" does.
+- **A corrupt snapshot could make `LoadFrom` allocate a gigabyte, and a long load could not be stopped.** A chunk
+  length is bounded at 1 GiB, and `LoadFrom` allocated whatever the length claimed before reading a byte: a
+  23-byte truncated file cost 1 GiB, two chunks per item twice that. Chunks past 64 KiB now grow as their bytes
+  arrive. `ctx` now ends a load between items (before, it reached only the L2 writes), and an L2 write error comes
+  back wrapped; the doc names every reason a load stops early, the items before it staying in the cache.
 
 ## [0.9.8] - 2026-08-13
 

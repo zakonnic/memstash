@@ -2,8 +2,10 @@ package memstash
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -41,6 +43,8 @@ const (
 	snapshotHeaderSize = len(snapshotMagic) + 1 + 8
 	// maxSnapshotChunk bounds one encoded key or value so a corrupt length cannot turn into an arbitrary allocation.
 	maxSnapshotChunk = 1 << 30
+	// snapshotChunkStep is the most readChunk allocates before the bytes it reads arrive.
+	snapshotChunkStep = 64 << 10
 )
 
 // SaveTo writes the first level to w: every live item as a key/value pair, encoded with the given codecs, plus how
@@ -106,10 +110,10 @@ func (c *Cache[K, V]) SaveTo(w io.Writer, keys Codec[K], values Codec[V]) error 
 // LoadFrom reads a snapshot written by SaveTo into the first level. Items are stored the way Set stores them, so the
 // cost function, the capacity and the eviction policy all apply: a snapshot larger than the cache loads only as much
 // as fits. Lifetimes come out fresh unless LoadWithTTL asks for the originals; L2 is left alone unless LoadToL2 is
-// given, and only then is ctx used.
+// given. ctx ends the load early, and goes to the L2 writes.
 //
-// Existing items are kept; a key present in both is overwritten by the snapshot. On a truncated or corrupt stream the
-// items read so far stay in the cache and the error is returned.
+// Existing items are kept; a key present in both is overwritten by the snapshot. A truncated or corrupt stream, an
+// ended ctx or an L2 write error stops the load: the items read so far stay in the cache and the error is returned.
 func (c *Cache[K, V]) LoadFrom(
 	ctx context.Context, r io.Reader, keys Codec[K], values Codec[V], opts ...LoadOption,
 ) error {
@@ -139,6 +143,9 @@ func (c *Cache[K, V]) LoadFrom(
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		keyLen, err := binary.ReadUvarint(buffered)
 		if err != nil {
 			return fmt.Errorf("%w: reading a key length: %w", ErrBadSnapshot, err)
@@ -186,7 +193,7 @@ func (c *Cache[K, V]) LoadFrom(
 		c.setMemory(key, value, expireOff, write, 0)
 		if toL2 {
 			if err := c.writeLoadedToL2(ctx, key, value, ttl); err != nil {
-				return err
+				return fmt.Errorf("memstash: writing a loaded item to L2: %w", err)
 			}
 		}
 	}
@@ -231,9 +238,19 @@ func readChunk(r *bufio.Reader, size uint64) ([]byte, error) {
 	if size > maxSnapshotChunk {
 		return nil, fmt.Errorf("%w: chunk of %d bytes", ErrBadSnapshot, size)
 	}
-	chunk := make([]byte, size)
-	if _, err := io.ReadFull(r, chunk); err != nil {
+	if size <= snapshotChunkStep {
+		chunk := make([]byte, size)
+		if _, err := io.ReadFull(r, chunk); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrBadSnapshot, err)
+		}
+		return chunk, nil
+	}
+	var chunk bytes.Buffer // grows as the bytes arrive: a corrupt length costs no more than the stream holds
+	if _, err := io.CopyN(&chunk, r, int64(size)); err != nil {
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
 		return nil, fmt.Errorf("%w: %w", ErrBadSnapshot, err)
 	}
-	return chunk, nil
+	return chunk.Bytes(), nil
 }

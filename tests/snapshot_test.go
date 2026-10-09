@@ -3,9 +3,12 @@ package tests
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"maps"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -377,4 +380,64 @@ func TestSnapshotConflictingLoadOptions(t *testing.T) {
 	err := c.LoadFrom(ctx, &buf, l2.StringCodec(), l2.StringCodec(),
 		memstash.LoadWithTTL, memstash.LoadWithCurrentTTL)
 	assert.ErrorIs(t, err, memstash.ErrConflictingLoadOptions)
+}
+
+// A length the stream does not back costs no more memory than the bytes that are there: a truncated or hostile file
+// must not allocate what it claims.
+func TestSnapshotHostileLengthAllocatesLittle(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	require.NoError(t, newCache(t, memstash.Config[string, string]{MemoryCapacity: 10}).
+		SaveTo(&buf, l2.StringCodec(), l2.StringCodec()))
+	stream := append(buf.Bytes()[:buf.Len()-1], binary.AppendUvarint(nil, 1<<30)...) // drop the end marker
+	stream = append(stream, 'x')
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	err := newCache(t, memstash.Config[string, string]{MemoryCapacity: 10}).
+		LoadFrom(ctx, bytes.NewReader(stream), l2.StringCodec(), l2.StringCodec())
+	runtime.ReadMemStats(&after)
+	require.ErrorIs(t, err, memstash.ErrBadSnapshot)
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(16<<20), "allocated for a chunk the stream never held")
+}
+
+func TestSnapshotLargeValueRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	big := strings.Repeat("v", 300<<10) // past the step readChunk allocates up front
+	src := newCache(t, memstash.Config[string, string]{MemoryCapacity: 10})
+	require.NoError(t, src.Set(ctx, "k", big))
+	var buf bytes.Buffer
+	require.NoError(t, src.SaveTo(&buf, l2.StringCodec(), l2.StringCodec()))
+
+	dst := newCache(t, memstash.Config[string, string]{MemoryCapacity: 10})
+	require.NoError(t, dst.LoadFrom(ctx, &buf, l2.StringCodec(), l2.StringCodec()))
+	v, ok := dst.GetFromMemory("k")
+	require.True(t, ok)
+	assert.Equal(t, big, v)
+}
+
+func TestSnapshotLoadStopsOnCtxAndL2Errors(t *testing.T) {
+	src := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100})
+	for i := range 4 {
+		require.NoError(t, src.Set(context.Background(), fmt.Sprintf("k%d", i), "v"))
+	}
+	var buf bytes.Buffer
+	require.NoError(t, src.SaveTo(&buf, l2.StringCodec(), l2.StringCodec()))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dst := newCache(t, memstash.Config[string, string]{MemoryCapacity: 100})
+	require.ErrorIs(t, dst.LoadFrom(ctx, bytes.NewReader(buf.Bytes()), l2.StringCodec(), l2.StringCodec()),
+		context.Canceled)
+	assert.Zero(t, dst.Len())
+
+	dst = newCache(t, memstash.Config[string, string]{
+		MemoryCapacity: 100, WritePolicy: memstash.WriteThrough,
+		L2Cache: &failingL2{l2Stub: newL2Stub(), err: errWriteFailed},
+	})
+	err := dst.LoadFrom(context.Background(), bytes.NewReader(buf.Bytes()), l2.StringCodec(), l2.StringCodec(),
+		memstash.LoadToL2)
+	require.ErrorIs(t, err, errWriteFailed)
+	assert.ErrorContains(t, err, "writing a loaded item to L2")
+	assert.Equal(t, 1, dst.Len(), "the item whose L2 write failed stays in memory, the rest were not read")
 }
