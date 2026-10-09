@@ -288,6 +288,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   item the adapter returned as an L2 hit, so a duplicate or unasked item made `Gets()` exceed the keys read. The
   `L2Cache.BatchGet` contract now says so explicitly - only keys asked for, each at most once - and the counters no
   longer trust the answer's length: `BatchGetOrLoad` counts by key, `BatchGet` never more than the keys it asked for.
+- **A custom eviction policy that named a bad victim could crash the process or corrupt its shard.** The cache
+  trusted the index `Evict` returned: one past the table was dereferenced unchecked (a fault that kills the process,
+  or a panic under the shard mutex that leaves the shard locked for good), and an empty slot was killed as if it held
+  an item, so the shard undercounted its items and held more than its capacity. An index that names no live item now
+  ends the eviction round, as "nothing to evict" does.
 
 ## [0.9.8] - 2026-08-13
 

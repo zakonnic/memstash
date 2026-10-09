@@ -797,13 +797,17 @@ func (c *Cache[K, V]) evictShard(sh *shard[K, V], deletions *[]deletion[K, V]) {
 	sh.evicted = true
 	for sh.weight.Load() > sh.cap {
 		victimIdx, ok := sh.policy.Evict(nowOff)
-		if !ok {
+		if !ok || victimIdx >= uint32(storage.Len()) {
 			return
 		}
 		item := storage.At(victimIdx)
+		metaWord := item.Metadata()
+		if empty(metaWord) || metaWord&itemstore.Dead != 0 {
+			return // a policy's bug: killing a free slot would corrupt the shard's counts
+		}
 		// The policy hands over expired items too; the meta word says which of the two it was.
 		cause := CauseEviction
-		if expired(item.Metadata(), nowOff) {
+		if expired(metaWord, nowOff) {
 			cause = CauseExpiration
 		}
 		c.killAt(sh, victimIdx, item, cause, deletions)

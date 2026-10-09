@@ -36,7 +36,7 @@ type Item[K comparable, V any] = itemstore.Item[K, V]
 // picks victims. An index is good until the policy method returns: a deletion compacts its run and moves items. Call
 // under the shard mutex only, which is where every policy method already runs.
 type Items[K comparable, V any] interface {
-	// At resolves a slot index into its item.
+	// At resolves a slot index into its item. idx must be one the Items handed out: nothing checks it.
 	At(idx uint32) *Item[K, V]
 	// Cost is the item's weight as the cache accounts it.
 	Cost(idx uint32) uint32
@@ -107,6 +107,7 @@ type EvictionPolicy[K comparable, V any] interface {
 	// Evict picks the next victim and returns its index: the policy's choice, or an expired item (ItemExpired). The
 	// cache removes and kills it - the policy must not call Item.Kill. (0, false) means there is nothing to evict: the
 	// shard stays over capacity, and once its table cannot grow, a new key is not stored while one free slot is left.
+	// An index that names no live item is taken the same way.
 	Evict(nowOff uint32) (uint32, bool)
 	// Bytes returns the footprint of the policy's own bookkeeping.
 	Bytes() int64
