@@ -219,14 +219,52 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error
 	if len(missing) == 0 {
 		return found, nil
 	}
+	var buf [64]uint32
+	marks := buf[:0]
+	for _, key := range missing {
+		marks = append(marks, c.deleteMark(key))
+	}
 	fromL2, err := c.l2Cache.BatchGet(ctx, missing)
 	c.stats.addL2Hits(int64(len(fromL2)))
 	c.stats.addL2Misses(int64(max(len(missing)-len(fromL2), 0)))
-	for _, item := range fromL2 {
-		c.setMemory(item.Key, item.Value, c.expireOffset(), true)
+	var index map[K]int
+	for i, item := range fromL2 {
+		var mark uint32
+		if at := keyAt(missing, item.Key, i, &index); at >= 0 {
+			mark = marks[at]
+		} else {
+			mark = c.deleteMark(item.Key) // taken after the read: the adapter added this key unasked
+		}
+		c.setMemory(item.Key, item.Value, c.expireOffset(), fill, mark)
 		found = append(found, item)
 	}
 	return found, err
+}
+
+// keyAt finds key in keys, trying position hint first: adapters and loaders answer in order unless they skip, add or
+// reorder keys. index is built on the first miss past ownedScanMax keys. It returns -1 when key is not there.
+func keyAt[K comparable](keys []K, key K, hint int, index *map[K]int) int {
+	if hint < len(keys) && keys[hint] == key {
+		return hint
+	}
+	if *index == nil && len(keys) > ownedScanMax {
+		*index = make(map[K]int, len(keys))
+		for i, k := range keys {
+			(*index)[k] = i
+		}
+	}
+	if *index != nil {
+		if i, ok := (*index)[key]; ok {
+			return i
+		}
+		return -1
+	}
+	for i, k := range keys {
+		if k == key {
+			return i
+		}
+	}
+	return -1
 }
 
 // BatchSet stores all items in memory and forwards them to L2 according to WritePolicy: WriteThrough issues a single
@@ -237,7 +275,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items List[K, V]) error {
 		return nil
 	}
 	for _, item := range items {
-		c.setMemory(item.Key, item.Value, c.expireOffset(), false)
+		c.setMemory(item.Key, item.Value, c.expireOffset(), write, 0)
 	}
 	c.stats.addSets(int64(len(items)))
 	switch c.l2WritePolicy {
@@ -303,9 +341,14 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	if len(keys) == 0 {
 		return nil
 	}
+	var err error
+	if c.l2WritePolicy == WriteThrough {
+		err = c.l2Cache.BatchDelete(ctx, keys) // first, as in Delete
+	}
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
 	for _, key := range keys {
 		sh, keyHash := c.shardAndHash(key)
+		sh.deletes[deleteStripe(keyHash)].Add(1)
 		if !c.livePresent(sh, keyHash, key) {
 			continue
 		}
@@ -317,15 +360,12 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 		c.callOnDeletion(deletions)
 	}
 	c.stats.addDeletes(int64(len(keys)))
-	switch c.l2WritePolicy {
-	case WriteThrough:
-		return c.l2Cache.BatchDelete(ctx, keys)
-	case WriteBack:
+	if c.l2WritePolicy == WriteBack {
 		for _, key := range keys {
 			c.enqueueDelete(key)
 		}
 	}
-	return nil
+	return err
 }
 
 // BatchGetOrLoad returns values for keys, resolving misses with one L2 BatchGet and at most one load call.
@@ -401,7 +441,7 @@ func (c *Cache[K, V]) loadOwned(ctx context.Context, load BatchLoaderFunc[K, V],
 	var err error
 	if len(missing) > 0 {
 		var loaded List[K, V]
-		loaded, err = c.batchLoad(ctx, missing, load)
+		loaded, err = c.batchLoad(ctx, missing, load, fl.calls)
 		resolved = append(resolved, loaded...)
 	}
 	if errors.Is(err, ErrKeyNotFound) {
@@ -416,10 +456,10 @@ const batchResolvedSlots = 256
 // batchLoad resolves the owned keys: first from L2 in one BatchGet, the rest with one loader call; freshly loaded
 // values are stored back according to the write policy (mirroring doLoad). The returned List may be partial when
 // err != nil.
-func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderFunc[K, V]) (List[K, V], error) {
+func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderFunc[K, V], calls []flightCall[K, V]) (List[K, V], error) {
 	if c.l2Cache == nil {
 		c.stats.addMemMisses(int64(len(keys)))
-		return c.runLoader(ctx, keys, load)
+		return c.runLoader(ctx, keys, load, calls)
 	}
 	fromL2, err := c.l2Cache.BatchGet(ctx, keys)
 	if err != nil {
@@ -432,8 +472,11 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 	result := make(List[K, V], 0, len(keys))
 	var buf [batchResolvedSlots]itemstore.SetSlot[K] // trick to stay on stack
 	keysFromL2 := itemstore.NewSetFrom(buf[:])
-	for _, item := range fromL2 {
-		c.setMemory(item.Key, item.Value, c.expireOffset(), true)
+	var index map[K]int
+	for i, item := range fromL2 {
+		if at := ownedAt(calls, item.Key, i, &index); at >= 0 {
+			c.setMemory(item.Key, item.Value, c.expireOffset(), fill, calls[at].mark)
+		}
 		result = append(result, item)
 		keysFromL2.Add(item.Key)
 	}
@@ -453,16 +496,16 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 		return result, nil
 	}
 	c.stats.addL2Misses(int64(len(toLoad)))
-	loaded, loadErr := c.runLoader(ctx, toLoad, load)
+	loaded, loadErr := c.runLoader(ctx, toLoad, load, calls)
 	return append(result, loaded...), loadErr
 }
 
 // runLoader loads the keys and caches whatever came back, handing the loader's own list straight to the caller. A
 // partial answer is kept even when the loader also errored - those keys did resolve.
-func (c *Cache[K, V]) runLoader(ctx context.Context, keys []K, load BatchLoaderFunc[K, V]) (List[K, V], error) {
+func (c *Cache[K, V]) runLoader(ctx context.Context, keys []K, load BatchLoaderFunc[K, V], calls []flightCall[K, V]) (List[K, V], error) {
 	loaded, err := load(ctx, keys)
 	if len(loaded) > 0 { // keeps a loader that answered with nothing off the store path entirely
-		c.storeLoadedBatch(ctx, loaded, true)
+		c.storeLoadedBatch(ctx, loaded, fill, calls)
 	}
 	return loaded, err
 }

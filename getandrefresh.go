@@ -26,9 +26,11 @@ func (c *Cache[K, V]) GetAndRefresh(ctx context.Context, key K, load LoaderFunc[
 	// ErrLoaderPanic stands from the moment the flight is visible:
 	// a loader that panics or Goexits must not leave waiters stuck.
 	call := &flightCall[K, V]{err: ErrLoaderPanic}
-	if _, running := c.claim(c.keyHash(key), key, call); running {
+	keyHash := c.keyHash(key)
+	if _, running := c.claim(keyHash, key, call); running {
 		return value, ok
 	}
+	call.mark = c.markAt(keyHash)
 	if !c.refresh(ctx, func(ctx context.Context) { c.loadInto(ctx, key, load, call) }) {
 		call.err, call.canceled = context.Canceled, true // Close came in between: the flight ends unloaded
 		c.release(call)
@@ -92,7 +94,7 @@ func (c *Cache[K, V]) loadInto(ctx context.Context, key K, load LoaderFunc[K, V]
 		call.err, call.canceled = err, ctx.Err() != nil
 		return
 	}
-	c.storeLoaded(ctx, key, value, false)
+	c.storeLoaded(ctx, key, value, refresh, call.mark)
 	call.val, call.ok, call.err = value, true, nil
 }
 
@@ -108,16 +110,24 @@ func (c *Cache[K, V]) loadBatchInto(ctx context.Context, keys []K, load BatchLoa
 	defer c.recoverLoaderBatch(fl.calls)
 
 	loaded, err := load(ctx, fl.owned)
-	c.storeLoadedBatch(ctx, loaded, false) // a partial result is still worth caching
+	c.storeLoadedBatch(ctx, loaded, refresh, fl.calls) // a partial result is still worth caching
 	assignLoaded(ctx, fl.calls, loaded, err, nil)
 }
 
-// storeLoadedBatch is storeLoaded for a batch: with fill, L2 gets only the values memory took.
-func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V], fill bool) {
+// storeLoadedBatch is storeLoaded for a batch, each key under the mark its flight took; L2 gets only the values memory
+// took. A key the loader added unasked is a fill marked now.
+func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V], mode fillMode, calls []flightCall[K, V]) {
 	expireOff := c.expireOffset()
 	var kept List[K, V] // stays nil while memory takes every value: then loaded itself goes to L2
+	var index map[K]int
 	for i, item := range loaded {
-		stored := c.setMemory(item.Key, item.Value, expireOff, fill)
+		itemMode, mark := fill, uint32(0)
+		if at := ownedAt(calls, item.Key, i, &index); at >= 0 {
+			itemMode, mark = mode, calls[at].mark
+		} else {
+			mark = c.deleteMark(item.Key)
+		}
+		stored := c.setMemory(item.Key, item.Value, expireOff, itemMode, mark)
 		switch {
 		case !stored && kept == nil:
 			kept = append(make(List[K, V], 0, len(loaded)-1), loaded[:i]...)

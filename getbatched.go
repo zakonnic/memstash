@@ -54,7 +54,8 @@ type getWorkerPool[K comparable, V any] struct {
 
 // getBatch is a single batch. Slots waiting for keys[i] form a chain starting at head[i] and running through next.
 type getBatch[K comparable, V any] struct {
-	keys  []K // distinct keys
+	keys  []K      // distinct keys
+	marks []uint32 // each key's delete mark as the worker took it
 	head  []int32
 	next  []int32
 	slots []*asyncSlot[V]
@@ -232,7 +233,7 @@ func (c *Cache[K, V]) collect(b *getBatch[K, V], req asyncGet[K, V]) {
 		c.batchedGets.settle(req.slot, value, true, nil)
 		return
 	}
-	b.add(req)
+	b.add(req, c.deleteMark(req.key))
 }
 
 // resolveBatch asks L2 for the batch and hands every answer to the slots waiting for it.
@@ -281,7 +282,7 @@ func (c *Cache[K, V]) recoverBatch(b *getBatch[K, V], pending **asyncSlot[V]) {
 // settleHit settles a key L2 answered for. The value lands in memory first, so a caller still queued behind this
 // batch finds it there instead of asking again.
 func (c *Cache[K, V]) settleHit(b *getBatch[K, V], at int32, value V) int64 {
-	c.setMemory(b.keys[at], value, c.expireOffset(), true)
+	c.setMemory(b.keys[at], value, c.expireOffset(), fill, b.marks[at])
 	return c.settleKey(b, at, value, true, nil)
 }
 
@@ -312,7 +313,7 @@ func (c *Cache[K, V]) settleRest(b *getBatch[K, V], err error) int64 {
 
 // add appends the request, deduplicating keys: several callers waiting for the same key cost one entry in the L2
 // request and one more link in its chain.
-func (b *getBatch[K, V]) add(req asyncGet[K, V]) {
+func (b *getBatch[K, V]) add(req asyncGet[K, V], mark uint32) {
 	at, known := b.lookup(req.key)
 	slot := int32(len(b.slots))
 	b.slots = append(b.slots, req.slot)
@@ -323,6 +324,7 @@ func (b *getBatch[K, V]) add(req asyncGet[K, V]) {
 	}
 	b.next = append(b.next, -1)
 	b.keys = append(b.keys, req.key)
+	b.marks = append(b.marks, mark)
 	b.head = append(b.head, slot)
 	b.indexKey(req.key)
 }
@@ -361,5 +363,5 @@ func (b *getBatch[K, V]) reset() {
 	clear(b.keys)
 	clear(b.slots)
 	clear(b.index)
-	b.keys, b.slots, b.head, b.next = b.keys[:0], b.slots[:0], b.head[:0], b.next[:0]
+	b.keys, b.marks, b.slots, b.head, b.next = b.keys[:0], b.marks[:0], b.slots[:0], b.head[:0], b.next[:0]
 }

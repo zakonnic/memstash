@@ -97,9 +97,38 @@ type shard[K comparable, V any] struct {
 	// evicted is set once the policy has picked a victim. From then on its queues carry more than insertion order,
 	// and growth must keep the queue order. Guarded by mu.
 	evicted bool
+	// deletes counts each stripe's Deletes. A value read from L2 or a loader is stored only if its stripe's count
+	// still equals the mark taken before the read; otherwise it may be the value deleted.
+	deletes [deleteStripes]atomic.Uint32
 
-	_ [51]byte
+	_ [16]byte
 }
+
+// deleteStripes splits a shard's Delete count by hash bits 7..9, which the shard, the tag and the home do not use:
+// a Delete refuses only the fills of its own eighth of the shard.
+const deleteStripes = 8
+
+func deleteStripe(keyHash uint64) uint64 { return keyHash >> 7 & (deleteStripes - 1) }
+
+// markAt is the Delete count of keyHash's stripe as it stands.
+func (c *Cache[K, V]) markAt(keyHash uint64) uint32 {
+	return c.shards[uint32(keyHash)&c.shardMask].deletes[deleteStripe(keyHash)].Load()
+}
+
+func (c *Cache[K, V]) deleteMark(key K) uint32 { return c.markAt(c.keyHash(key)) }
+
+// fillMode is what setMemory does with a value that was read rather than written, given its key's mark.
+type fillMode uint8
+
+const (
+	write fillMode = iota // Set: replaces whatever the key holds
+	// fill answers a miss from L2 or a loader: it keeps a live value, which was written after the miss, and gives way
+	// to a Delete since the mark.
+	fill
+	// refresh is GetAndRefresh's reload: it replaces the value the key holds, which is usually live, and gives way to
+	// a Delete since the mark.
+	refresh
+)
 
 // Cache is a two-level cache.
 type Cache[K comparable, V any] struct {
@@ -419,6 +448,7 @@ func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 
 // getFromL2 is the second-level half of Get: the read itself, its counters and the promotion into memory.
 func (c *Cache[K, V]) getFromL2(ctx context.Context, key K) (V, bool, error) {
+	mark := c.deleteMark(key)
 	value, ok, err := c.l2Cache.Get(ctx, key)
 	if err != nil || !ok {
 		c.stats.addL2Misses(1)
@@ -426,7 +456,7 @@ func (c *Cache[K, V]) getFromL2(ctx context.Context, key K) (V, bool, error) {
 		return zero, false, err
 	}
 	c.stats.addL2Hits(1)
-	c.setMemory(key, value, c.expireOffset(), true)
+	c.setMemory(key, value, c.expireOffset(), fill, mark)
 	return value, true, nil
 }
 
@@ -577,7 +607,7 @@ func (c *Cache[K, V]) touchHit(item *itemstore.Item[K, V], metaWord uint64, nowO
 // Set stores the value in memory and in L2 according to WritePolicy. An error can come only from a synchronous L2
 // write. A key unequal to itself (a NaN, or a struct holding one) never enters memory: no read could find it.
 func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
-	c.setMemory(key, value, c.expireOffset(), false)
+	c.setMemory(key, value, c.expireOffset(), write, 0)
 	c.stats.addSets(1)
 	if c.l2WritePolicy == WriteDisabled {
 		return nil
@@ -601,7 +631,7 @@ func (c *Cache[K, V]) SetWithTTL(ctx context.Context, key K, value V, ttl time.D
 		return ErrBadTTL
 	}
 	expireOff, effectiveTTL := c.expireOffsetFor(ttl, itemstore.ExpireMax-1)
-	c.setMemory(key, value, expireOff, false)
+	c.setMemory(key, value, expireOff, write, 0)
 	c.stats.addSets(1)
 	if c.l2WritePolicy == WriteDisabled {
 		return nil
@@ -624,29 +654,32 @@ func (c *Cache[K, V]) expireOffsetFor(ttl time.Duration, maxUnits uint32) (uint3
 	return expireOff, time.Duration(units) * c.expireUnit
 }
 
-// setMemory puts the value into the first level with the given expiration offset (0 = no TTL; callers that just
-// want the configured TTL pass expireOffset()). An overwrite stores into the item in place (the item and its slot
-// stay put); a new key takes the first empty slot on its walk - deletions compact their runs, so an empty slot is
-// never followed by a key homed at or before it, and the walk ends there with certainty. Neither path allocates.
+// setMemory stores the value in the first level with expiration offset expireOff (0: no TTL). An overwrite writes the
+// item in place; a new key takes the first empty slot on its walk. Neither allocates.
 //
-// fill is for a value read from L2 or a loader rather than written: it keeps a live value it finds, which was written
-// after the miss the fill answers. false means the fill lost to such a value.
-func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) bool {
+// A value that was read rather than written gives way as mode and mark say, and then setMemory returns false.
+func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, mode fillMode, mark uint32) bool {
 	if c.nanKeys && key != key { // no read could find it, and its hash changes from call to call
 		return true
 	}
 	weight := c.rawCost(key, value)
 	sh, keyHash := c.shardAndHash(key)
 	var deletions []deletion[K, V] // stays nil unless a handler is configured
+	deletes := &sh.deletes[deleteStripe(keyHash)]
 	if weight > sh.cap {
 		// Does not fit at all; drop the older value too so it stops serving reads.
 		sh.mu.Lock()
-		if fill {
+		if mode != write && deletes.Load() != mark {
+			sh.mu.Unlock()
+			return false
+		}
+		if mode == fill {
 			if _, item, ok := c.findSlot(sh, keyHash, key); ok && !expired(item.Metadata(), c.nowOff.Load()) {
 				sh.mu.Unlock()
 				return false
 			}
 		}
+		deletes.Add(1) // the drop is a delete: a fill of the dropped value must not bring it back
 		c.deleteLocked(sh, keyHash, key, CauseOverflow, &deletions)
 		sh.mu.Unlock()
 		c.stats.addRejected(1)
@@ -657,6 +690,10 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) boo
 	}
 
 	sh.mu.Lock()
+	if mode != write && deletes.Load() != mark {
+		sh.mu.Unlock()
+		return false
+	}
 	storage := sh.items.GetStorage()
 	tagged := tagOf(keyHash)
 	home := storage.Home(keyHash)
@@ -687,7 +724,7 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) boo
 		if entry.Key != key {
 			continue
 		}
-		if fill && !expired(metaWord, c.nowOff.Load()) {
+		if mode == fill && !expired(metaWord, c.nowOff.Load()) {
 			sh.mu.Unlock()
 			return false
 		}
@@ -706,6 +743,16 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, fill bool) boo
 	}
 	if weightDelta != 0 { // an overwrite of the same weight - the common one - leaves the total alone
 		storeI64(&sh.weight, sh.weight.Load()+weightDelta)
+	}
+	// A Delete of a key memory lacks takes no lock. The RMW orders this check against its bump: a Delete that bumped
+	// first is seen here, and one that bumps later probes after the value above is visible, and kills it.
+	if mode != write && deletes.Add(0) != mark {
+		c.deleteLocked(sh, keyHash, key, CauseInvalidation, &deletions)
+		sh.mu.Unlock()
+		if len(deletions) > 0 {
+			c.callOnDeletion(deletions)
+		}
+		return false
 	}
 	if sh.weight.Load() > sh.cap {
 		c.evictShard(sh, &deletions)
@@ -865,7 +912,12 @@ func (c *Cache[K, V]) deleteLocked(sh *shard[K, V], keyHash uint64, key K, cause
 
 // Delete removes the key from memory and forwards the deletion to L2 according to WritePolicy (async for WriteBack).
 func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
+	var err error
+	if c.l2WritePolicy == WriteThrough {
+		err = c.l2Cache.Delete(ctx, key) // first: a fill marked after the bump below reads L2 after this
+	}
 	sh, keyHash := c.shardAndHash(key)
+	sh.deletes[deleteStripe(keyHash)].Add(1)
 	if c.livePresent(sh, keyHash, key) {
 		var deletions []deletion[K, V] // stays nil unless a handler is configured
 		sh.mu.Lock()
@@ -876,14 +928,10 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 		}
 	}
 	c.stats.addDeletes(1)
-
-	switch c.l2WritePolicy {
-	case WriteThrough:
-		return c.l2Cache.Delete(ctx, key)
-	case WriteBack:
+	if c.l2WritePolicy == WriteBack {
 		c.enqueueDelete(key)
 	}
-	return nil
+	return err
 }
 
 // GetOrLoad returns the value, loading it with the load function when both levels miss. Concurrent calls for the same
@@ -937,12 +985,13 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 		c.stats.addMemHits(1)
 		return value, nil
 	}
+	mark := c.deleteMark(key)
 	if c.l2Cache != nil {
 		value, ok, err := c.l2Cache.Get(ctx, key)
 		switch {
 		case err == nil && ok:
 			c.stats.addL2Hits(1)
-			c.setMemory(key, value, c.expireOffset(), true)
+			c.setMemory(key, value, c.expireOffset(), fill, mark)
 			return value, nil
 		case err != nil:
 			// Fall back to the loader; report the L2 error via the callback.
@@ -957,15 +1006,15 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) 
 		var zero V
 		return zero, err
 	}
-	c.storeLoaded(ctx, key, value, true)
+	c.storeLoaded(ctx, key, value, fill, mark)
 	return value, nil
 }
 
-// storeLoaded caches a freshly loaded value and forwards it to L2 per WritePolicy; with fill it gives way to a value
-// written meanwhile, in L2 too, which that write reached itself. The value is already in hand, so an L2 write error
-// is reported rather than returned.
-func (c *Cache[K, V]) storeLoaded(ctx context.Context, key K, value V, fill bool) {
-	if !c.setMemory(key, value, c.expireOffset(), fill) {
+// storeLoaded caches a freshly loaded value and forwards it to L2 per WritePolicy. A value that gives way in memory
+// stays out of L2 too: the write or Delete it gave way to reached L2 itself. The value is already in hand, so an L2
+// write error is reported rather than returned.
+func (c *Cache[K, V]) storeLoaded(ctx context.Context, key K, value V, mode fillMode, mark uint32) {
+	if !c.setMemory(key, value, c.expireOffset(), mode, mark) {
 		return
 	}
 	c.stats.addSets(1)

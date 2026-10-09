@@ -36,6 +36,7 @@ type flightCall[K comparable, V any] struct {
 	ok bool
 	// canceled says the load failed after the owner's context ended: the error is the owner's, not the key's.
 	canceled bool
+	mark     uint32 // the key's delete mark as the owner took it, before reading anything
 	// joined is set by a claim that handed this call out as the winner, and read by release under the same bucket
 	// lock: a flight nobody joined skips finish entirely.
 	joined bool
@@ -221,6 +222,7 @@ func (fl *batchFlights[K, V]) claim(c *Cache[K, V], keys []K, i int, keyHash uin
 		fl.joined = append(fl.joined, joinedFlight[K, V]{key: key, call: winner})
 		return
 	}
+	call.mark = c.markAt(keyHash)
 	if !fl.copied {
 		if len(fl.owned) == i {
 			fl.owned = keys[:i+1]
@@ -241,14 +243,9 @@ const ownedScanMax = 32
 func assignLoaded[K comparable, V any](ctx context.Context, calls []flightCall[K, V], loaded List[K, V], err error, found *List[K, V]) {
 	var index map[K]int
 	for i, item := range loaded {
-		j := i
-		if j >= len(calls) || calls[j].key != item.Key { // loaders answer in order unless they drop or add keys
-			if index == nil && len(calls) > ownedScanMax {
-				index = ownedIndex(calls)
-			}
-			if j = indexOf(calls, item.Key, index); j < 0 {
-				continue
-			}
+		j := ownedAt(calls, item.Key, i, &index)
+		if j < 0 {
+			continue
 		}
 		calls[j].val, calls[j].ok, calls[j].err = item.Value, true, nil
 		if found != nil {
@@ -264,6 +261,18 @@ func assignLoaded[K comparable, V any](ctx context.Context, calls []flightCall[K
 			calls[i].err, calls[i].canceled = err, canceled
 		}
 	}
+}
+
+// ownedAt finds the owned flight of key, trying slot hint first as keyAt does. It returns -1 when the key is not owned
+// here.
+func ownedAt[K comparable, V any](calls []flightCall[K, V], key K, hint int, index *map[K]int) int {
+	if hint < len(calls) && calls[hint].key == key {
+		return hint
+	}
+	if *index == nil && len(calls) > ownedScanMax {
+		*index = ownedIndex(calls)
+	}
+	return indexOf(calls, key, *index)
 }
 
 // ownedIndex maps every owned flight's key to its slot.

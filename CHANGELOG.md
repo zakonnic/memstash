@@ -275,6 +275,14 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   value, one whose key is absent gets a plain miss, and `OnL2Error` hears only about the keys that failed. An error
   that names no key still concerns every key of the batch. **Contract change for adapters outside this repository:**
   values returned alongside a `BatchGet` error are now used, so return only keys that were read.
+- **A value read from L2 or loaded could bring back a key deleted while it was read.** `Get`, `BatchGet`,
+  `GetBatched`, `GetOrLoad`, `BatchGetOrLoad` and `GetAndRefresh` stored what L2 or the loader returned even when a
+  `Delete` of that key landed while the read was out: the deleted value came back into memory and stayed until its
+  TTL or eviction, while L2 no longer had it (a stress test resurrected about one in 2000 racing reads). Each shard now
+  counts Deletes in eight stripes; a read notes its key's count before it goes out and stores its answer only while
+  the count holds. A write-through `Delete` clears L2 before memory, so a read that starts after it cannot find the old
+  value there either. With WriteBack the L2 delete is asynchronous: a read that reaches L2 before the worker does can
+  still bring the old value back into memory.
 
 ## [0.9.8] - 2026-08-13
 
