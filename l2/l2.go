@@ -148,14 +148,21 @@ func KeyErr(key any, err error) error {
 	return &memstash.KeyError{Key: key, Err: err}
 }
 
+// stopErr names the key a batch read failed on without confining the error to it, as KeyErr would: the read stops
+// there, so the keys after it were not read either.
+func stopErr(key any, err error) error {
+	return fmt.Errorf("memstash/l2: key %v: %w", key, err)
+}
+
 // BatchGetSequential implements L2Cache.BatchGet for backends without a native multi-get by looping over Get. The
-// partial result gathered so far is returned alongside the first error.
+// partial result gathered so far is returned alongside the first error, which concerns every key it kept from being
+// read (see stopErr).
 func BatchGetSequential[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], keys []K) (memstash.List[K, V], error) {
 	found := make(memstash.List[K, V], 0, len(keys))
 	for _, key := range keys {
 		value, ok, err := store.Get(ctx, key)
 		if err != nil {
-			return found, KeyErr(key, err)
+			return found, stopErr(key, err)
 		}
 		if ok {
 			found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
@@ -197,7 +204,7 @@ func runSequential(ctx context.Context, n int, op func(i int) error) error {
 // --- concurrent batch fallbacks ---
 
 // BatchGetConcurrent implements L2Cache.BatchGet by running Get on up to workers goroutines. Found items keep the
-// order of keys; the hits gathered so far are returned alongside the first error.
+// order of keys; the hits gathered so far are returned alongside the first error (see stopErr).
 func BatchGetConcurrent[K comparable, V any](ctx context.Context, store memstash.L2Cache[K, V], keys []K, workers int) (memstash.List[K, V], error) {
 	if len(keys) <= 1 || workers <= 1 {
 		return BatchGetSequential(ctx, store, keys)
@@ -210,7 +217,7 @@ func BatchGetConcurrent[K comparable, V any](ctx context.Context, store memstash
 	firstErr := runConcurrent(ctx, len(keys), workers, true, func(i int) error {
 		value, ok, err := store.Get(ctx, keys[i])
 		if err != nil {
-			return KeyErr(keys[i], err)
+			return stopErr(keys[i], err)
 		}
 		results[i] = slot{value: value, ok: ok}
 		return nil

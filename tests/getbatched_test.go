@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zakonnic/memstash"
+	"github.com/zakonnic/memstash/l2"
 )
 
 // coalesceL2 records every read the pool makes and holds the calls until the test releases them, so the test
@@ -786,4 +787,42 @@ func TestL2BatchErrorReportsOnlyTheKeysItNames(t *testing.T) {
 		})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"b"}, reported, "the keys L2 stored must not be reported as failed")
+}
+
+// seqL2 reads a batch key by key through l2.BatchGetSequential, as the adapters without a multi-get do; its Get fails
+// on one key the way an unreachable server fails it.
+type seqL2 struct {
+	*l2Stub
+	fail string
+}
+
+var errDown = errors.New("connection refused")
+
+func (s seqL2) Get(ctx context.Context, key string) (string, bool, error) {
+	if key == s.fail {
+		return "", false, errDown
+	}
+	return s.l2Stub.Get(ctx, key)
+}
+
+func (s seqL2) BatchGet(ctx context.Context, keys []string) (memstash.List[string, string], error) {
+	return l2.BatchGetSequential[string, string](ctx, s, keys)
+}
+
+// A batch read that stops on one key never read the ones after it: its error concerns them too.
+func TestL2BatchStopConcernsTheKeysNotRead(t *testing.T) {
+	var reported []string
+	cache, err := memstash.New[string, string](
+		memstash.WithMemoryCapacity(100),
+		memstash.WithL2Cache[string, string](seqL2{l2Stub: newL2Stub(), fail: "b"}),
+		memstash.WithWritePolicy(memstash.WriteDisabled),
+		memstash.WithOnL2Error[string, string](func(key string, _ error) { reported = append(reported, key) }),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	_, err = cache.BatchGetOrLoad(context.Background(), []string{"a", "b", "c"},
+		func(context.Context, []string) (memstash.List[string, string], error) { return nil, nil })
+	require.NoError(t, err)
+	assert.Contains(t, reported, "c", "c was never read from L2")
 }

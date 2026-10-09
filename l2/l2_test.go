@@ -335,6 +335,8 @@ func TestBatchConcurrentFallbacks(t *testing.T) {
 		found, err := l2.BatchGetConcurrent[string, string](ctx, store, []string{"a", "b", "c"}, 4)
 		require.ErrorIs(t, err, errBoom)
 		assert.ErrorContains(t, err, "key b:")
+		var keyErr *memstash.KeyError
+		assert.False(t, errors.As(err, &keyErr), "the stop concerns the keys not read, not b alone")
 		assert.LessOrEqual(t, len(found), 1, "only hits, never the failed key")
 	})
 }
@@ -368,6 +370,8 @@ func TestBatchSequentialFallbacks(t *testing.T) {
 		found, err := store.BatchGet(ctx, []string{"a", "b", "c"})
 		require.ErrorIs(t, err, errBoom)
 		assert.ErrorContains(t, err, "key b:")
+		var keyErr *memstash.KeyError
+		assert.False(t, errors.As(err, &keyErr), "c was never read: the error must concern it too")
 		assert.Equal(t, map[string]string{"a": "1"}, found.ToMap(),
 			"the result gathered before the error must still be returned")
 	})
