@@ -248,10 +248,6 @@ func (c *Cache[K, V]) resolveBatch(b *getBatch[K, V]) {
 		return
 	}
 	fromL2, err := c.l2Cache.BatchGet(context.Background(), b.keys)
-	if err != nil {
-		c.stats.addL2Misses(c.settleRest(b, err))
-		return
-	}
 	hits := int64(0)
 	for _, item := range fromL2 {
 		// Skip a key we did not ask for, and one the adapter answered twice.
@@ -260,7 +256,7 @@ func (c *Cache[K, V]) resolveBatch(b *getBatch[K, V]) {
 		}
 	}
 	c.stats.addL2Hits(hits)
-	c.stats.addL2Misses(c.settleRest(b, nil))
+	c.stats.addL2Misses(c.settleRest(b, err))
 }
 
 // recoverBatch is recoverWorker for a read batch. A panic, the adapter's or an OnDeletion handler's on a lazy expiry

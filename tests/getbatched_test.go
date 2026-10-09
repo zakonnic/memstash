@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"runtime"
 	"strconv"
@@ -31,7 +32,10 @@ type coalesceL2 struct {
 
 	err    error
 	panics atomic.Bool
+	poison string // a key whose value does not decode: left out of a batch, which then fails with errPoison
 }
+
+var errPoison = errors.New("value does not decode")
 
 func newCoalesceL2(items map[string]string) *coalesceL2 {
 	if items == nil {
@@ -86,12 +90,17 @@ func (l *coalesceL2) BatchGet(_ context.Context, keys []string) (memstash.List[s
 		return nil, l.err
 	}
 	found := make(memstash.List[string, string], 0, len(keys))
+	var err error
 	for _, key := range keys {
+		if key == l.poison {
+			err = fmt.Errorf("key %s: %w", key, errPoison)
+			continue
+		}
 		if value, ok := l.m[key]; ok {
 			found = append(found, memstash.KeyVal[string, string]{Key: key, Value: value})
 		}
 	}
-	return found, nil
+	return found, err
 }
 
 func (l *coalesceL2) Set(_ context.Context, key, value string, _ time.Duration) error {
@@ -399,6 +408,59 @@ func TestGetBatchedReturnsL2ErrorToEveryCaller(t *testing.T) {
 		assert.Contains(t, res.err.Error(), "l2 down")
 		assert.False(t, res.found)
 	}
+}
+
+// One value the adapter cannot decode costs its own key: the batch's other callers get what L2 read.
+func TestGetBatchedKeepsWhatL2Read(t *testing.T) {
+	l2 := newCoalesceL2(map[string]string{"first": "v", "a": "va", "b": "vb", "bad": "x"})
+	l2.poison = "bad"
+	cache := newBatchedCache(t, l2, memstash.WithGetBatchedWorkers(1))
+	defer cache.Close()
+
+	first := fireGets(cache, []string{"first"})
+	l2.waitEntered(t)
+	rest := fireGets(cache, []string{"a", "b", "bad"})
+	l2.release()
+
+	collectResults(t, first, 1)
+	for _, res := range collectResults(t, rest, 3) {
+		if res.key == "bad" {
+			assert.ErrorIs(t, res.err, errPoison)
+			continue
+		}
+		require.NoError(t, res.err, res.key)
+		assert.Equal(t, "v"+res.key, res.value)
+	}
+}
+
+func TestBatchGetKeepsWhatL2Read(t *testing.T) {
+	ctx := context.Background()
+	l2 := newCoalesceL2(map[string]string{"a": "va", "b": "vb", "bad": "x"})
+	l2.poison = "bad"
+	l2.release()
+	keys := []string{"a", "b", "bad"}
+
+	cache := newBatchedCache(t, l2)
+	defer cache.Close()
+	found, err := cache.BatchGet(ctx, keys)
+	require.ErrorIs(t, err, errPoison)
+	assert.Equal(t, map[string]string{"a": "va", "b": "vb"}, found.ToMap())
+	_, promoted := cache.GetFromMemory("a")
+	assert.True(t, promoted)
+
+	var reported, asked []string
+	cache = newBatchedCache(t, l2, memstash.WithOnL2Error[string, string](func(key string, _ error) {
+		reported = append(reported, key)
+	}))
+	defer cache.Close()
+	found, err = cache.BatchGetOrLoad(ctx, keys, func(_ context.Context, keys []string) (memstash.List[string, string], error) {
+		asked = append(asked, keys...)
+		return memstash.List[string, string]{{Key: "bad", Value: "loaded"}}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"a": "va", "b": "vb", "bad": "loaded"}, found.ToMap())
+	assert.Equal(t, []string{"bad"}, asked, "the loader stands in only for the key L2 could not read")
+	assert.Equal(t, []string{"bad"}, reported)
 }
 
 func TestGetBatchedAdapterPanicWakesCallers(t *testing.T) {

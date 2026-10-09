@@ -264,6 +264,15 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   `Stats.Rejected()` now counts the values memory did not take - these, and new keys refused by a table that cannot
   grow - and the capacity docs name the per-shard limit. `OnDeletion` still hears only about values that were in
   memory: the refused one is the caller's.
+- **One value the codec rejected failed a whole L2 batch, and the error did not say which.** Every adapter returned
+  from `BatchGet` at the first stored value that did not decode, and from `BatchSet` at the first value that did not
+  encode - go-redis then sent nothing at all, redigo and Tarantool part of it. One bad entry in L2 (a changed value
+  type, a corrupt write) failed every batch it was in, for every key; through `GetBatched` it failed unrelated
+  concurrent reads, and a write-back batch lost the writes of up to 127 other keys. An adapter now leaves such an
+  item out, carries on with the rest, and returns the errors joined, each naming its key (`l2.KeyErr`). The cache
+  keeps what a `BatchGet` did read alongside its error: `BatchGet` promotes and returns it, `GetBatched` answers
+  those callers, and `BatchGetOrLoad` loads only the rest, reporting the error only for those keys. The `L2Cache`
+  contract says so: values returned with an error are used.
 
 ## [0.9.8] - 2026-08-13
 

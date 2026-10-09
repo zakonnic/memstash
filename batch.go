@@ -205,8 +205,8 @@ func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 }
 
 // BatchGet returns the values for keys found in memory or in L2: the memory hits are collected first, the misses go
-// to L2 in a single BatchGet and are promoted into memory. A missing key is simply absent from the result. On an L2
-// error the memory part gathered so far is returned alongside the error.
+// to L2 in a single BatchGet and are promoted into memory. A missing key is simply absent from the result. An L2 error
+// comes with everything that was read.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error) {
 	if c.l2Cache == nil {
 		found, _, hits := c.batchGetMemory(keys, nil, false)
@@ -220,17 +220,13 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error
 		return found, nil
 	}
 	fromL2, err := c.l2Cache.BatchGet(ctx, missing)
-	if err != nil {
-		c.stats.addL2Misses(int64(len(missing)))
-		return found, err
-	}
 	c.stats.addL2Hits(int64(len(fromL2)))
 	c.stats.addL2Misses(int64(max(len(missing)-len(fromL2), 0)))
 	for _, item := range fromL2 {
 		c.setMemory(item.Key, item.Value, c.expireOffset(), true)
 		found = append(found, item)
 	}
-	return found, nil
+	return found, err
 }
 
 // BatchSet stores all items in memory and forwards them to L2 according to WritePolicy: WriteThrough issues a single
@@ -426,12 +422,6 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 		return c.runLoader(ctx, keys, load)
 	}
 	fromL2, err := c.l2Cache.BatchGet(ctx, keys)
-	if err != nil {
-		// Fall back to the loader for everything; report the L2 error via the callback.
-		for _, key := range keys {
-			c.reportL2Err(key, err)
-		}
-	}
 	result := make(List[K, V], 0, len(keys))
 	var buf [batchResolvedSlots]itemstore.SetSlot[K] // trick to stay on stack
 	keysFromL2 := itemstore.NewSetFrom(buf[:])
@@ -450,6 +440,11 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 			if !keysFromL2.Exists(key) {
 				toLoad = append(toLoad, key)
 			}
+		}
+	}
+	if err != nil {
+		for _, key := range toLoad { // the loader stands in for L2 there
+			c.reportL2Err(key, err)
 		}
 	}
 	if len(toLoad) == 0 {

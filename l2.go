@@ -11,7 +11,8 @@ type L2Cache[K comparable, V any] interface {
 	// Get returns the value and a presence flag. A missing key is (zero, false, nil), not an error.
 	Get(ctx context.Context, key K) (value V, found bool, err error)
 	// BatchGet returns the found subset of keys in one round trip where the backend supports it. A missing key is
-	// simply absent from the result, not an error.
+	// simply absent from the result, not an error. Values returned alongside an error are used: return only keys that
+	// were read.
 	BatchGet(ctx context.Context, keys []K) (List[K, V], error)
 	// Set stores the value; ttl == 0 means "no expiration".
 	Set(ctx context.Context, key K, value V, ttl time.Duration) error
