@@ -456,3 +456,37 @@ func TestOversizedItemIsCountedAsRejected(t *testing.T) {
 	assert.Equal(t, big, v)
 	assert.EqualValues(t, 2, c.Stats().Rejected(), "the Set and the promotion")
 }
+
+// twiceL2 answers every found key of a batch twice, against the BatchGet contract.
+type twiceL2 struct{ *l2Stub }
+
+func (d twiceL2) BatchGet(ctx context.Context, keys []string) (memstash.List[string, string], error) {
+	found, err := d.l2Stub.BatchGet(ctx, keys)
+	return append(found, found...), err
+}
+
+// A repeated answer is not a second read: the L2 counters never count more keys than were asked for, and the loader
+// path, which knows the keys it still has to load, counts them exactly.
+func TestL2CountersDoNotTrustTheAdapterCount(t *testing.T) {
+	ctx := context.Background()
+	l2 := twiceL2{newL2Stub()}
+	require.NoError(t, l2.Set(ctx, "k", "v", 0))
+	newCache := func() *memstash.Cache[string, string] {
+		c, err := memstash.New[string, string](memstash.WithMemoryCapacity(10), memstash.WithStats(),
+			memstash.WithL2Cache[string, string](l2), memstash.WithWritePolicy(memstash.WriteDisabled))
+		require.NoError(t, err)
+		t.Cleanup(c.Close)
+		return c
+	}
+
+	c := newCache()
+	_, _ = c.BatchGet(ctx, []string{"k"})
+	assert.EqualValues(t, 1, c.Stats().L2Gets(), "BatchGet: one key asked, one read")
+
+	c = newCache()
+	_, _ = c.BatchGetOrLoad(ctx, []string{"k", "absent"},
+		func(context.Context, []string) (memstash.List[string, string], error) { return nil, nil })
+	s := c.Stats()
+	assert.EqualValues(t, 1, s.L2Hits(), "BatchGetOrLoad")
+	assert.EqualValues(t, 1, s.L2Misses(), "BatchGetOrLoad")
+}

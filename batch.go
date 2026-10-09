@@ -225,8 +225,9 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (List[K, V], error
 		marks = append(marks, c.deleteMark(key))
 	}
 	fromL2, err := c.l2Cache.BatchGet(ctx, missing)
-	c.stats.addL2Hits(int64(len(fromL2)))
-	c.stats.addL2Misses(int64(max(len(missing)-len(fromL2), 0)))
+	l2Hits := int64(min(len(fromL2), len(missing))) // an adapter that answers a key twice must not inflate Gets
+	c.stats.addL2Hits(l2Hits)
+	c.stats.addL2Misses(int64(len(missing)) - l2Hits)
 	var index map[K]int
 	for i, item := range fromL2 {
 		var mark uint32
@@ -480,7 +481,6 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 		result = append(result, item)
 		keysFromL2.Add(item.Key)
 	}
-	c.stats.addL2Hits(int64(len(result)))
 
 	toLoad := keys
 	if len(fromL2) > 0 {
@@ -492,6 +492,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 			}
 		}
 	}
+	c.stats.addL2Hits(int64(len(keys) - len(toLoad))) // by key: an extra or repeated answer is not a hit
 	if len(toLoad) == 0 {
 		return result, nil
 	}
