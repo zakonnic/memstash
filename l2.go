@@ -2,6 +2,8 @@ package memstash
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -12,7 +14,7 @@ type L2Cache[K comparable, V any] interface {
 	Get(ctx context.Context, key K) (value V, found bool, err error)
 	// BatchGet returns the found subset of keys in one round trip where the backend supports it. A missing key is
 	// simply absent from the result, not an error. Values returned alongside an error are used: return only keys that
-	// were read.
+	// were read. The batch methods report a failure confined to some keys as KeyError values, joined.
 	BatchGet(ctx context.Context, keys []K) (List[K, V], error)
 	// Set stores the value; ttl == 0 means "no expiration".
 	Set(ctx context.Context, key K, value V, ttl time.Duration) error
@@ -23,6 +25,41 @@ type L2Cache[K comparable, V any] interface {
 	Delete(ctx context.Context, key K) error
 	// BatchDelete removes all keys in one round trip where the backend supports it; missing keys are not errors.
 	BatchDelete(ctx context.Context, keys []K) error
+}
+
+// KeyError is an L2 failure confined to one key of a batch, such as a value the codec rejects. The cache reports and
+// fails only the keys a batch error names this way; an error that names no key concerns them all. Key must be the K
+// value the batch was called with.
+type KeyError struct {
+	Key any
+	Err error
+}
+
+func (e *KeyError) Error() string { return fmt.Sprintf("memstash: key %v: %v", e.Key, e.Err) }
+
+func (e *KeyError) Unwrap() error { return e.Err }
+
+// keyErr is the part of a batch error that concerns key: the KeyError naming it and whatever names no key.
+func keyErr[K comparable](err error, key K) error {
+	switch e := err.(type) { //nolint:errorlint // only a bare KeyError names a key: errors.As would stop at the first
+
+	case *KeyError:
+		if e.Key != any(key) {
+			return nil
+		}
+	case interface{ Unwrap() []error }:
+		var parts []error
+		for _, part := range e.Unwrap() {
+			if part = keyErr(part, key); part != nil {
+				parts = append(parts, part)
+			}
+		}
+		if len(parts) == 1 {
+			return parts[0]
+		}
+		return errors.Join(parts...)
+	}
+	return err
 }
 
 // Codec is the value serialization contract for networked L2 adapters.

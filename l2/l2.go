@@ -139,13 +139,13 @@ func ResolveOrderedMget(mode memstash.DetectMode, probe func() bool) bool {
 
 // --- sequential batch fallbacks ---
 
-// KeyErr ties err to the batch item it concerns, so a joined batch error names the items that failed. A nil err stays
-// nil.
+// KeyErr ties err to the batch item it concerns (memstash.KeyError), so the cache fails and reports only the items a
+// joined batch error names. A nil err stays nil.
 func KeyErr(key any, err error) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("memstash/l2: key %v: %w", key, err)
+	return &memstash.KeyError{Key: key, Err: err}
 }
 
 // BatchGetSequential implements L2Cache.BatchGet for backends without a native multi-get by looping over Get. The

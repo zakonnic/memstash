@@ -1293,7 +1293,7 @@ func (c *Cache[K, V]) deliverRun(sets List[K, V], deletes []K, ttl time.Duration
 }
 
 // writeBatch delivers drained writes to L2: one Set for a single item, one BatchSet otherwise. A batch error is
-// reported for every key it covers.
+// reported for every key it concerns (see KeyError).
 func (c *Cache[K, V]) writeBatch(batch List[K, V], ttl time.Duration) {
 	err := c.deliver(func() error {
 		if len(batch) == 1 {
@@ -1303,13 +1303,15 @@ func (c *Cache[K, V]) writeBatch(batch List[K, V], ttl time.Duration) {
 	})
 	if err != nil {
 		for _, item := range batch {
-			c.reportL2Err(item.Key, err)
+			if err := keyErr(err, item.Key); err != nil {
+				c.reportL2Err(item.Key, err)
+			}
 		}
 	}
 }
 
 // deleteBatch delivers drained deletes to L2: one Delete for a single key, one BatchDelete otherwise. A batch error
-// is reported for every key it covers.
+// is reported for every key it concerns (see KeyError).
 func (c *Cache[K, V]) deleteBatch(keys []K) {
 	err := c.deliver(func() error {
 		if len(keys) == 1 {
@@ -1319,7 +1321,9 @@ func (c *Cache[K, V]) deleteBatch(keys []K) {
 	})
 	if err != nil {
 		for _, key := range keys {
-			c.reportL2Err(key, err)
+			if err := keyErr(err, key); err != nil {
+				c.reportL2Err(key, err)
+			}
 		}
 	}
 }

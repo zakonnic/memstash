@@ -302,7 +302,7 @@ func (c *Cache[K, V]) settleRest(b *getBatch[K, V], err error) int64 {
 	waiting := int64(0)
 	for at := range b.head {
 		if b.head[at] >= 0 {
-			waiting += c.settleKey(b, int32(at), zero, false, err)
+			waiting += c.settleKey(b, int32(at), zero, false, keyErr(err, b.keys[at]))
 		}
 	}
 	return waiting

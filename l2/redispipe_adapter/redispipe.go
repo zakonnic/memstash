@@ -217,8 +217,7 @@ func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, 
 			}
 			data, ok := reply.([]byte)
 			if !ok {
-				errs = append(errs, fmt.Errorf("memstash/l2/redispipe: unexpected MGET element type %T", reply))
-				return found, errors.Join(errs...)
+				return found, errors.Join(append(errs, fmt.Errorf("memstash/l2/redispipe: unexpected MGET element type %T", reply))...)
 			}
 			value, err := c.codec.Unmarshal(data)
 			if err != nil {
@@ -250,8 +249,7 @@ func (c *Cache[K, V]) batchGetSendMany(ctx context.Context, keys []K, storageKey
 		}
 		data, ok := result.([]byte)
 		if !ok {
-			errs = append(errs, fmt.Errorf("memstash/l2/redispipe: unexpected GET reply type %T", result))
-			return found, errors.Join(errs...)
+			return found, errors.Join(append(errs, fmt.Errorf("memstash/l2/redispipe: unexpected GET reply type %T", result))...)
 		}
 		value, err := c.codec.Unmarshal(data)
 		if err != nil {

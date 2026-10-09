@@ -422,6 +422,13 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 		return c.runLoader(ctx, keys, load)
 	}
 	fromL2, err := c.l2Cache.BatchGet(ctx, keys)
+	if err != nil {
+		for _, key := range keys { // the loader stands in for L2 where it failed
+			if err := keyErr(err, key); err != nil {
+				c.reportL2Err(key, err)
+			}
+		}
+	}
 	result := make(List[K, V], 0, len(keys))
 	var buf [batchResolvedSlots]itemstore.SetSlot[K] // trick to stay on stack
 	keysFromL2 := itemstore.NewSetFrom(buf[:])
@@ -440,11 +447,6 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 			if !keysFromL2.Exists(key) {
 				toLoad = append(toLoad, key)
 			}
-		}
-	}
-	if err != nil {
-		for _, key := range toLoad { // the loader stands in for L2 there
-			c.reportL2Err(key, err)
 		}
 	}
 	if len(toLoad) == 0 {

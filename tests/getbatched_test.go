@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"errors"
-	"fmt"
 	"maps"
 	"runtime"
 	"strconv"
@@ -77,6 +76,9 @@ func (l *coalesceL2) Get(_ context.Context, key string) (string, bool, error) {
 	if l.err != nil {
 		return "", false, l.err
 	}
+	if key == l.poison {
+		return "", false, errPoison
+	}
 	value, ok := l.m[key]
 	return value, ok, nil
 }
@@ -93,7 +95,7 @@ func (l *coalesceL2) BatchGet(_ context.Context, keys []string) (memstash.List[s
 	var err error
 	for _, key := range keys {
 		if key == l.poison {
-			err = fmt.Errorf("key %s: %w", key, errPoison)
+			err = &memstash.KeyError{Key: key, Err: errPoison}
 			continue
 		}
 		if value, ok := l.m[key]; ok {
@@ -410,7 +412,7 @@ func TestGetBatchedReturnsL2ErrorToEveryCaller(t *testing.T) {
 	}
 }
 
-// One value the adapter cannot decode costs its own key: the batch's other callers get what L2 read.
+// One value the adapter cannot decode costs its own key: the batch's other callers get what L2 read, or a plain miss.
 func TestGetBatchedKeepsWhatL2Read(t *testing.T) {
 	l2 := newCoalesceL2(map[string]string{"first": "v", "a": "va", "b": "vb", "bad": "x"})
 	l2.poison = "bad"
@@ -419,17 +421,21 @@ func TestGetBatchedKeepsWhatL2Read(t *testing.T) {
 
 	first := fireGets(cache, []string{"first"})
 	l2.waitEntered(t)
-	rest := fireGets(cache, []string{"a", "b", "bad"})
+	rest := fireGets(cache, []string{"a", "b", "bad", "absent"})
 	l2.release()
 
 	collectResults(t, first, 1)
-	for _, res := range collectResults(t, rest, 3) {
-		if res.key == "bad" {
+	for _, res := range collectResults(t, rest, 4) {
+		switch res.key {
+		case "bad":
 			assert.ErrorIs(t, res.err, errPoison)
-			continue
+		case "absent":
+			require.NoError(t, res.err)
+			assert.False(t, res.found)
+		default:
+			require.NoError(t, res.err, res.key)
+			assert.Equal(t, "v"+res.key, res.value)
 		}
-		require.NoError(t, res.err, res.key)
-		assert.Equal(t, "v"+res.key, res.value)
 	}
 }
 
@@ -737,4 +743,42 @@ func TestGetBatchedSurvivesPanicWhileCollecting(t *testing.T) {
 	_, _, err = c.GetBatched(ctx, "z")
 	require.NoError(t, err, "the worker must have survived the panic")
 	assert.EqualValues(t, 1, handled.Load())
+}
+
+// pickyL2 fails to store one value, the way an adapter whose codec rejects it reports that: a KeyError for its key.
+type pickyL2 struct {
+	*l2Stub
+	reject string
+}
+
+func (p *pickyL2) BatchSet(ctx context.Context, items memstash.List[string, string], ttl time.Duration) error {
+	var err error
+	kept := memstash.List[string, string]{}
+	for _, item := range items {
+		if item.Value == p.reject {
+			err = &memstash.KeyError{Key: item.Key, Err: errPoison}
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return errors.Join(p.l2Stub.BatchSet(ctx, kept, ttl), err)
+}
+
+func TestL2BatchErrorReportsOnlyTheKeysItNames(t *testing.T) {
+	var reported []string
+	cache, err := memstash.New[string, string](
+		memstash.WithMemoryCapacity(100),
+		memstash.WithL2Cache[string, string](&pickyL2{l2Stub: newL2Stub(), reject: "unencodable"}),
+		memstash.WithWritePolicy(memstash.WriteThrough),
+		memstash.WithOnL2Error[string, string](func(key string, _ error) { reported = append(reported, key) }),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	_, err = cache.BatchGetOrLoad(context.Background(), []string{"a", "b", "c"},
+		func(_ context.Context, keys []string) (memstash.List[string, string], error) {
+			return memstash.List[string, string]{{Key: "a", Value: "1"}, {Key: "b", Value: "unencodable"}, {Key: "c", Value: "3"}}, nil
+		})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"b"}, reported, "the keys L2 stored must not be reported as failed")
 }

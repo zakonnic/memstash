@@ -179,6 +179,7 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 	policy := as.NewBatchWritePolicy()
 	policy.Expiration = expiration(ttl)
 	records := make([]as.BatchRecordIfc, 0, len(items))
+	written := make([]K, 0, len(items))
 	var errs []error
 	for _, item := range items {
 		data, err := c.codec.Marshal(item.Value)
@@ -188,9 +189,10 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		}
 		asKey, aerr := c.newKey(item.Key)
 		if aerr != nil {
-			return aerr
+			return errors.Join(append(errs, aerr)...)
 		}
 		records = append(records, as.NewBatchWrite(policy, asKey, as.PutOp(as.NewBin(binName, data))))
+		written = append(written, item.Key)
 	}
 	if aerr := c.client.BatchOperate(nil, records); aerr != nil {
 		if aerr.Matches(astypes.UNSUPPORTED_FEATURE) {
@@ -198,9 +200,9 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 		}
 		return errors.Join(append(errs, aerr)...)
 	}
-	for _, record := range records {
+	for i, record := range records {
 		if err := record.BatchRec().Err; err != nil {
-			return errors.Join(append(errs, err)...)
+			errs = append(errs, l2.KeyErr(written[i], err))
 		}
 	}
 	return errors.Join(errs...)
@@ -226,12 +228,13 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 		}
 		return aerr
 	}
-	for _, record := range records {
+	var errs []error
+	for i, record := range records {
 		if err := record.BatchRec().Err; err != nil && !err.Matches(astypes.KEY_NOT_FOUND_ERROR) {
-			return err
+			errs = append(errs, l2.KeyErr(keys[i], err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (c *Cache[K, V]) newKey(key K) (*as.Key, as.Error) {

@@ -269,10 +269,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   encode - go-redis then sent nothing at all, redigo and Tarantool part of it. One bad entry in L2 (a changed value
   type, a corrupt write) failed every batch it was in, for every key; through `GetBatched` it failed unrelated
   concurrent reads, and a write-back batch lost the writes of up to 127 other keys. An adapter now leaves such an
-  item out, carries on with the rest, and returns the errors joined, each naming its key (`l2.KeyErr`). The cache
-  keeps what a `BatchGet` did read alongside its error: `BatchGet` promotes and returns it, `GetBatched` answers
-  those callers, and `BatchGetOrLoad` loads only the rest, reporting the error only for those keys. The `L2Cache`
-  contract says so: values returned with an error are used.
+  item out, carries on with the rest, and reports it as a `KeyError` naming the key (`l2.KeyErr`), joined with any
+  others; Aerospike does the same for a single record's failure. The cache uses what a `BatchGet` did read alongside
+  its error, and fails or reports only the keys a batch error names: a `GetBatched` caller whose key L2 read gets the
+  value, one whose key is absent gets a plain miss, and `OnL2Error` hears only about the keys that failed. An error
+  that names no key still concerns every key of the batch. **Contract change for adapters outside this repository:**
+  values returned alongside a `BatchGet` error are now used, so return only keys that were read.
 
 ## [0.9.8] - 2026-08-13
 

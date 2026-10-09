@@ -137,7 +137,9 @@ func (c *Cache[K, V]) storeLoadedBatch(ctx context.Context, loaded List[K, V], f
 	case WriteThrough:
 		if err := c.l2Cache.BatchSet(ctx, kept, c.ttl); err != nil {
 			for _, item := range kept {
-				c.reportL2Err(item.Key, err)
+				if err := keyErr(err, item.Key); err != nil {
+					c.reportL2Err(item.Key, err)
+				}
 			}
 		}
 	default:
