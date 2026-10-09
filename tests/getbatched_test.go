@@ -709,6 +709,10 @@ func TestGetBatchedSurvivesPanicWhileCollecting(t *testing.T) {
 		memstash.WithL2Cache[string, string](l2),
 		memstash.WithWritePolicy(memstash.WriteDisabled),
 		memstash.WithTTL(time.Second),
+		// One big table: the TTL sweep walks a few slots a second from slot 0 and must not reach "k" first.
+		memstash.WithMemoryCapacity(1<<16),
+		memstash.WithShardsCount(1),
+		memstash.WithPreallocatedSize(),
 		memstash.WithGetBatchedWorkers(1),
 		memstash.WithOnDeletion(func(_, _ string, cause memstash.DeletionCause) {
 			if cause == memstash.CauseExpiration {
@@ -737,6 +741,7 @@ func TestGetBatchedSurvivesPanicWhileCollecting(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)       // nothing outside shows the read has queued: give it the head start
 	require.NoError(t, c.Set(ctx, "k", "v")) // expires while its read waits in the queue
 	require.Eventually(t, func() bool { return len(maps.Collect(c.Iterator())) == 0 }, 5*time.Second, 50*time.Millisecond)
+	require.Equal(t, 1, c.Len(), "the sweep removed k before the queued read reached it")
 	l2.release()
 
 	assert.ErrorIs(t, <-queued, memstash.ErrPanic)
