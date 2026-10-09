@@ -282,7 +282,8 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   counts Deletes in eight stripes; a read notes its key's count before it goes out and stores its answer only while
   the count holds. A write-through `Delete` clears L2 before memory, so a read that starts after it cannot find the old
   value there either. With WriteBack the L2 delete is asynchronous: a read that reaches L2 before the worker does can
-  still bring the old value back into memory.
+  still bring the old value back into memory. The count costs a `Delete` one atomic add, paid only once the cache
+  can fill at all: from the start with an L2, from the first load without one.
 - **An adapter that answered a key twice inflated the L2 counters.** `BatchGet` and `BatchGetOrLoad` counted every
   item the adapter returned as an L2 hit, so a duplicate or unasked item made `Gets()` exceed the keys read. The
   `L2Cache.BatchGet` contract now says so explicitly - only keys asked for, each at most once - and the counters no

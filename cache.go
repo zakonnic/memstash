@@ -110,8 +110,11 @@ const deleteStripes = 8
 
 func deleteStripe(keyHash uint64) uint64 { return keyHash >> 7 & (deleteStripes - 1) }
 
-// markAt is the Delete count of keyHash's stripe as it stands.
+// markAt is the Delete count of keyHash's stripe as it stands, taken by a fill before it reads.
 func (c *Cache[K, V]) markAt(keyHash uint64) uint32 {
+	if !c.fills.Load() {
+		c.fills.Store(true)
+	}
 	return c.shards[uint32(keyHash)&c.shardMask].deletes[deleteStripe(keyHash)].Load()
 }
 
@@ -156,8 +159,11 @@ type Cache[K comparable, V any] struct {
 	ttl          time.Duration
 	refreshOnGet bool
 
-	l2Cache           L2Cache[K, V]
-	l2WritePolicy     WritePolicy // always WriteDisabled when l2Cache not set
+	l2Cache       L2Cache[K, V]
+	l2WritePolicy WritePolicy // always WriteDisabled when l2Cache not set
+	// fills turns true once a value may come from L2 or a loader; from then on a Delete marks its stripe. A fill sets
+	// it before it takes its mark, so a Delete that still saw it false came before that read.
+	fills             atomic.Bool
 	writeBackBatching WriteBackBatching
 	onL2Error         func(key K, err error)
 	onPanic           PanicHandler
@@ -294,6 +300,8 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	}
 	if c.l2Cache == nil {
 		c.l2WritePolicy = WriteDisabled
+	} else {
+		c.fills.Store(true)
 	}
 	c.life, c.endLife = context.WithCancel(context.Background())
 
@@ -917,7 +925,9 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 		err = c.l2Cache.Delete(ctx, key) // first: a fill marked after the bump below reads L2 after this
 	}
 	sh, keyHash := c.shardAndHash(key)
-	sh.deletes[deleteStripe(keyHash)].Add(1)
+	if c.fills.Load() {
+		sh.deletes[deleteStripe(keyHash)].Add(1)
+	}
 	if c.livePresent(sh, keyHash, key) {
 		var deletions []deletion[K, V] // stays nil unless a handler is configured
 		sh.mu.Lock()
@@ -946,11 +956,12 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		return value, nil
 	}
 
+	keyHash := c.keyHash(key)
 	for {
 		call := &flightCall[K, V]{}
-		winner, running := c.claim(c.keyHash(key), key, call)
+		winner, running := c.claim(keyHash, key, call)
 		if !running {
-			return c.loadFlight(ctx, key, load, call)
+			return c.loadFlight(ctx, key, keyHash, load, call)
 		}
 		// A flight is already in progress - wait for its result or for the context to be canceled (the owner keeps
 		// loading on behalf of everyone else). The key was not in memory when this call looked, and this call itself
@@ -968,24 +979,24 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 }
 
 // loadFlight loads the key as the owner of call and hands the result to everyone waiting on it.
-func (c *Cache[K, V]) loadFlight(ctx context.Context, key K, load LoaderFunc[K, V], call *flightCall[K, V]) (V, error) {
+func (c *Cache[K, V]) loadFlight(ctx context.Context, key K, keyHash uint64, load LoaderFunc[K, V], call *flightCall[K, V]) (V, error) {
 	// ErrLoaderPanic stands until doLoad returns: a loader that panics or Goexits must not leave waiters stuck.
 	call.err = ErrLoaderPanic
 	defer c.release(call)
 
-	value, err := c.doLoad(ctx, key, load)
+	value, err := c.doLoad(ctx, key, keyHash, load)
 	call.val, call.err, call.ok = value, err, err == nil
 	call.canceled = err != nil && ctx.Err() != nil
 	return value, err
 }
 
-func (c *Cache[K, V]) doLoad(ctx context.Context, key K, load LoaderFunc[K, V]) (V, error) {
+func (c *Cache[K, V]) doLoad(ctx context.Context, key K, keyHash uint64, load LoaderFunc[K, V]) (V, error) {
 	// A parallel flight may have finished while we were registering.
 	if value, ok := c.getMemory(key); ok {
 		c.stats.addMemHits(1)
 		return value, nil
 	}
-	mark := c.deleteMark(key)
+	mark := c.markAt(keyHash)
 	if c.l2Cache != nil {
 		value, ok, err := c.l2Cache.Get(ctx, key)
 		switch {
