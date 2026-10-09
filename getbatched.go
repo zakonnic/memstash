@@ -61,10 +61,12 @@ type getBatch[K comparable, V any] struct {
 	index map[K]int32 // built once the batch passes batchIndexFrom keys, then reused batch after batch
 }
 
-// GetBatched is Get whose L2 reads are coalesced into one BatchGet: misses queue up, and a worker fetches
-// everything waiting at once. The caller blocks as in Get, but L2 sees batches instead of a request per
-// goroutine - and a key wanted by several callers is fetched once.
-// Only worth it under heavy load, and when the L2 adapter has no pipelining of its own.
+// GetBatched is Get with its L2 reads coalesced: misses queue up, and a worker fetches everything waiting in one
+// BatchGet. The caller blocks as in Get, but L2 sees batches instead of a request per goroutine, and a key several
+// callers want is fetched once.
+//
+// It pays off only under heavy load, and only when the L2 adapter has no pipelining of its own. Once Close begins, a
+// caller still waiting reads L2 itself; if a worker was already fetching its key, L2 is read and counted twice.
 func (c *Cache[K, V]) GetBatched(ctx context.Context, key K) (V, bool, error) {
 	if value, ok := c.getMemory(key); ok {
 		c.stats.addMemHits(1)
