@@ -38,7 +38,7 @@ func TestOversizedOverwriteDropsStaleValue(t *testing.T) {
 	assert.Equal(t, "fresh", v)
 }
 
-// TestBatchGetOrLoadLoaderReturnsExtraKey: a loader that returns a key nobody asked for (a prefetching or simply
+// TestBatchGetOrLoadLoaderReturnsExtraKey: a loader that returns a key nobody asked for (a prefetching or a
 // buggy loader) must not crash the cache. The extra value may be cached, but the result contains only requested keys.
 func TestBatchGetOrLoadLoaderReturnsExtraKey(t *testing.T) {
 	ctx := context.Background()

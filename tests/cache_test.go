@@ -456,7 +456,7 @@ func TestConcurrentReadsDuringGrowth(t *testing.T) {
 	}
 }
 
-// TestTableSpanningChunks fills one shard well past a single storage chunk, so probing, growth rebuilds and reads all
+// TestTableSpanningChunks fills one shard well past a single storage chunk, so probing, growth and reads all
 // have to cross chunk boundaries.
 func TestTableSpanningChunks(t *testing.T) {
 	const count = 150_000 // settles at 256Ki slots: four chunks

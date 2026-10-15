@@ -9,8 +9,9 @@ import (
 	"github.com/zakonnic/memstash"
 )
 
-// TestSetReusesTombstoneOnlyWhenKeyAbsent drives the exact shape setMemory's tombstone reuse depends on: a freed
-// tombstone sitting earlier in a key's probe chain than the key's own live slot.
+// TestSetReusesTombstoneOnlyWhenKeyAbsent drives the shape an insert's walk depends on: a slot freed earlier in a
+// key's probe chain than the key's own live slot. An insert may stop at the first empty slot only because deletions
+// compact their runs; were a key able to live past an empty slot, a rewrite would store it twice.
 func TestSetReusesTombstoneOnlyWhenKeyAbsent(t *testing.T) {
 	ctx := context.Background()
 	const capacity = 1024
@@ -23,17 +24,17 @@ func TestSetReusesTombstoneOnlyWhenKeyAbsent(t *testing.T) {
 		require.NoError(t, c.Set(ctx, i, i))
 		live[i] = true
 	}
-	for i := 0; i < capacity/2; i++ { // tombstones in the low half of the key space
+	for i := 0; i < capacity/2; i++ { // free the slots of the low half of the key space
 		c.Delete(ctx, i)
 		delete(live, i)
 	}
-	for i := 2000; i < 2000+capacity/2; i++ { // churn: the queue walks past the tombstones and frees their slots
+	for i := 2000; i < 2000+capacity/2; i++ { // churn: fresh keys take freed slots
 		require.NoError(t, c.Set(ctx, i, i))
 		live[i] = true
 	}
 
 	before := c.Len()
-	for k := range live { // rewrite every surviving key: each may now meet a freed tombstone before its own slot
+	for k := range live { // rewrite every surviving key: each may meet a freed slot before its own
 		require.NoError(t, c.Set(ctx, k, k*10))
 	}
 	t.Logf("live keys %d, Len before rewrite %d, after %d", len(live), before, c.Len())

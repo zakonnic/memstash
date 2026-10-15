@@ -39,7 +39,7 @@ func NewLoadable[K comparable, V any](load LoaderFunc[K, V], opts ...Option) (*L
 	return &LoadableCache[K, V]{Cache: c, load: load, batchLoad: batchLoad}, nil
 }
 
-// NewBatchLoadable creates a LoadableCache configured by the options (see New). load is required.
+// NewBatchLoadable creates a LoadableCache configured by the options (see New). batchLoad is required.
 func NewBatchLoadable[K comparable, V any](batchLoad BatchLoaderFunc[K, V], opts ...Option) (*LoadableCache[K, V], error) {
 	if batchLoad == nil {
 		return nil, ErrNilLoader

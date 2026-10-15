@@ -22,7 +22,7 @@ func storeI64(p *atomic.Int64, v int64)           { itemstore.StoreI64(p, v) }
 
 // GetAutoCostFunc builds the automatic CostFunc behind Config.MemoryBudget. The cost of an item is the byte size of
 // its data alone: unsafe.Sizeof(Entry) for the inline part of the key and value, plus the heap bytes they reference.
-// MemoryBudget bounds the stored data, the cache footprint is not counted.
+// MemoryBudget bounds the stored data; the cache's own footprint is not counted.
 func GetAutoCostFunc[K comparable, V any]() (func(key K, value V) uint32, error) {
 	keySize, ok := payloadSizer[K]()
 	if !ok {

@@ -8,7 +8,7 @@ import (
 )
 
 // L2Cache is the contract for a second-level adapter (Redis, memcached, a database, or a custom one). Implementations
-// must be thread-safe.
+// must be safe for concurrent use.
 type L2Cache[K comparable, V any] interface {
 	// Get returns the value and a presence flag. A missing key is (zero, false, nil), not an error.
 	Get(ctx context.Context, key K) (value V, found bool, err error)
@@ -97,11 +97,11 @@ const (
 
 // l2Write is a task for a background write-back worker. A non-nil flush marks a Wait checkpoint instead of a write:
 // a queue is FIFO, so by the time its worker reaches the marker every write enqueued into that queue before it has
-// been handed to L2, and closing flush releases the waiter. del marks a BatchDelete task (value and ttl are unused).
+// been handed to L2, and closing flush releases the waiter. del marks a delete (value and ttl are unused).
 type l2Write[K comparable, V any] struct {
 	key   K
 	value V
-	ttl   time.Duration // provided by SetWithTTL
+	ttl   time.Duration // the cache's TTL, or SetWithTTL's
 	flush chan<- struct{}
 	del   bool
 }

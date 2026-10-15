@@ -45,7 +45,7 @@ type asyncSlot[V any] struct {
 // slots those answers come back through.
 type getWorkerPool[K comparable, V any] struct {
 	state   atomic.Uint32
-	queueCh chan asyncGet[K, V] // published by start, read only after state says getQueueCh
+	queueCh chan asyncGet[K, V] // published by start, read only after state says getPoolRunning
 	slots   sync.Pool           // *asyncSlot[V], one per read in flight
 	mu      sync.Mutex
 	size    int
@@ -188,8 +188,8 @@ func (p *getWorkerPool[K, V]) queueBytes() int64 {
 	return int64(cap(p.queueCh)) * int64(unsafe.Sizeof(asyncGet[K, V]{}))
 }
 
-// getBatchLoop is one worker of the coalescing read pool. On Close it simply leaves: the callers it would have
-// served wake on the same signal and read L2 themselves.
+// getBatchLoop is one worker of the coalescing read pool. On Close it leaves: the callers it would have served wake
+// on the same signal and read L2 themselves.
 func (c *Cache[K, V]) getBatchLoop(queue chan asyncGet[K, V]) {
 	defer c.wg.Done()
 	defer c.recoverWorker() // resolveBatch recovers per batch, so reaching this means the loop itself broke
@@ -226,7 +226,7 @@ drain:
 }
 
 // collect files a request into the batch. A key promoted into memory since the request was queued is settled right
-// here - a lock-free lookup against a round trip.
+// here, which saves a round trip.
 func (c *Cache[K, V]) collect(b *getBatch[K, V], req asyncGet[K, V]) {
 	if value, ok := c.getMemory(req.key); ok {
 		c.stats.addMemHits(1)

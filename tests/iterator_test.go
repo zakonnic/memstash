@@ -286,7 +286,7 @@ func TestIteratorConcurrentMutation(t *testing.T) {
 			writes.Add(1)
 		}
 	}()
-	go func() { // leaves tombstones behind
+	go func() { // deletes compact runs under the walk
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
 			_ = c.Delete(ctx, fmt.Sprintf("k%05d", i%500))

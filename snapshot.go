@@ -26,7 +26,7 @@ var (
 type LoadOption uint8
 
 const (
-	// LoadWithCurrentTTL gives every loaded item a full, fresh lifetime, exactly as Set would. The default.
+	// LoadWithCurrentTTL gives every loaded item a full, fresh lifetime, as Set would. The default.
 	LoadWithCurrentTTL LoadOption = iota
 	// LoadWithTTL restores the expiration the item carried when the snapshot was taken: it expires at the same moment
 	// it would have, so time spent in the file counts against it and items already past that moment are skipped.

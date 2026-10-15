@@ -12,7 +12,7 @@ type ClockPolicy[K comparable, V any] struct {
 	items *itemstore.StorageProxy[K, V]
 }
 
-// NewClockPolicy creates a ClockPolicy policy.
+// NewClockPolicy creates a GCLOCK policy.
 func NewClockPolicy[K comparable, V any](items *itemstore.StorageProxy[K, V]) *ClockPolicy[K, V] {
 	return &ClockPolicy[K, V]{items: items}
 }

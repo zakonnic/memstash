@@ -1,7 +1,6 @@
 // Package l2 holds the shared building blocks for the L2Cache adapters that live in the memstash/l2/* submodules:
 // ready-made value codecs, cache-key to storage-key mapping, and TTL conversions for the Redis and memcached wire
-// formats. It has no third-party dependencies - the client libraries are pulled in only by the adapter submodule you
-// actually import.
+// formats. It has no third-party dependencies: a client library comes only with the adapter module that needs it.
 package l2
 
 import (

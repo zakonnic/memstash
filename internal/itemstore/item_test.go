@@ -67,7 +67,7 @@ func TestSnapshotRejectsWriteInProgress(t *testing.T) {
 	assert.Zero(t, item.Metadata()&1, "endWrite must settle the generation even")
 }
 
-// TestGenWrapNeverLooksEmpty covers the generation wrapping on a item that carries nothing else: no TTL and a zero
+// TestGenWrapNeverLooksEmpty covers the generation wrapping on an item that carries nothing else: no TTL and a zero
 // tag leave gen as the only non-zero field, so landing on 0 would make a live item read as a never-occupied slot.
 func TestGenWrapNeverLooksEmpty(t *testing.T) {
 	lastEven := GenMask - 1

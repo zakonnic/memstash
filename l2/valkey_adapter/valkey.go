@@ -32,8 +32,8 @@ func IsOrderedMgetAvailable(client valkeylib.Client) bool {
 	return client != nil && client.Mode() != valkeylib.ClientModeCluster
 }
 
-// Multi-key commands (MGET/MSET) beat a per-key pipeline while they stay small.
-// But one huge command is worse than a stream of small ones, so we set this limit.
+// multiKeyBudget caps one multi-key command (MGET, MSET) in bytes. Such a command beats a per-key pipeline while it
+// is small, but one huge command is worse than a stream of small ones.
 const multiKeyBudget = 16 * 1024
 
 // argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).

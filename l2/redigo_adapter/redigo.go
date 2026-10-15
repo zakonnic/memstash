@@ -25,13 +25,13 @@ type Cache[K comparable, V any] struct {
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
 
 // IsOrderedMgetAvailable reports whether MGET on this pool returns its replies in key order. A redigo pool dials one
-// address and redigo has no cluster mode, so this is always true; front the pool with a proxy that fans keys out and
-// you own the claim - turn it off with l2.WithOrderedMget(memstash.Disabled).
+// address and redigo has no cluster mode, so this is always true. Behind a proxy that fans keys out, turn it off with
+// l2.WithOrderedMget(memstash.Disabled).
 func IsOrderedMgetAvailable(*redigolib.Pool) bool { return true }
 
-// Multi-key commands (MGET/MSET) beat a per-key pipeline while they stay small.
-// But one huge command is worse than a stream of small ones, so we set this limit.
-// And a command that does not fit redigo's fixed 4 KiB write buffer goes out in several write calls.
+// multiKeyBudget caps one multi-key command (MGET, MSET) in bytes. Such a command beats a per-key pipeline while it
+// is small, but one huge command is worse than a stream of small ones, and one past redigo's fixed 4 KiB write
+// buffer goes out in several write calls.
 const multiKeyBudget = 3500
 
 // argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).

@@ -80,10 +80,9 @@ func (p *WTinyLFUPolicy[K, V]) admits(t *itemstore.FlatHashMap[K, V], candidate 
 	return !ok || p.sketch.estimate(p.keyHash(candidate)) > p.sketch.estimate(p.keyHash(victim))
 }
 
-// freqSketch is a Count-Min sketch with 4-bit saturating counters, 16 to a uint64 word, and periodic aging: after
-// sampleSize successful increments every counter is halved, so estimates track recent frequency (TinyLFU's "reset").
-// A key charges 4 counters picked by Kirsch-Mitzenmacher double hashing off its 64-bit hash; the estimate is their
-// minimum. Allocated once at construction, no per-operation allocations.
+// freqSketch is a Count-Min sketch of 4-bit saturating counters, 16 to a word, allocated once. A key charges 4
+// counters picked by Kirsch-Mitzenmacher double hashing of its 64-bit hash, and its estimate is their minimum. After
+// sampleSize successful increments every counter is halved (TinyLFU's reset), so estimates track recent frequency.
 type freqSketch struct {
 	table      []uint64
 	mask       uint32 // len(table) - 1; len is a power of two

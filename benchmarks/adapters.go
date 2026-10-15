@@ -112,13 +112,13 @@ func newOtter(capacity int64) benchCache {
 func (a *otterAdapter) Name() string                  { return "otter-wtinylfu" }
 func (a *otterAdapter) Get(key uint64) (uint64, bool) { return a.c.GetIfPresent(key) }
 func (a *otterAdapter) Set(key, value uint64)         { a.c.Set(key, value) }
+func (a *otterAdapter) Delete(key uint64)             { a.c.Invalidate(key) }
 
-// Settle runs pending maintenance synchronously. Without it the lazy frequency-sketch init
-// races into the timed section and flips the read path mid-run.
-func (a *otterAdapter) Delete(key uint64) { a.c.Invalidate(key) }
-func (a *otterAdapter) Settle()           { a.c.CleanUp() }
-func (a *otterAdapter) Close()            { a.c.StopAllGoroutines() }
-func (a *otterAdapter) Expose() any       { return a.c }
+// Settle runs pending maintenance synchronously. Without it the lazy frequency-sketch init races into the timed
+// section and flips the read path mid-run.
+func (a *otterAdapter) Settle()     { a.c.CleanUp() }
+func (a *otterAdapter) Close()      { a.c.StopAllGoroutines() }
+func (a *otterAdapter) Expose() any { return a.c }
 
 type otterNode[K comparable, V any] struct {
 	key       K

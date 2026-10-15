@@ -9,18 +9,19 @@ var setSeed = maphash.MakeSeed()
 
 const setMinSlots = 8
 
-// SetSlot is one slot of a Set's backing array (for using in NewSetFrom and stay at stack buffer).
+// SetSlot is one slot of a Set's backing array, exported so a caller can declare a stack buffer for NewSetFrom.
 type SetSlot[K comparable] struct {
 	tag uint64
 	key K
 }
 
-// Set is a membership test helper, faster than map[key]struct{}. A linear hash map. Not thread-safe.
+// Set is a membership set, faster than map[K]struct{}: linear probing, no deletes. Not safe for concurrent use.
 type Set[K comparable] struct {
 	slots []SetSlot[K]
 	count int
 }
 
+// NewSet returns a Set that takes capacity keys without growing.
 func NewSet[K comparable](capacity int) Set[K] {
 	if capacity <= 0 {
 		return Set[K]{}
@@ -31,7 +32,7 @@ func NewSet[K comparable](capacity int) Set[K] {
 // NewSetFrom backs the Set with buf instead of a fresh allocation, so a stack-allocated array keeps it off the heap.
 func NewSetFrom[K comparable](buf []SetSlot[K]) Set[K] {
 	n := len(buf)
-	if n&(n-1) != 0 { // not a power of two: the mask trick needs one, so take the largest power-of-two prefix
+	if n&(n-1) != 0 { // the mask needs a power of two: take the largest power-of-two prefix
 		n = 1 << (bits.Len(uint(n)) - 1)
 	}
 	return Set[K]{slots: buf[:n]}
@@ -82,7 +83,6 @@ func (s *Set[K]) place(key K) {
 	}
 }
 
-// grow doubles the table and refills it
 func (s *Set[K]) grow() {
 	crowded := s.slots
 	size := len(crowded) * 2

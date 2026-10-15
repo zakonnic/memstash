@@ -26,11 +26,12 @@ const (
 	// InMainQueue is set while the item sits in eviction queue 1.
 	InMainQueue uint64 = 1 << 60
 
+	// ExpireShift and ExpireMask place the expiration time, in expireUnit steps on a wrapping scale. 0 means no TTL.
 	ExpireShift        = 42
 	ExpireMask  uint64 = (1<<18 - 1) << ExpireShift
 	// ExpireWrapMask wraps offsets on the 18-bit scale.
 	ExpireWrapMask uint32 = 1<<18 - 1
-	// ExpireMax is the maximum TTL in offset units: half the wrapping scale, so "behind now" stays unambiguous.
+	// ExpireMax is the longest TTL in offset units. It is half the scale, so "behind now" stays unambiguous.
 	ExpireMax = 1<<17 - 1
 
 	// HasNext is the probe terminator. Clear means the slot is uncovered: no key homed at or before it lives past
@@ -38,6 +39,7 @@ const (
 	// recomputes it exactly over the run a deletion compacts.
 	HasNext uint64 = 1 << 41
 
+	// TagShift and TagMask place the tag, which filters probe candidates before the key compare.
 	TagShift        = 28
 	TagMask  uint64 = (1<<13 - 1) << TagShift
 	// TagOfZero is what TagOf yields for a hash whose tag bits are all zero: the field's top bit alone.
@@ -88,18 +90,22 @@ type Entry[K comparable, V any] struct {
 	Value V
 }
 
-// Item is one cached item: an atomic meta word plus its Entry inline. It is also the item's hash-table slot, so a
-// probe that finds it has the Entry right there, with no second lookup.
+// Item is one cached item: an atomic meta word with its Entry inline. It is also the item's hash-table slot, so a
+// probe that finds it has the Entry right there.
 //
-// Readers are lock-free through a seqlock on the meta word's generation: Snapshot copies the Entry and validates the
-// copy, writers (under the shard mutex) advance the generation. Aligned words are single-copy atomic everywhere Go
-// runs, so a snapshotted pointer is always whole - old or new, never a mix.
+// Readers take no lock. A seqlock on the meta word's generation guards the Entry: readers copy it and validate the
+// copy, writers advance the generation. Aligned words are single-copy atomic everywhere Go runs, so a pointer in a
+// copy is always whole, old or new.
+//
+// Lock-free readers may call Metadata, Gen, SnapshotInto, Snapshot, TouchWith and TouchAndRefreshExpire. Every other
+// method requires the shard mutex. A writer's plain read-modify-write can overwrite a reader's CAS, so readers write
+// only what may be lost: a reference bit or a TTL refresh.
 type Item[K comparable, V any] struct {
 	meta  atomic.Uint64
 	entry Entry[K, V]
 }
 
-// Entry returns the item's pair in place. Callers must hold the shard mutex; lock-free readers use Snapshot.
+// Entry returns the item's pair in place. Without the shard mutex the pair may be torn; readers use SnapshotInto.
 func (s *Item[K, V]) Entry() *Entry[K, V] { return &s.entry }
 
 // SnapshotInto copies the item's Entry into dst and reports whether the copy is consistent with metaWord. False means
@@ -109,7 +115,7 @@ func (s *Item[K, V]) Entry() *Entry[K, V] { return &s.entry }
 // An odd generation fails too. It is SetValue's write-in-progress mark: without the check, a reader entirely inside
 // one write would see a steady word and accept a torn value.
 func (s *Item[K, V]) SnapshotInto(dst *Entry[K, V], metaWord uint64) bool {
-	s.snapshotEntryInto(dst) // platform-specific, seats under build flags
+	s.snapshotEntryInto(dst) // per platform: item_amd64.go, item_other.go
 	return (s.meta.Load()^metaWord)&AliveGenMask == 0 && metaWord&1 == 0
 }
 
@@ -201,7 +207,7 @@ func (s *Item[K, V]) endWrite() {
 	storeMeta(&s.meta, metaWord&^GenMask|liveGen(metaWord+1))
 }
 
-// Gen returns the item's current occupancy generation.
+// Gen returns the item's current generation.
 func (s *Item[K, V]) Gen() uint32 { return uint32(s.meta.Load() & GenMask) }
 
 // Metadata returns the current meta word.
@@ -219,7 +225,7 @@ func (s *Item[K, V]) TouchWith(metaWord uint64) {
 	}
 }
 
-// RevokeChance withdraws one second chance. Called under the shard mutex.
+// RevokeChance withdraws one chance from the reference counter.
 func (s *Item[K, V]) RevokeChance(metaWord uint64) {
 	if metaWord&ThirdChance != 0 {
 		andMeta(&s.meta, ^ThirdChance)
@@ -228,7 +234,7 @@ func (s *Item[K, V]) RevokeChance(metaWord uint64) {
 	andMeta(&s.meta, ^SecondChance)
 }
 
-// ResetChances clears the reference counter (S3-FIFO promotion from small to main). Called under the shard mutex.
+// ResetChances clears the reference counter.
 func (s *Item[K, V]) ResetChances() {
 	andMeta(&s.meta, ^ChanceMask)
 }
@@ -238,14 +244,14 @@ func (s *Item[K, V]) Kill() bool {
 	return orMeta(&s.meta, Dead)&Dead == 0
 }
 
-// RefreshExpire extends the TTL, preserving the generation and reference counter. A race with a concurrent touch may
-// lose one second chance - harmless.
+// RefreshExpire sets a new expiration offset. A concurrent touch may lose its chance bit.
 func (s *Item[K, V]) RefreshExpire(expireOff uint32) {
 	metaWord := s.meta.Load()
 	storeMeta(&s.meta, metaWord&^ExpireMask|uint64(expireOff)<<ExpireShift)
 }
 
-// TouchAndRefreshExpire extends the TTL and grants the touch in one CAS from the lock-free read path.
+// TouchAndRefreshExpire sets a new expiration offset and grants the touch in one CAS, and reports whether the CAS
+// won.
 func (s *Item[K, V]) TouchAndRefreshExpire(metaWord uint64, expireOff uint32) bool {
 	newWord := metaWord&^ExpireMask | uint64(expireOff)<<ExpireShift
 	switch {
@@ -257,8 +263,8 @@ func (s *Item[K, V]) TouchAndRefreshExpire(metaWord uint64, expireOff uint32) bo
 	return s.meta.CompareAndSwap(metaWord, newWord)
 }
 
-// Expired reports whether the TTL has elapsed for the given loaded meta word. Offsets live on a wrapping scale:
-// "expired" is a zero or backward distance from nowOff, which is why TTLs are capped at half the scale (ExpireMax).
+// Expired reports whether the meta word's TTL has elapsed at nowOff. On the wrapping scale, expired means a zero or
+// backward distance from nowOff, which is why TTLs are capped at half the scale (ExpireMax).
 func Expired(metaWord uint64, nowOff uint32) bool {
 	expireOff := uint32(metaWord & ExpireMask >> ExpireShift)
 	if expireOff == 0 {

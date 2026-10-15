@@ -9,14 +9,14 @@ import (
 // WithOnL2Error, the adapters' WithKeyFunc) was built for key/value types different from the cache's.
 var ErrOptionMismatch = errors.New("memstash: option type arguments do not match the cache's key/value types")
 
-// Option configures a cache under construction; build one with the With* helpers. Option deliberately carries no type
-// parameters, so the key/value types are written once on the constructor (New[K, V](...)) instead of on every option;
-// the price is that options which do mention K and V are matched against the cache at run time (ErrOptionMismatch).
+// Option configures a cache under construction. Build one with the With* helpers.
 //
-// The fields are exported so that satellite packages (the L2 adapters) can define their own options of the same type
-// and accept one flat option list. An ApplyTyped implementation is handed arbitrary targets and must follow the
-// dispatch protocol: silently ignore a target kind it does not recognize (return nil), fill the target when it
-// matches exactly, and return ErrOptionMismatch when the target kind is recognized but its key/value types differ.
+// Option has no type parameters, so K and V are named once, on New. Options that depend on K and V are checked against
+// the cache when it is built and fail with ErrOptionMismatch.
+//
+// The fields are exported so that other packages, such as the L2 adapters, can define options of the same type and
+// accept one flat option list. ApplyTyped receives arbitrary targets. It returns nil for a target it does not know,
+// fills a target that matches exactly, and returns ErrOptionMismatch for a known target whose key/value types differ.
 type Option struct {
 	// ApplyField applies a plain-value per-field option.
 	ApplyField func(f *FieldOverrides)
@@ -213,7 +213,7 @@ func WithGrowthThreshold(threshold float64) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.growthThreshold = &threshold }}
 }
 
-// WithShardsCount sets Config.ShardsCount: the number of shards the eviction state is split into.
+// WithShardsCount sets Config.ShardsCount: the number of shards the first level is split into.
 func WithShardsCount(shards int) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.shards = &shards }}
 }
@@ -236,7 +236,7 @@ func WithGhostSize(ghostSize int) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.ghostSize = &ghostSize }}
 }
 
-// WithWriteBackBuffer sets Config.WriteBackBufferSize: the buffer of the WriteBack worker pool.
+// WithWriteBackBuffer sets Config.WriteBackBufferSize: the buffer size of each WriteBack worker.
 func WithWriteBackBuffer(size int) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.writeBackBufferSize = &size }}
 }

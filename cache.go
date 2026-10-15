@@ -1,9 +1,8 @@
 // Package memstash is an ultra-fast two-level cache.
 //
-// The first level is sharded: each shard owns an open-addressing table whose slots - the positions of a flat array -
-// hold the items themselves, plus an eviction policy. An item's key and value sit inline next to its meta word, so a
-// memory hit is one lookup deep, takes no locks and allocates nothing. The second level is any adapter that
-// implements L2Cache.
+// The first level is sharded. Each shard owns an eviction policy and an open-addressing table whose slots hold the
+// items themselves, key and value inline next to a meta word. A memory hit is one lookup deep, takes no locks and
+// allocates nothing. The second level is any adapter that implements L2Cache.
 package memstash
 
 import (
@@ -34,9 +33,10 @@ type BatchLoaderFunc[K comparable, V any] func(ctx context.Context, keys []K) (L
 // it, also to a GetOrLoad waiting on a batch load that omitted its key.
 var ErrKeyNotFound = errors.New("memstash: key not found")
 
-// TickInterval is how often the coarse current time used for TTL is refreshed.
 const (
-	TickInterval          = time.Second
+	// TickInterval is how often the coarse clock behind TTLs advances.
+	TickInterval = time.Second
+	// DefaultMemoryCapacity is the item capacity of a cache that sets neither MemoryCapacity nor MemoryBudget.
 	DefaultMemoryCapacity = 20_000
 
 	// DefaultWriteBackWorkers is the size of the write-back worker pool when WriteBackWorkers is not set.
@@ -75,9 +75,8 @@ const requires64BitPlatform = 1 << 63
 
 const _ uint = requires64BitPlatform
 
-// shard is an independent segment of the first level: a key is always served by the same shard (by hash), and all
-// mutations for that key are serialized by the shard mutex. Readers never take it: they probe the atomically
-// published table and verify candidates against the items themselves.
+// shard is one segment of the first level, picked by the key's hash. Every mutation runs under the shard mutex.
+// Readers never take it: they probe the atomically published table and validate candidates against the items.
 type shard[K comparable, V any] struct {
 	// The first cache line is the read path's: a probe loads the table and the move sequence, and a writer taking
 	// the mutex must not bounce that line out of every reader's cache. shardBytes pins the layout.
@@ -133,7 +132,7 @@ const (
 	refresh
 )
 
-// Cache is a two-level cache.
+// Cache is a two-level cache, safe for concurrent use.
 type Cache[K comparable, V any] struct {
 	costFunc func(key K, value V) uint32
 
@@ -149,9 +148,9 @@ type Cache[K comparable, V any] struct {
 	onDeletion func(key K, value V, cause DeletionCause)
 	seed       maphash.Seed
 
-	// Coarse clock for cheap TTL checks: nowOff is the time since epoch in expireUnit steps, refreshed by a background
-	// ticker (started only when TTL > 0). Offsets are 18-bit values on a wrapping scale, so the unit adapts to the
-	// configured TTL: 1s up to ~36h TTLs, growing just enough beyond that - the granularity stays under 0.001% of TTL.
+	// The coarse clock for TTL checks: nowOff is the time since epoch in expireUnit steps, advanced by clockLoop when
+	// TTL > 0. Offsets wrap at 18 bits, so the unit grows with the TTL: 1s up to a ~36h TTL, then just enough to fit,
+	// which keeps the granularity under 0.001% of the TTL.
 	epoch        time.Time
 	nowOff       atomic.Uint32
 	ttlOff       uint32
@@ -230,12 +229,12 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		cfg.MemoryCapacity = cfg.MemoryBudget
 	}
 	if cfg.MemoryCapacity == 0 {
-		if cfg.CostFunc != nil { // must set capacity explicitly - protection from misconfiguration
+		if cfg.CostFunc != nil { // a weighted cache must say its capacity
 			return nil, ErrBadCapacity
 		}
 		cfg.MemoryCapacity = DefaultMemoryCapacity
 	}
-	// Cache can hold up to MaxItems, but with CostFunc MemoryCapacity can be bigger than the number of items.
+	// With CostFunc the capacity is a weight, not an item count, so MaxItems does not bound it.
 	if cfg.CostFunc == nil && cfg.MemoryCapacity > itemstore.MaxItems {
 		return nil, ErrCapacityTooLarge
 	}
@@ -363,7 +362,6 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		c.writeQueues = make([]chan l2Write[K, V], workers)
 		c.wg.Add(workers)
 		for i := range c.writeQueues {
-			// worker pool with separate buffers to bind workers to keys
 			c.writeQueues[i] = make(chan l2Write[K, V], cfg.writeBackBuffer())
 			go c.writeBackLoop(c.writeQueues[i])
 		}
@@ -383,7 +381,7 @@ func (c *Cache[K, V]) Close() {
 		close(c.stop)
 		c.refreshMu.Unlock()
 		c.endLife()
-		c.batchedGets.close() // before the wait below: see getPool.close
+		c.batchedGets.close() // before the wait below: see getWorkerPool.close
 		c.refreshes.Wait()
 		c.wg.Wait()
 		// Catch writes that slipped into a buffer while its worker was shutting down. The workers are gone, so
@@ -428,8 +426,8 @@ func (c *Cache[K, V]) Wait(ctx context.Context) error {
 	return nil
 }
 
-// shardAndHash returns the key's shard and hash: the low bits pick the shard, the high bits seed the table probe,
-// so one hash serves both.
+// shardAndHash returns the key's shard and hash. The low bits pick the shard and the high bits the home slot, so one
+// hash serves both.
 func (c *Cache[K, V]) shardAndHash(key K) (*shard[K, V], uint64) {
 	keyHash := maphash.Comparable(c.seed, key)
 	return &c.shards[uint32(keyHash)&c.shardMask], keyHash
@@ -439,7 +437,7 @@ func (c *Cache[K, V]) keyHash(key K) uint64 {
 	return maphash.Comparable(c.seed, key)
 }
 
-// writeQueueOf returns the write-back worker for the key, to spread across any worker count.
+// writeQueueOf returns the key's write-back queue.
 func (c *Cache[K, V]) writeQueueOf(key K) chan l2Write[K, V] {
 	if len(c.writeQueues) == 1 {
 		return c.writeQueues[0]
@@ -901,8 +899,7 @@ func (c *Cache[K, V]) killAt(sh *shard[K, V], idx uint32, item *itemstore.Item[K
 	storage.Reclaim(idx, &sh.scratch, &sh.moveSeq)
 }
 
-// findSlot probes the shard's current table for the key's live slot: (slot index, item, true) when found. Called
-// under the shard mutex.
+// findSlot finds the key's live slot. The caller holds the shard mutex: the key is read without a snapshot.
 func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, *itemstore.Item[K, V], bool) {
 	storage := sh.items.GetStorage()
 	tagged := tagOf(keyHash)
@@ -976,9 +973,8 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, load LoaderFunc[K, V
 		if !running {
 			return c.loadFlight(ctx, key, keyHash, load, call)
 		}
-		// A flight is already in progress - wait for its result or for the context to be canceled (the owner keeps
-		// loading on behalf of everyone else). The key was not in memory when this call looked, and this call itself
-		// never reaches L2 - the owner does: a memory miss.
+		// Another call is loading the key: wait for it or for ctx, while the owner keeps loading for the others. This
+		// call missed memory and never reaches L2 itself, so it counts as a memory miss.
 		c.stats.addMemMisses(1)
 		if err := winner.wait(ctx); err != nil {
 			var zero V
@@ -1018,8 +1014,7 @@ func (c *Cache[K, V]) doLoad(ctx context.Context, key K, keyHash uint64, load Lo
 			c.setMemory(key, value, c.expireOffset(), fill, mark)
 			return value, nil
 		case err != nil:
-			// Fall back to the loader; report the L2 error via the callback.
-			c.reportL2Err(key, err)
+			c.reportL2Err(key, err) // and fall back to the loader
 		}
 		c.stats.addL2Misses(1)
 	} else {

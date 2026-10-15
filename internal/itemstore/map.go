@@ -6,12 +6,12 @@ import (
 	"unsafe"
 )
 
-// groupShift sizes the overflow-count groups at 8 slots: home clusters at the working load factor rarely outgrow one
-// group, so a zero count usually proves absence right at the group edge.
+// groupShift makes overflow groups 8 slots wide. At the working load factor a home cluster rarely outgrows one, so a
+// zero count usually proves absence right at the group edge.
 const groupShift = 3
 
-// chunkShift splits the slot space into chunks of 64Ki slots - a few MiB each, whatever the item type. A big table is
-// then a handful of those instead of one multi-gigabyte block the allocator has to find contiguous space for.
+// chunkShift splits big tables into chunks of 64Ki slots, so the allocator never has to find one multi-gigabyte
+// block.
 const (
 	chunkShift = 16
 	chunkSlots = 1 << chunkShift

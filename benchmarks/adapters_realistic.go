@@ -73,7 +73,7 @@ func newRistrettoBytes(budget int64, avgEntry int) benchCacheBytes {
 		},
 		MaxCost:     budget,
 		BufferItems: 64,
-		// entryCost already prices the entry;
+		// Cost is the whole price: no internal per-item charge on top.
 		IgnoreInternalCost: true,
 	})
 	if err != nil {

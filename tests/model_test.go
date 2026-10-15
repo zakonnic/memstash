@@ -12,10 +12,9 @@ import (
 
 // TestModelAgainstMap is a differential test of the first level's slot tables: a random stream of Set / overwrite /
 // Delete / Get is mirrored into a plain map, and with the capacity above the keyspace (so eviction never runs) the
-// cache must behave exactly like that map. The keyspace is small on purpose - probe chains stay dense, tombstones
-// from deletes pile up inside chains, and the per-shard tables repeatedly grow from their minimal size and rebuild
-// at the same size to purge tombstones. Any probe-chain break (a lost key, a duplicate slot, a value served for the
-// wrong key) surfaces as a mismatch.
+// cache must behave exactly like that map. The keyspace is small so probe chains stay dense, deletes compact runs
+// inside them all the time, and the per-shard tables grow repeatedly from their minimal size. Any probe-chain break
+// (a lost key, a duplicate slot, a value served for the wrong key) surfaces as a mismatch.
 func TestModelAgainstMap(t *testing.T) {
 	for _, tc := range policies {
 		for _, shards := range []int{0, 1} { // default sharding and the single-shard deterministic layout
@@ -53,7 +52,7 @@ func TestModelAgainstMap(t *testing.T) {
 				for op := 0; op < 200_000; op++ {
 					key := fmt.Sprintf("key-%d", rng.Intn(keyspace))
 					switch rng.Intn(10) {
-					case 0, 1, 2: // delete (often - keeps tombstones churning)
+					case 0, 1, 2: // delete, often: keeps the runs compacting
 						require.NoError(t, c.Delete(ctx, key))
 						delete(model, key)
 					case 3, 4, 5, 6: // set / overwrite
@@ -74,8 +73,8 @@ func TestModelAgainstMap(t *testing.T) {
 }
 
 // TestTombstoneChurnBounded drives the delete-heavy pattern that never triggers eviction: a fixed number of live
-// keys is kept while fresh keys replace deleted ones, so every shard's table accumulates tombstones that only
-// rebuilds can purge. The table growth must stay bounded by the live count, not by the number of operations.
+// keys is kept while fresh keys replace deleted ones. Table growth must stay bounded by the live count, not by the
+// number of operations: a deletion may leave nothing behind that takes up a slot.
 func TestTombstoneChurnBounded(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range policies {

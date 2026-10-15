@@ -19,9 +19,9 @@ const flightSpilled = 0xFF
 // map could never delete it.
 const flightAlone = 0xFFFF
 
-// flightCall is one singleflight flight. A flight nobody joined never synchronizes at all - it is released without a
-// finish, and val, err and ok stay private to its owner. Once somebody joins, those three are written before over
-// goes true and read after it, and the channel the waiter parks on is created on demand.
+// flightCall is one singleflight flight. A flight nobody joined never synchronizes: it is released without a finish,
+// and val, err and ok stay private to its owner. Once somebody joins, those three are written before over goes true
+// and read after it. The waiter's channel is created on demand.
 type flightCall[K comparable, V any] struct {
 	key K
 	val V
@@ -79,8 +79,7 @@ func (f *flightCall[K, V]) wait(ctx context.Context) error {
 }
 
 // flightBucket is one bucket of the in-flight registry: a fixed set of slots plus an overflow map for the rare bucket
-// that fills up. Everything in it moves under mu, so a claim and a release each cost one uncontended lock and nothing
-// else - the atomics a lock-free slot table would need are no cheaper than the lock itself.
+// that fills up. Everything in it moves under mu, so a claim and a release each cost one uncontended lock.
 type flightBucket[K comparable, V any] struct {
 	mu    sync.Mutex
 	live  uint8 // which slots are taken; usually one bit, so the scan below is a couple of iterations

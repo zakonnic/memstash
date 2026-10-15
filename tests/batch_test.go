@@ -79,7 +79,7 @@ func TestBatchGetOrLoad(t *testing.T) {
 	loader := func(_ context.Context, keys []string) (memstash.List[string, string], error) {
 		calls.Add(1)
 		askedKeys = append([]string(nil), keys...)
-		return memstash.List[string, string]{{Key: "loaded", Value: "loader-value"}}, nil // "absent" is deliberately omitted
+		return memstash.List[string, string]{{Key: "loaded", Value: "loader-value"}}, nil // "absent" is left out
 	}
 
 	got, err := c.BatchGetOrLoad(ctx, []string{"from-mem", "from-l2", "loaded", "absent"}, loader)
@@ -161,7 +161,7 @@ func TestBatchGetFromMemory(t *testing.T) {
 			require.NoError(t, c.Set(ctx, key, "v-"+key))
 		}
 	}
-	require.NoError(t, c.Delete(ctx, keys[1])) // present, then deleted: the chain walks past a tombstone
+	require.NoError(t, c.Delete(ctx, keys[1])) // present, then deleted: its run is compacted under the batch
 	require.NoError(t, c.Set(ctx, keys[2], "overwritten"))
 
 	dst := make(memstash.List[string, string], 0, len(keys))

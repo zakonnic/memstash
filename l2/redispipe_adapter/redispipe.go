@@ -38,8 +38,8 @@ func IsOrderedMgetAvailable(sender redispiperedis.Sender) bool {
 	return ok
 }
 
-// Multi-key commands (MGET/MSET) beat a per-key batch while they stay small.
-// But one huge command is worse than a stream of small ones, so we set this limit.
+// multiKeyBudget caps one multi-key command (MGET, MSET) in bytes. Such a command beats a per-key batch while it is
+// small, but one huge command is worse than a stream of small ones.
 const multiKeyBudget = 12 * 1024
 
 // argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).

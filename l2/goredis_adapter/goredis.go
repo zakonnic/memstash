@@ -18,8 +18,8 @@ type Cache[K comparable, V any] struct {
 	client  redis.Cmdable
 	codec   memstash.Codec[V]
 	keyFunc func(K) string
-	// singleNode marks client types whose commands always reach one server, so MGET/MSET commands available.
-	// On a cluster keep the per-key pipeline instead.
+	// singleNode marks a client whose commands always reach one server, so batches may use MGET and MSET. A cluster
+	// keeps the per-key pipeline.
 	singleNode bool
 	// orderedMget marks a client whose MGET replies come back in key order. Same probe as singleNode by default, but
 	// l2.WithOrderedMget can override it on its own.
@@ -46,8 +46,8 @@ func stringToBytes(s string) []byte {
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
 
-// MultiKeyBudget Multi-key commands (MGET/MSET) beat a per-key pipeline while they stay small.
-// But one huge command is worse than a stream of small ones, so we set this limit.
+// MultiKeyBudget caps one multi-key command (MGET, MSET) in bytes. Such a command beats a per-key pipeline while it
+// is small, but one huge command is worse than a stream of small ones.
 const MultiKeyBudget = 16 * 1024
 
 // argWireOverhead approximates the RESP framing bytes added per argument ($<len>\r\n...\r\n).

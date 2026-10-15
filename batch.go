@@ -25,8 +25,8 @@ type batchGroup[K comparable, V any] struct {
 	hit     [batchGroupSize]bool
 }
 
-// BatchGetFromMemory looks the keys up in memory only and appends every found pair to dst, which it returns;
-// Lookups are software-pipelined in groups. Pass a reused dst (dst[:0]) to keep the call allocation-free.
+// BatchGetFromMemory looks the keys up in memory only and appends the pairs it finds to dst, which it returns. Pass a
+// reused dst (dst[:0]) to keep the call allocation-free.
 func (c *Cache[K, V]) BatchGetFromMemory(keys []K, dst List[K, V]) List[K, V] {
 	dst, _, hits := c.batchGetMemory(keys, dst, false)
 	c.stats.addMemHits(hits)
@@ -128,9 +128,8 @@ func (c *Cache[K, V]) batchGetMemoryFlights(keys []K, fl *batchFlights[K, V], ds
 	return dst, hits
 }
 
-// batchGetGroup resolves up to batchGroupSize keys against the first level.
-// Anything off the straight path (a dead or mismatched candidate, a racing write) falls back to the single-key
-// getMemory: rare, and its slot lines are already warm.
+// batchGetGroup resolves up to batchGroupSize keys against the first level. Anything off the straight path, such as
+// a mismatched candidate or a racing write, falls back to getMemory: that is rare, and the lines are already warm.
 func (c *Cache[K, V]) batchGetGroup(keys []K, g *batchGroup[K, V]) {
 	// hash, home slot, and the group's first meta loads.
 	for i := range keys {
@@ -456,9 +455,8 @@ func (c *Cache[K, V]) loadOwned(ctx context.Context, load BatchLoaderFunc[K, V],
 
 const batchResolvedSlots = 256
 
-// batchLoad resolves the owned keys: first from L2 in one BatchGet, the rest with one loader call; freshly loaded
-// values are stored back according to the write policy (mirroring doLoad). The returned List may be partial when
-// err != nil.
+// batchLoad resolves the owned keys: first from L2 in one BatchGet, the rest with one loader call. Loaded values are
+// stored back per the write policy, as in doLoad. The returned List may be partial when err != nil.
 func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderFunc[K, V], calls []flightCall[K, V]) (List[K, V], error) {
 	if c.l2Cache == nil {
 		c.stats.addMemMisses(int64(len(keys)))
@@ -473,7 +471,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 		}
 	}
 	result := make(List[K, V], 0, len(keys))
-	var buf [batchResolvedSlots]itemstore.SetSlot[K] // trick to stay on stack
+	var buf [batchResolvedSlots]itemstore.SetSlot[K] // keeps the Set on the stack
 	keysFromL2 := itemstore.NewSetFrom(buf[:])
 	var index map[K]int
 	for i, item := range fromL2 {
@@ -486,7 +484,7 @@ func (c *Cache[K, V]) batchLoad(ctx context.Context, keys []K, load BatchLoaderF
 
 	toLoad := keys
 	if len(fromL2) > 0 {
-		// max - guards against extra keys, returned for whatever reason
+		// max: the adapter may have returned keys it was not asked for
 		toLoad = make([]K, 0, max(len(keys)-keysFromL2.Len(), 0))
 		for _, key := range keys {
 			if !keysFromL2.Exists(key) {
