@@ -16,8 +16,8 @@ const (
 	// clock turns out to be. A Windows tick is wide enough to reach this cap; a Linux one settles far below it.
 	probeMaxOps = 1 << 17
 	// probeKeys is how many distinct keys the timed loops walk. It has to be large: a probe cycling a handful of keys
-	// would sit in CPU cache and report the cost of an empty table, not of a shard that has been evicting for hours. A power of two, so the index is a mask - at a nanosecond per operation a division shows
-	// up in the result.
+	// would sit in CPU cache and report the cost of an empty table, not of a shard that has been evicting for hours. A
+	// power of two, so the index is a mask - at a nanosecond per operation a division shows up in the result.
 	probeKeys = 1 << 15
 	// probeWindows is how many clock ticks a timed run must span, which bounds the quantisation error at 1/n.
 	probeWindows = 10

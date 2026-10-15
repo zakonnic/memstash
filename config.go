@@ -49,14 +49,14 @@ type PanicHandler func(recovered any, handled bool)
 // Config holds the cache configuration. Pass it to NewWithConfig directly, or configure the cache field by field
 // with the With* options of New.
 type Config[K comparable, V any] struct {
-	// MemoryCapacity is the first-level capacity in weight units. When CostFunc == nil every item weighs 1 and the capacity
-	// means the number of items. If CostFunc != nil it is required field, must be > 0. Mutually exclusive with MemoryBudget.
-	// Each shard gets an equal share, and an item heavier than its share is not kept in memory (Stats.Rejected).
+	// MemoryCapacity is the first-level capacity in weight units. Without CostFunc every item weighs 1, so it is an
+	// item count; with CostFunc it is required. It excludes MemoryBudget. Each shard gets an equal share, and an item
+	// heavier than its share is not kept in memory (Stats.Rejected).
 	MemoryCapacity int64
 
-	// MemoryBudget bounds the cached elements size in bytes. When CostFunc == nil a cost function is derived automatically.
-	// Require CostFunc for complex types. Split between the shards like MemoryCapacity: an item larger than its shard's
-	// share is not kept in memory.
+	// MemoryBudget bounds the cached data in bytes. Without CostFunc the cost is derived from the types
+	// (GetAutoCostFunc); a type it cannot measure needs a CostFunc (ErrBudgetNeedsCostFunc). It is split between the
+	// shards like MemoryCapacity, and an item larger than its shard's share is not kept in memory.
 	MemoryBudget int64
 
 	// CostFunc is the item weight function. It must be deterministic (the weight is recomputed during eviction) and the
@@ -64,8 +64,8 @@ type Config[K comparable, V any] struct {
 	// it also runs under the shard mutex, which a panic leaves locked.
 	CostFunc func(key K, value V) uint32
 
-	// TTL is the lifetime of first-level items with one-second resolution. 0 means no TTL. The same TTL is passed to L2Cache
-	// on writes. Anything past ~146 years is taken as ~146 years.
+	// TTL is the lifetime of first-level items: one-second resolution up to a ~36h TTL, proportionally coarser beyond.
+	// 0 means no TTL. L2 writes get the same TTL. Anything past ~146 years is taken as ~146 years.
 	TTL time.Duration
 
 	// RefreshTTLOnGet makes every first-level hit extend the item's lifetime by a full TTL (sliding expiration).
@@ -101,10 +101,10 @@ type Config[K comparable, V any] struct {
 	// granularity internally.
 	GrowthThreshold float64
 
-	// ShardsCount is the number of shards the eviction state (queues, state pool, weight) is split into. It is rounded up to
-	// a power of two and capped at 128; shards are also halved until each holds at least 64 weight units. 0 means
-	// automatic: GOMAXPROCS. Capacity and ghost are divided evenly between shards; eviction operates within a single
-	// shard. ShardsCount: 1 yields a globally deterministic eviction order (useful in tests).
+	// ShardsCount is the number of shards the first level is split into. It is rounded up to a power of two, capped
+	// at 128, and halved until each shard holds at least 64 weight units. 0 means GOMAXPROCS. Capacity and ghost are
+	// divided evenly between the shards and eviction works within one shard, so ShardsCount 1 gives a globally
+	// deterministic eviction order (useful in tests).
 	ShardsCount int
 
 	// L2Cache is the optional second level.

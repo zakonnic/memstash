@@ -189,9 +189,9 @@ type Cache[K comparable, V any] struct {
 	endLife   context.CancelFunc
 }
 
-// New creates a cache configured by the options. The returned cache must be closed with Close when background
-// goroutines run - a TTL is set, or an L2 cache is written with WriteBack (the default write policy); otherwise
-// Close is optional.
+// New creates a cache configured by the options. Close it when it runs background goroutines: when a TTL is set,
+// when L2 is written with WriteBack (the default write policy), once GetBatched has been called, or while a
+// GetAndRefresh load may be out. Otherwise Close is optional.
 func New[K comparable, V any](opts ...Option) (*Cache[K, V], error) {
 	cfg, err := buildConfig[K, V](opts)
 	if err != nil {

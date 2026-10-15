@@ -12,10 +12,10 @@ import (
 type L2Cache[K comparable, V any] interface {
 	// Get returns the value and a presence flag. A missing key is (zero, false, nil), not an error.
 	Get(ctx context.Context, key K) (value V, found bool, err error)
-	// BatchGet returns the found subset of keys in one round trip where the backend supports it: only keys asked
-	// for, each at most once. A missing key is simply absent from the result, not an error. Values returned alongside
-	// an error are used: return only keys that were read. The batch methods report a failure confined to some keys as KeyError values, joined, and must not
-	// modify the slice they are handed.
+	// BatchGet returns the found subset of keys in one round trip where the backend supports it: only keys asked for,
+	// each at most once. A missing key is absent from the result, not an error. Values returned alongside an
+	// error are used: return only keys that were read. The batch methods report a failure confined to some keys as
+	// KeyError values, joined, and must not modify the slice they are handed.
 	BatchGet(ctx context.Context, keys []K) (List[K, V], error)
 	// Set stores the value; ttl == 0 means "no expiration".
 	Set(ctx context.Context, key K, value V, ttl time.Duration) error
@@ -73,8 +73,8 @@ type Codec[V any] interface {
 type WritePolicy uint8
 
 const (
-	// WriteBack writes to L2 asynchronously via a pool of background workers (the default). Close() waits for the buffer
-	// to drain. Errors are delivered to Config.OnL2Error.
+	// WriteBack writes to L2 asynchronously via a pool of background workers (the default). Close() waits for the
+	// buffer to drain. Errors are delivered to Config.OnL2Error.
 	WriteBack WritePolicy = iota
 	// WriteThrough writes to L2 synchronously on Set.
 	WriteThrough

@@ -7,8 +7,8 @@ import (
 	"github.com/zakonnic/memstash/internal/itemstore"
 )
 
-// GetAndRefresh returns what memory holds for key - a value past its TTL included, as long as no read has reclaimed it -
-// and reloads the key in the background, where the result replaces the cached value and follows WritePolicy into L2.
+// GetAndRefresh returns what memory holds for key, even a value past its TTL that nothing has reclaimed yet, and
+// reloads the key in the background. The loaded value replaces the cached one and follows WritePolicy into L2.
 //
 // ctx is used for its values only: the load outlives this call, and Close cancels it and waits for it. A load error,
 // ErrKeyNotFound included, leaves the current value in place; a GetOrLoad waiting on the same key receives it.

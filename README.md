@@ -115,7 +115,7 @@ func main() {
 }
 ```
 
-> Every method is safe to call from any number of goroutines;
+> Every method is safe to call from any number of goroutines.
 
 ### Read-through with a loader (singleflight)
 

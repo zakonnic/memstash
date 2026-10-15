@@ -115,8 +115,8 @@ func (c *Cache[K, V]) getBatchedFromL2(ctx context.Context, key K) (V, bool, err
 	}
 }
 
-// getQueueCh returns the queueCh to coalesce through, starting the workers on the first read that gets this far: a cache
-// nobody calls GetBatched on runs no extra goroutines. nil means the cache is closed.
+// getQueueCh returns the queueCh to coalesce through, starting the workers on the first read that gets this far: a
+// cache nobody calls GetBatched on runs no extra goroutines. nil means the cache is closed.
 func (p *getWorkerPool[K, V]) getQueueCh(c *Cache[K, V]) chan asyncGet[K, V] {
 	if p.state.Load() == getPoolRunning {
 		return p.queueCh

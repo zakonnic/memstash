@@ -251,13 +251,13 @@ func withWriteBackBatching(mode WriteBackBatching) Option {
 	return Option{ApplyField: func(f *FieldOverrides) { f.writeBackBatching = &mode }}
 }
 
-// WithBatchingForWriteBack a WriteBack worker drains it's buffer share in BatchSet batches (the default).
+// WithBatchingForWriteBack makes a WriteBack worker drain its buffer share in BatchSet batches (the default).
 func WithBatchingForWriteBack() Option { return withWriteBackBatching(BatchingFull) }
 
-// WithNoBatchingForWriteBack one Set per write.
+// WithNoBatchingForWriteBack makes a WriteBack worker send one Set per write.
 func WithNoBatchingForWriteBack() Option { return withWriteBackBatching(BatchingNone) }
 
-// WithAdaptiveBatchingForWriteBack per-item Sets while the worker's buffer share is at most half full, BatchSet
+// WithAdaptiveBatchingForWriteBack sends per-item Sets while the worker's buffer share is at most half full, BatchSet
 // batches above.
 func WithAdaptiveBatchingForWriteBack() Option { return withWriteBackBatching(BatchingAdaptive) }
 
