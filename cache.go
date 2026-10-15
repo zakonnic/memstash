@@ -70,11 +70,6 @@ const (
 	maxTTL = time.Duration(math.MaxInt64 / 2)
 )
 
-// requires64BitPlatform is what a 32-bit build fails on: table sizes and the shard layout assume 64-bit words.
-const requires64BitPlatform = 1 << 63
-
-const _ uint = requires64BitPlatform
-
 // shard is one segment of the first level, picked by the key's hash. Every mutation runs under the shard mutex.
 // Readers never take it: they probe the atomically published table and validate candidates against the items.
 type shard[K comparable, V any] struct {
@@ -84,7 +79,7 @@ type shard[K comparable, V any] struct {
 	// moveSeq is odd while a reclaim moves items. A lock-free probe that misses checks it was even and unchanged;
 	// otherwise a key may have crossed the probe, and the miss is not trusted.
 	moveSeq atomic.Uint32
-	_       [44]byte
+	_       [cacheLine - 2*wordBytes - 4]byte // items is two words
 
 	mu      sync.Mutex
 	policy  EvictionPolicy[K, V]
@@ -100,7 +95,7 @@ type shard[K comparable, V any] struct {
 	// still equals the mark taken before the read; otherwise it may be the value deleted.
 	deletes [deleteStripes]atomic.Uint32
 
-	_ [16]byte
+	_ [cacheLine - 6*wordBytes]byte // policy 2 words, live 1, scratch 3; the rest from mu on is 64 bytes
 }
 
 // deleteStripes splits a shard's Delete count by hash bits 7..9, which the shard, the tag and the home do not use:
@@ -141,8 +136,9 @@ type Cache[K comparable, V any] struct {
 	// preallocated pins the table size: the whole capacity is already there, so the table never grows.
 	preallocated bool
 	nanKeys      bool // K can hold a NaN, and a key may be unequal to itself
+	scalarValues bool // V is written by one store (itemstore.OneStore), so an overwrite skips the seqlock bracket
 	// growthNum is Config.GrowthThreshold as a numerator over 1<<growthShift.
-	growthNum int
+	growthNum int64
 	// onDeletion sits with the fields the write path already touches: every removal site tests it, so a cache without
 	// a handler pays one predicted branch off a hot cache line.
 	onDeletion func(key K, value V, cause DeletionCause)
@@ -284,7 +280,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	}
 
 	numShards := cfg.shardCount()
-	growthNum := max(int(math.Round(cfg.growthThreshold()*(1<<growthShift))), 1) // 0 would grow on every insert
+	growthNum := max(int64(math.Round(cfg.growthThreshold()*(1<<growthShift))), 1) // 0 would grow on every insert
 	c := &Cache[K, V]{
 		costFunc:          cfg.CostFunc,
 		shards:            make([]shard[K, V], numShards),
@@ -292,6 +288,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		shardMask:         uint32(numShards - 1),
 		preallocated:      cfg.PreallocateMap,
 		nanKeys:           canBeNaN(reflect.TypeFor[K]()),
+		scalarValues:      itemstore.OneStore(reflect.TypeFor[V]()),
 		growthNum:         growthNum,
 		seed:              maphash.MakeSeed(),
 		epoch:             time.Now(),
@@ -750,7 +747,11 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, mode fillMode,
 		if c.onDeletion != nil {
 			c.addDeletion(&deletions, key, entry.Value, CauseReplacement)
 		}
-		item.SetValue(value)
+		if c.scalarValues {
+			item.SetScalar(value)
+		} else {
+			item.SetValue(value)
+		}
 		if expireOff != 0 {
 			item.RefreshExpire(expireOff)
 		}
@@ -787,10 +788,12 @@ func (c *Cache[K, V]) setMemory(key K, value V, expireOff uint32, mode fillMode,
 // caller sized up front.
 func (c *Cache[K, V]) maybeGrow(sh *shard[K, V], t *itemstore.FlatHashMap[K, V]) {
 	lastSlot := sh.live+1 >= t.Len() // setMemory keeps it free: at a threshold near 1 the table must grow first
-	if c.preallocated || (!lastSlot && sh.live<<growthShift < t.Len()*c.growthNum) || int64(t.Len()) >= maxTableSlots {
+	// int64: with a 32-bit int both sides of the line overflow from ~524k items.
+	if c.preallocated || int64(t.Len()) >= maxTableSlots ||
+		!lastSlot && int64(sh.live)<<growthShift < int64(t.Len())*c.growthNum {
 		return
 	}
-	grown := t.Grow(min(itemstore.GrowSlots(t.Len()), int(maxTableSlots)), sh.evicted)
+	grown := t.Grow(itemstore.GrowSlots(t.Len()), sh.evicted)
 	sh.items.Store(grown)
 	sh.sweepAt = uint32(uint64(sh.sweepAt) * uint64(grown.Len()) / uint64(t.Len())) // homes scale with the table
 	c.stats.addTableGrowths(1)
@@ -1440,5 +1443,10 @@ func (t List[K, V]) ToMap() map[K]V {
 
 // shardBytes pins the shard layout the read path depends on: the table pointer and the move sequence alone on the
 // first cache line, the mutex and everything a writer touches past it, and a whole number of lines overall so that
-// the shards of one cache keep that separation down the array.
+// the shards of one cache keep that separation down the array. The padding makes it 192 with 4- and 8-byte words.
 const shardBytes = 192
+
+const (
+	cacheLine = 64
+	wordBytes = unsafe.Sizeof(uintptr(0))
+)

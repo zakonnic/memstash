@@ -1,6 +1,7 @@
 package itemstore
 
 import (
+	"reflect"
 	"sync/atomic"
 	"unsafe"
 )
@@ -186,17 +187,42 @@ func (s *Item[K, V]) SetHasNext(set bool) {
 	}
 }
 
-// SetValue overwrites the value in place. A value wider than a word, or made of several parts, is written between
-// beginWrite and endWrite; a single scalar of up to a word is one store, so a reader gets the old or the new.
+// SetValue overwrites the value in place, between beginWrite and endWrite, so a reader copying it meanwhile fails
+// validation.
 func (s *Item[K, V]) SetValue(value V) {
-	// Constant per instantiation. Alignof < Sizeof when the value has several parts.
-	if unsafe.Sizeof(value) > unsafe.Sizeof(uintptr(0)) || unsafe.Alignof(value) < unsafe.Sizeof(value) {
-		s.beginWrite()
-		s.entry.Value = value
-		s.endWrite()
-		return
-	}
+	s.beginWrite()
 	s.entry.Value = value
+	s.endWrite()
+}
+
+// OneStore reports whether a value of type t is written by one store no wider than a word: a single scalar, possibly
+// wrapped in one-element arrays and structs whose other fields take no space. Size and alignment cannot tell: a
+// struct{_ [0]uint64; A, B uint32} is word-sized and word-aligned, and gc stores it in two halves.
+func OneStore(t reflect.Type) bool {
+	if t.Size() == 0 {
+		return true
+	}
+	if t.Size() > unsafe.Sizeof(uintptr(0)) {
+		return false // strings, slices and interfaces among them
+	}
+	switch t.Kind() {
+	case reflect.Array:
+		return t.Len() == 1 && OneStore(t.Elem())
+	case reflect.Struct:
+		var field reflect.Type
+		for i := range t.NumField() {
+			if f := t.Field(i).Type; f.Size() != 0 {
+				if field != nil {
+					return false
+				}
+				field = f
+			}
+		}
+		return OneStore(field)
+	case reflect.Complex64:
+		return false // two float32 halves
+	}
+	return true
 }
 
 // endWrite makes the generation even again; the store's release ordering keeps the value stores before it. A

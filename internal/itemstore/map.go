@@ -2,6 +2,7 @@ package itemstore
 
 import (
 	"hash/maphash"
+	"math"
 	"sync/atomic"
 	"unsafe"
 )
@@ -21,8 +22,8 @@ const (
 // MaxItems caps the item count: 5/6 (the default growth load factor) of the 2^32 slot positions.
 const MaxItems = int64(1) << 32 * 5 / 6
 
-// MaxSlots is the largest table: whole chunks, with the slot count itself still fitting a uint32.
-const MaxSlots = int64(1)<<32 - chunkSlots
+// MaxSlots is the largest table: whole chunks, with the slot count still fitting a uint32 and an int.
+const MaxSlots = min(int64(1)<<32-chunkSlots, math.MaxInt&^chunkMask)
 
 // FlatHashMap is one shard's item table: linear probing (https://en.wikipedia.org/wiki/Linear_probing) over slots
 // that are the items themselves, so a probe that lands has meta, key and value right there. At load 0.75 a hit walks
@@ -227,16 +228,16 @@ func TableSlots(want int) int {
 }
 
 // GrowSlots is the next size up for a table that ran out of room: a quarter more, rounded down to whole chunks and
-// then one chunk further, so the ladder past the first chunk runs 1, 2, 3, 4, 6, 8, 11... Below three quarters of a
-// chunk the table is small enough that doubling costs nothing worth saving.
+// then one chunk further, so the ladder past the first chunk runs 1, 2, 3, 4, 6, 8, 11... up to MaxSlots. Below three
+// quarters of a chunk the table is small enough that doubling costs nothing worth saving.
 func GrowSlots(size int) int {
 	switch {
 	case size < chunkSlots*3/4:
 		return size * 2
 	case size < chunkSlots:
 		return chunkSlots
-	default:
-		return (size*5/4/chunkSlots + 1) * chunkSlots
+	default: // in chunks, so a 32-bit int cannot overflow
+		return min(size>>chunkShift*5/4+1, int(MaxSlots>>chunkShift)) << chunkShift
 	}
 }
 

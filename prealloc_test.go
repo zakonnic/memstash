@@ -216,6 +216,28 @@ func TestGrowthThresholdMovesTheRebuildLine(t *testing.T) {
 	})
 }
 
+// TestGrowthLineOnLargeTables covers tables past 2^31/growthNum slots. With a 32-bit int, live<<growthShift and
+// Len*growthNum overflowed there, and a half-full shard grew on every insert until it ran out of memory.
+func TestGrowthLineOnLargeTables(t *testing.T) {
+	const slots = 12 << 16 // 786432: Len*growthNum is 2.68e9 at the default threshold
+	c, err := New[int, int](WithShardsCount(1))
+	require.NoError(t, err)
+	defer c.Close()
+	sh := &c.shards[0]
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	grows := func(live int) bool {
+		storage := itemstore.NewFlatHashMap[int, int](slots, c.seed)
+		sh.items.Store(storage)
+		sh.live = live
+		c.maybeGrow(sh, storage)
+		return sh.items.GetStorage() != storage
+	}
+	assert.False(t, grows(slots/2), "half full is under the line")
+	assert.True(t, grows(slots*9/10), "nine tenths is over the line")
+	sh.live = 0
+}
+
 // TestPreallocationRatioSizesTheTable pins what the ratio dial does: it preallocates on its own, and the shard gets
 // the table that ratio names.
 func TestPreallocationRatioSizesTheTable(t *testing.T) {
@@ -265,7 +287,7 @@ func TestPreallocSlots(t *testing.T) {
 	// The slot count is a uint32 too: a table of 2^32 slots would have size 0.
 	assert.EqualValues(t, maxTableSlots, uint32(maxTableSlots))
 	assert.EqualValues(t, maxTableSlots, itemstore.TableSlots(int(maxTableSlots)), "the cap is whole chunks")
-	assert.Equal(t, int(maxTableSlots), min(itemstore.GrowSlots(int(maxTableSlots)-1<<16), int(maxTableSlots)))
+	assert.Equal(t, int(maxTableSlots), itemstore.GrowSlots(int(maxTableSlots)-1<<16), "growth stops at the cap")
 
 	// The ratio is the dial: the same shard packs into whatever share of its table the caller asked for.
 	assert.Equal(t, 2056, preallocSlots(1024, 0.5))

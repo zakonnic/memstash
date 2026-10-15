@@ -40,3 +40,24 @@ func BenchmarkMemstashGetHitSerial(b *testing.B) {
 		c.Close()
 	}
 }
+
+// BenchmarkMemstashSetHitSerial overwrites keys the cache holds, single-threaded: the in-place write path without
+// lock contention.
+func BenchmarkMemstashSetHitSerial(b *testing.B) {
+	keys := zipfSeq(seqLen, seqHitMax-1)
+	c, err := memstash.New[uint64, uint64](memstash.WithMemoryCapacity(speedCapacity))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+	for key := uint64(0); key < seqHitMax; key++ {
+		_ = c.Set(ctx, key, key)
+	}
+	b.Run("memstash-s3fifo", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = c.Set(ctx, keys[i&seqMask], uint64(i))
+		}
+	})
+}

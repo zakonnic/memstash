@@ -3,6 +3,7 @@ package itemstore
 import (
 	"hash/maphash"
 	"math/rand"
+	"reflect"
 	"testing"
 	"unsafe"
 
@@ -10,17 +11,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestItemSize pins the item footprints: the meta word plus the Entry and nothing else.
+// TestItemSize pins the item footprints: the meta word plus the Entry and nothing else. The meta word aligns the item
+// to 8 bytes on 32-bit platforms too, so a string and a slice of five 4-byte words round up to 32.
 func TestItemSize(t *testing.T) {
-	if unsafe.Sizeof(uintptr(0)) != 8 {
-		t.Skip("64-bit footprints; this package builds on 386 only to run item_other.go")
-	}
 	assert.EqualValues(t, 24, unsafe.Sizeof(Item[uint64, uint64]{}))
-	assert.EqualValues(t, 48, unsafe.Sizeof(Item[string, []byte]{}))
+	assert.EqualValues(t, (8+5*unsafe.Sizeof(uintptr(0))+7)&^7, unsafe.Sizeof(Item[string, []byte]{}))
 }
 
-// TestSnapshotSeqlock: an overwrite of anything but a single scalar must invalidate a snapshot taken against the
-// pre-overwrite meta word, a single scalar's must not bump the generation at all.
+// TestSnapshotSeqlock: SetValue must invalidate a snapshot taken against the pre-overwrite meta word, SetScalar must
+// not touch the meta word at all.
 func TestSnapshotSeqlock(t *testing.T) {
 	item := NewFlatHashMap[string, string](64, maphash.MakeSeed()).At(0)
 	item.Publish(Entry[string, string]{Key: "k", Value: "old"}, 0, 0, 0)
@@ -37,19 +36,56 @@ func TestSnapshotSeqlock(t *testing.T) {
 	word := NewFlatHashMap[uint64, int](64, maphash.MakeSeed()).At(0)
 	word.Publish(Entry[uint64, int]{Key: 1, Value: 10}, 0, 0, 0)
 	wordBefore := word.Metadata()
-	word.SetValue(20)
-	assert.Equal(t, wordBefore, word.Metadata(), "a single-word overwrite must not disturb the meta word")
+	word.SetScalar(20)
+	assert.Equal(t, wordBefore, word.Metadata(), "a single-store overwrite must not disturb the meta word")
 	wordEntry, ok := word.Snapshot(wordBefore)
 	assert.True(t, ok)
 	assert.EqualValues(t, 20, wordEntry.Value)
+	word.SetValue(30)
+	assert.Equal(t, wordBefore+2, word.Metadata(), "SetValue brackets whatever V is")
+}
 
-	// Word-sized, but two fields: must be bracketed.
+// TestOneStore pins which values may skip the seqlock bracket. A false "true" lets a reader validate a torn value,
+// as an 8-byte string on a 32-bit platform did up to 0.9.8; a false "false" only costs the bracket.
+func TestOneStore(t *testing.T) {
 	type halves struct{ A, B uint32 }
-	pair := NewFlatHashMap[uint64, halves](64, maphash.MakeSeed()).At(0)
-	pair.Publish(Entry[uint64, halves]{Key: 1, Value: halves{1, 1}}, 0, 0, 0)
-	pairBefore := pair.Metadata()
-	pair.SetValue(halves{2, 2})
-	assert.Equal(t, pairBefore+2, pair.Metadata(), "a word-sized value of two fields must be bracketed")
+	type paddedHalves struct {
+		_    [0]uint64 // word-sized and word-aligned, still two stores
+		A, B uint32
+	}
+	type wrapped struct {
+		_ [0]func()
+		P *int
+	}
+	words64 := unsafe.Sizeof(uintptr(0)) == 8
+	for _, tc := range []struct {
+		t    reflect.Type
+		want bool
+	}{
+		{reflect.TypeFor[int](), true},
+		{reflect.TypeFor[uint32](), true},
+		{reflect.TypeFor[bool](), true},
+		{reflect.TypeFor[*int](), true},
+		{reflect.TypeFor[map[int]int](), true},
+		{reflect.TypeFor[func()](), true},
+		{reflect.TypeFor[chan int](), true},
+		{reflect.TypeFor[unsafe.Pointer](), true},
+		{reflect.TypeFor[[1]uintptr](), true},
+		{reflect.TypeFor[wrapped](), true},
+		{reflect.TypeFor[struct{}](), true},
+		{reflect.TypeFor[uint64](), words64},
+		{reflect.TypeFor[float64](), words64},
+		{reflect.TypeFor[string](), false},
+		{reflect.TypeFor[[]byte](), false},
+		{reflect.TypeFor[any](), false},
+		{reflect.TypeFor[complex64](), false},
+		{reflect.TypeFor[[2]uint16](), false},
+		{reflect.TypeFor[halves](), false},
+		{reflect.TypeFor[paddedHalves](), false},
+		{reflect.TypeFor[[16]byte](), false},
+	} {
+		assert.Equal(t, tc.want, OneStore(tc.t), "%v", tc.t)
+	}
 }
 
 // TestSnapshotRejectsWriteInProgress covers the reader that lives entirely inside one write window: an odd meta word

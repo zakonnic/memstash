@@ -10,6 +10,10 @@ func (s *Item[K, V]) snapshotEntryInto(dst *Entry[K, V]) {
 	*dst = s.entry
 }
 
+// SetScalar overwrites a value that OneStore admits with one plain store: a reader gets the old or the new. TSO keeps
+// it behind the stores that built whatever the value points to.
+func (s *Item[K, V]) SetScalar(value V) { s.entry.Value = value }
+
 // beginWrite makes the generation odd to signal a write in progress. TSO keeps the value stores after it.
 func (s *Item[K, V]) beginWrite() {
 	metaWord := s.meta.Load()

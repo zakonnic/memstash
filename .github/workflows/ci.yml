@@ -37,6 +37,92 @@ jobs:
         run: go test -race -count=1 ./...
         timeout-minutes: 20
 
+  # A 32-bit word: a string or an int64 takes two stores, and int overflows where a 64-bit build never gets near.
+  # The runner executes 386 binaries natively. No -race: the race detector does not support 386.
+  test-386:
+    name: test (386)
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: off
+      GOARCH: '386'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+        timeout-minutes: 20
+
+  # The only weakly ordered CPU in CI: item_other.go's seqlock pivots run on hardware nowhere else. The invariant
+  # tests repeat in both builds, since -race swaps the meta stores for atomics.
+  test-arm64:
+    name: test (arm64)
+    runs-on: ubuntu-24.04-arm
+    env:
+      GOWORK: off
+      INVARIANTS: TestReclaimMatchesFreshTable|TestNoFalseMissUnderConcurrentChurn|TestIteratorConcurrentWritesNotTorn|TestGetConcurrentOverwriteNotTorn
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - run: go test -race -count=1 ./...
+        timeout-minutes: 20
+      - run: go test -count=20 -run "$INVARIANTS" ./...
+        timeout-minutes: 20
+      - run: go test -race -count=5 -run "$INVARIANTS" ./...
+        timeout-minutes: 20
+
+  # Big-endian s390x and riscv64 under qemu user emulation. It checks behaviour, not memory ordering: emulated
+  # loads and stores keep the host's order.
+  test-qemu:
+    name: test (${{ matrix.arch }}, qemu)
+    runs-on: ubuntu-24.04
+    env:
+      GOWORK: off
+      GOARCH: ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [s390x, riscv64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - run: go test -count=1 -timeout 35m -exec qemu-${{ matrix.arch }}-static ./...
+        timeout-minutes: 40
+
+  # Every other port only has to compile, tests included: vet type-checks the test files, where int-sized constants
+  # live.
+  cross-build:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: off
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - name: go vet per port
+        run: |
+          status=0
+          for target in linux/arm linux/mips linux/mipsle linux/mips64le linux/loong64 linux/riscv64 linux/s390x \
+            linux/ppc64le js/wasm wasip1/wasm darwin/arm64 windows/amd64 windows/arm64 freebsd/386; do
+            echo "::group::$target"
+            GOOS=${target%/*} GOARCH=${target#*/} go vet ./... || status=1
+            echo "::endgroup::"
+          done
+          GOOS=linux GOARCH=arm GOARM=5 go vet ./... || status=1
+          exit $status
+
   lint:
     runs-on: ubuntu-latest
     steps:

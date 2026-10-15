@@ -9,11 +9,6 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 
 ### Changed
 
-- **64-bit platforms only.** A build for 386, arm or mips now stops with a compile error naming
-  `requires64BitPlatform`. Up to 0.9.8 the package compiled there, but not safely: an in-place overwrite of an 8-byte
-  value - a string, an interface, an int64 - skipped the generation bracket as if it were one machine word, so a
-  lock-free read could see it half-written, and for a string or an interface that pairs one value's pointer with the
-  other's length or type. Table sizes and the shard layout were only ever written for 64-bit words.
 - **The first level never holds a tombstone.** A deletion - `Delete`, an eviction, a lazy TTL removal - compacts its
   probe run on the spot with backward-shift deletion (Knuth's Algorithm R, taking the farthest eligible item first,
   which halves the moves), so the table always holds exactly what inserting the live keys into a fresh table would:
@@ -89,10 +84,23 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   could become visible first, and a reader copying in that window validated against the old, even generation. The
   odd mark is now followed by the same acquire+release pivot the read side already uses. amd64 is unaffected - its
   stores never pass one another.
-- **A lock-free read could return a torn value of up to 8 bytes made of several fields.** An in-place overwrite
-  skipped the generation bracket for any value no wider than a word, but gc stores a `struct{A, B uint32}` or a
-  `struct{X, Y float32}` one field at a time, so a reader could pair `A` of one write with `B` of another. Only a
-  single scalar - an integer, a float, a pointer - skips the bracket now; its code is unchanged.
+- **A lock-free read could return a value that an in-place overwrite wrote with several stores, half old and half
+  new.** The overwrite skipped the generation bracket for any value of up to 8 bytes, and size does not say how many
+  stores gc emits. On 386, arm and mips an 8-byte string, interface, int64 or float64 is two stores, so a reader could
+  pair one string's pointer with another's length: 0.9.8 on 386 returned such strings in every 2 s run. On every
+  platform a `struct{A, B uint32}` is stored field by field, and so is a `struct{_ [0]uint64; A, B uint32}`, which
+  is word-sized and word-aligned like a `uint64`. `New` now classifies the value type once with reflect: only a
+  single scalar no wider than a word, possibly wrapped in one-element arrays and structs whose other fields take no
+  space, skips the bracket. Bracketing every overwrite instead cost a serial overwrite of `uint64` values +7%
+  (14.5 -> 15.5 ns, p=0.026); the classified path is no slower than before (14.95 -> 14.56 ns, parallel `Set`
+  unchanged).
+- **32-bit platforms are supported again.** On a 32-bit int the growth test overflowed past ~524k items in a shard,
+  and the shard then grew on every insert until it ran out of memory (250-500k items into one shard on 386). It is
+  computed in int64 now, the table size cap fits an int, and the shard's cache-line padding follows the word size.
+  New CI jobs run the suite on 386 and arm64, under qemu on s390x and riscv64, and vet every other port.
+- **An in-place overwrite of a pointer value had no release ordering off amd64.** A reader on arm64 could get the new
+  pointer and still see the old contents of what it points to. The overwrite now issues the same acquire+release
+  pivot the seqlock uses before the store.
 - **A write-back write could overtake the writes its key had already queued.** When a worker's buffer was full, the
   write ran synchronously on the caller's goroutine, ahead of everything still in the queue: `Set(v1)`, `Set(v2)`,
   `Set(v3)` could leave `v2` in L2, and a `Delete` could land before the queued `Set` that resurrected the key. A write

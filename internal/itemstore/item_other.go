@@ -24,3 +24,11 @@ func (s *Item[K, V]) beginWrite() {
 	var fence uint32
 	atomic.CompareAndSwapUint32(&fence, 0, 0)
 }
+
+// SetScalar overwrites a value that OneStore admits with one plain store: a reader gets the old or the new. Nothing
+// before it is a release, so the pivot keeps the stores that built whatever the value points to ahead of it.
+func (s *Item[K, V]) SetScalar(value V) {
+	var fence uint32
+	atomic.CompareAndSwapUint32(&fence, 0, 0)
+	s.entry.Value = value
+}
