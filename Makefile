@@ -19,7 +19,11 @@ ADAPTERS = \
 	l2/sql_adapter \
 	l2/tarantool_adapter \
 	l2/valkey_adapter
-TAGS = v$(V) $(addsuffix /v$(V), $(ADAPTERS))
+# PUBLISHED are released with the core, each requiring the core and the adapters of that same release.
+PUBLISHED = $(ADAPTERS) benchmarks/load_generator
+TAGS = v$(V) $(addsuffix /v$(V), $(PUBLISHED))
+# memstash_requires prints "module version" for every in-repo module the go.mod in $(1) requires.
+memstash_requires = awk '$$1 ~ /^github\.com\/zakonnic\/memstash/ && $$2 ~ /^v[0-9]/ {print $$1, $$2} $$1 == "require" && $$2 ~ /^github\.com\/zakonnic\/memstash/ {print $$2, $$3}' $(1)/go.mod
 MODULES = . benchmarks benchmarks/load_generator tests/integration $(ADAPTERS)
 
 .PHONY: help
@@ -117,13 +121,15 @@ check-new-libs: ## Checks for new versions of libraries
 	fi
 
 .PHONY: require-core tag
-require-core: ## Make every l2 adapter require core v$(V): the release commit (make require-core V=1.2.3)
+require-core: ## Make every published module require the core and adapters v$(V): the release commit (make require-core V=1.2.3)
 	@test -n "$(V)" || { echo "V is required, e.g. make require-core V=1.2.3"; exit 1; }
-	@for m in $(ADAPTERS); do \
-		go -C $$m mod edit -require=github.com/zakonnic/memstash@v$(V) || exit 1; \
+	@for m in $(PUBLISHED); do \
+		for dep in $$($(call memstash_requires,$$m) | cut -d" " -f1); do \
+			go -C $$m mod edit -require=$$dep@v$(V) || exit 1; \
+		done; \
 	done
 
-tag: ## Tag the root module and every l2 adapter module with the given version (make tag V=1.2.3), then 'make push'
+tag: ## Tag the root module and every published module with the given version (make tag V=1.2.3), then 'make push'
 	@test -n "$(V)" || { echo "V is required, e.g. make tag V=1.2.3"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { \
 		echo "Error: the working tree is dirty. Tags would point at the last commit, not at what you see."; \
@@ -135,13 +141,14 @@ tag: ## Tag the root module and every l2 adapter module with the given version (
 			exit 1; \
 		fi; \
 	done
-	@# An adapter left on an older core ships without that release's core fixes: the l2 helpers live in the core.
-	@for m in $(ADAPTERS); do \
-		got=$$(grep -m1 -h 'zakonnic/memstash v' $$m/go.mod | grep -o 'v[0-9][^ ]*'); \
-		if [ "$$got" != "v$(V)" ]; then \
-			echo "Error: $$m requires core $$got, not v$(V). Run 'make require-core V=$(V)' and commit. Aborting."; \
-			exit 1; \
-		fi; \
+	@# A module left on an older core ships without that release's core fixes: the l2 helpers live in the core.
+	@for m in $(PUBLISHED); do \
+		$(call memstash_requires,$$m) | while read dep got; do \
+			if [ "$$got" != "v$(V)" ]; then \
+				echo "Error: $$m requires $$dep $$got, not v$(V). Run 'make require-core V=$(V)' and commit."; \
+				exit 1; \
+			fi; \
+		done || exit 1; \
 	done
 	$(foreach t, $(TAGS), git tag "$(t)";)
 
@@ -157,7 +164,8 @@ untag: ## Delete the root module and every l2 adapter module tag with the given 
 		echo "Some tags were missing, but remaining tags deleted."; \
 	fi
 
-push:
+push: ## Push main and the release tags (a release is cut from main)
+	@test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "Error: release from main, not $$(git rev-parse --abbrev-ref HEAD)."; exit 1; }
 	git push origin main --tags
 
 .PHONY: release release-check release-verify
@@ -175,19 +183,23 @@ release: ## Full release: check, tag every module, push, verify from the proxy (
 
 release-check: ## Build every published module the way a consumer resolves it - no workspace, no replace (run before 'make tag')
 	@status=0; \
-	for m in $(ADAPTERS); do \
+	for m in $(PUBLISHED); do \
 		if grep -q '^replace' $$m/go.mod; then \
 			echo "$$m: a replace directive must not ship in a published module"; status=1; \
 		fi; \
 	done; \
 	core=$$(grep -m1 -h 'zakonnic/memstash v' $(firstword $(ADAPTERS))/go.mod | grep -o 'v[0-9][^ ]*'); \
-	for m in $(ADAPTERS); do \
+	for m in $(PUBLISHED); do \
 		got=$$(grep -m1 -h 'zakonnic/memstash v' $$m/go.mod | grep -o 'v[0-9][^ ]*'); \
 		if [ "$$got" != "$$core" ]; then echo "$$m: requires core $$got, expected $$core"; status=1; fi; \
 	done; \
-	if git ls-remote --exit-code --tags origin "$$core" >/dev/null 2>&1; then \
+	git ls-remote --exit-code --tags origin "$$core" >/dev/null 2>&1; remote=$$?; \
+	if [ $$remote -ne 0 ] && [ $$remote -ne 2 ]; then \
+		echo "cannot ask origin whether core $$core is published (git ls-remote exit $$remote)"; exit 1; \
+	fi; \
+	if [ $$remote -eq 0 ]; then \
 		echo "adapters require core $$core (published)"; \
-		for m in . $(ADAPTERS); do \
+		for m in . $(PUBLISHED); do \
 			echo "==> $$m"; \
 			GOWORK=off GOFLAGS=-mod=mod go -C $$m build ./... || status=1; \
 			GOWORK=off GOFLAGS=-mod=mod go -C $$m vet ./... || status=1; \
@@ -203,12 +215,12 @@ release-verify: ## Install every published module at V from the proxy into a thr
 	@test -n "$(V)" || { echo "V is required, e.g. make release-verify V=1.2.3"; exit 1; }
 	@dir=$$(mktemp -d); status=0; \
 	(cd $$dir && go mod init release-verify >/dev/null 2>&1); \
-	for m in $(ADAPTERS); do \
+	for m in $(PUBLISHED); do \
 		pkg=github.com/zakonnic/memstash/$$m; \
 		echo "==> $$pkg@v$(V)"; \
 		(cd $$dir && GOWORK=off go get $$pkg@v$(V) >/dev/null 2>&1 && GOWORK=off go build $$pkg) \
 			|| { echo "FAILED: $$pkg@v$(V) does not build as published"; status=1; }; \
 	done; \
 	rm -rf $$dir; \
-	if [ $$status -eq 0 ]; then echo "every adapter builds from the proxy at v$(V)"; fi; \
+	if [ $$status -eq 0 ]; then echo "every published module builds from the proxy at v$(V)"; fi; \
 	exit $$status

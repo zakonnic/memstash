@@ -308,6 +308,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   and `l2_hit_rate_pct` came straight from the cache's counters while `ops_per_sec` and the CPU figures covered the
   interval since the previous line, and the snapshot kept for that window went unused; a shift in the working set
   showed up in the rates only as a slow drift. The rates now cover the interval too.
+- **The release targets left the load generator behind, and `release-check` passed without asking origin.** The
+  importable `benchmarks/load_generator` module was neither tagged nor moved to the released core by
+  `make require-core`, so after a release it would pin v0.9.7 forever; it is now tagged with every release and
+  required at the same version as its core and adapters. `release-check` took "cannot reach origin" for "core not
+  pushed yet" and passed; it now fails. `make push` refuses to run from any branch but main.
 
 ## [0.9.8] - 2026-08-13
 

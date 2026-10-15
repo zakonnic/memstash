@@ -90,7 +90,8 @@ to `ADAPTERS` in the Makefile, to the matrix in `.github/workflows/ci.yml`, and 
 
 ## Releases
 
-Every module is tagged together, root and adapters, and every adapter requires the core of the same release:
+Every published module is tagged together - root, adapters and the load generator - and each requires the core and
+the adapters of the same release:
 
 ```sh
 make require-core V=1.2.3   # then commit: the release commit
