@@ -604,7 +604,7 @@ live in [cmd/load-generator](benchmarks/load_generator/cmd/load-generator) and a
 - **L1 vs L2 split** — traffic reaching Redis, L2 hit rate under working set rotation
 - **Memory/goroutine stability** — flat metrics over hours = no leaks
 - **Load cost** — `process_cpu_cores` at target rps
-- **Throughput ceilings** — `ops_per_sec` below configured rps reveals bottlenecks
+- **Throughput ceilings** — `ops_per_sec` below the start line's `target_rps` reveals bottlenecks
 - **Adapter comparison** — same scenario, same load, another `l2_client_type`
 - **Pre-production testing** — point `address` at staging
 

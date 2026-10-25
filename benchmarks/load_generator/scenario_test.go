@@ -89,6 +89,13 @@ func TestServerTypeValidation(t *testing.T) {
 		assert.NoError(t, s.validate())
 	})
 
+	t.Run("no client without an address", func(t *testing.T) {
+		assert.Empty(t, baseScenario().withDefaults().L2ClientType, "the start line would name a client never dialed")
+		s := baseScenario()
+		s.L2ClientType = Valkey // a built-in scenario whose address config.yaml blanked
+		assert.Empty(t, s.withDefaults().L2ClientType)
+	})
+
 	t.Run("every listed type is accepted", func(t *testing.T) {
 		for _, server := range ServerTypes() {
 			s := baseScenario()
@@ -122,9 +129,8 @@ func TestStatsHitRatesAreWindowed(t *testing.T) {
 	ctx := context.Background()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	prev := s.logStats(logger, time.Now(), meter{t: time.Now()}) // its probe misses on the empty cache
-	st := s.cache.Stats()
-	prev.gets, prev.hits, prev.memHits = st.Gets(), st.Hits(), st.MemoryHits() // the window starts after the probe
+	s.doGet(ctx, 0) // a miss before the window
+	prev := s.logStats(logger, time.Now(), meter{t: time.Now()})
 	for k := range 10 {
 		s.doSet(ctx, k)
 		s.doGet(ctx, k)
@@ -135,4 +141,23 @@ func TestStatsHitRatesAreWindowed(t *testing.T) {
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &record))
 	assert.InDelta(t, 100, record["hit_rate_pct"], 0.001, "the window read what it wrote")
 	assert.InDelta(t, 100, record["mem_hit_rate_pct"], 0.001)
+}
+
+// The probe's Gets and Sets go through the cache's own counters. On a Windows clock they run to hundreds of thousands
+// a line, half of the reads on keys nothing writes: left in, they would drown a slow scenario's own reads.
+func TestStatsLeaveTheProbeOut(t *testing.T) {
+	s := newTestScenario(t, newLogSink(t), nil)
+	ctx := context.Background()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	prev := s.logStats(logger, time.Now(), meter{t: time.Now()})
+	s.doSet(ctx, 1)
+	s.doGet(ctx, 1)
+	buf.Reset()
+	s.logStats(logger, time.Now(), prev)
+	var record map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &record))
+	assert.InDelta(t, 1, record["gets_total"], 0, "the workload read once")
+	assert.InDelta(t, 1, record["sets_total"], 0, "and wrote once")
+	assert.InDelta(t, 100, record["hit_rate_pct"], 0.001)
 }

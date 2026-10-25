@@ -316,6 +316,13 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   and `l2_hit_rate_pct` came straight from the cache's counters while `ops_per_sec` and the CPU figures covered the
   interval since the previous line, and the snapshot kept for that window went unused; a shift in the working set
   showed up in the rates only as a slow drift. The rates now cover the interval too.
+- **The load generator's stats counted its own probe.** The timing probe runs through the cache's own counters, half
+  of its reads on keys nothing writes, so on a coarse clock it skewed the hit rates and totals of slow scenarios. The
+  probe's window is now cut out of every figure taken from those counters; `ops_per_sec` and `errors_total` still
+  cover the whole interval.
+- **A load generator worker that stalled lost those ops for good.** A ticker drops the ticks a busy worker misses, so
+  `ops_per_sec` could fall short of the target with capacity to spare. A worker now catches up on up to a second of
+  backlog, and the start line carries the target as `target_rps`. An L1-only scenario no longer logs an `l2_client`.
 - **The release targets left the load generator behind, and `release-check` passed without asking origin.** The
   importable `benchmarks/load_generator` module was neither tagged nor moved to the released core by
   `make require-core`, so after a release it would pin v0.9.7 forever; it is now tagged with every release and

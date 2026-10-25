@@ -131,6 +131,27 @@ func (r *runner[K, V]) run(ctx context.Context, wg *sync.WaitGroup) {
 // high rps.
 const workerTick = 10 * time.Millisecond
 
+// maxBacklog is how far behind schedule a worker may fall and still catch up: a GC pause or an L2 hiccup, not a
+// backend that cannot keep up. Older debt is dropped, so that shows as ops_per_sec below target rather than a burst.
+const maxBacklog = time.Second
+
+// pacer turns a worker's rate into the ops each tick owes. The debt grows with the time that passed, not per tick: a
+// ticker drops the ticks a busy worker misses, and their ops would be lost without a trace.
+type pacer struct {
+	rps  float64
+	owed float64 // the fraction carries over, so non-integer rps stays accurate
+	last time.Time
+}
+
+func (p *pacer) due(now time.Time) int {
+	// The cap holds at least one op, or a worker under 1 rps would never reach one.
+	p.owed = min(p.owed+p.rps*now.Sub(p.last).Seconds(), max(p.rps*maxBacklog.Seconds(), 1))
+	p.last = now
+	run := int(p.owed)
+	p.owed -= float64(run)
+	return run
+}
+
 func (r *runner[K, V]) worker(ctx context.Context, wg *sync.WaitGroup, idx int) {
 	defer wg.Done()
 	defer r.errLog.recoverPanic(r.Name, "worker")
@@ -142,21 +163,18 @@ func (r *runner[K, V]) worker(ctx context.Context, wg *sync.WaitGroup, idx int) 
 	rng := workload.Random()
 	reads := newZipf(rng, r.KeySpace, r.ZipfS, r.ZipfV)
 	writes := newZipf(rng, r.WriteKeySpace, r.ZipfS, r.ZipfV)
-	opsPerTick := rps * workerTick.Seconds()
 
+	pace := pacer{rps: rps, last: time.Now()}
 	ticker := time.NewTicker(workerTick)
 	defer ticker.Stop()
 
-	var owed float64 // fractional operations carried over from the previous tick, so non-integer rps stays accurate
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			owed += opsPerTick
-			n := int(owed)
-			owed -= float64(n)
-			for i := 0; i < n; i++ {
+		case now := <-ticker.C:
+			// A worker catching up runs up to a second of ops in one go, so it checks for shutdown between them.
+			for run := pace.due(now); run > 0 && ctx.Err() == nil; run-- {
 				r.doOp(rng, reads, writes)
 			}
 		}

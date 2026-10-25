@@ -32,7 +32,7 @@ type Scenario[K comparable, V any] struct {
 	// Address lists the L2 seed nodes; empty runs the scenario on L1 alone. One entry dials a single server, several
 	// a cluster where the client has one - see ServerType for which do.
 	Address []string
-	// L2ClientType is the adapter dialed at Address. Defaults to Rueidis.
+	// L2ClientType is the adapter dialed at Address. Defaults to Rueidis, and is dropped when Address is empty.
 	L2ClientType ServerType
 	// Codec encodes values for that L2. Defaults to raw pass-through for []byte and string values and to JSON for
 	// everything else.
@@ -88,7 +88,10 @@ func (s Scenario[K, V]) withDefaults() Scenario[K, V] {
 	if s.ZipfV == 0 {
 		s.ZipfV = 1
 	}
-	if s.L2ClientType == "" {
+	switch {
+	case len(s.Address) == 0:
+		s.L2ClientType = "" // never dialed, so not an effective parameter
+	case s.L2ClientType == "":
 		s.L2ClientType = Rueidis
 	}
 	if s.Key == nil {

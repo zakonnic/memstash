@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"runtime"
 	"time"
+
+	"github.com/zakonnic/memstash"
 )
 
 // monitor logs a stats snapshot every statsInterval (and once more on shutdown) to the scenario's own log file,
@@ -20,6 +22,7 @@ func (r *runner[K, V]) monitor(ctx context.Context) {
 	logger.Info("scenario started",
 		"description", r.Description,
 		"goroutines", r.Goroutines,
+		"target_rps", r.totalRPS(),
 		"read_percent", r.ReadPercent,
 		"key_space", r.KeySpace,
 		"write_key_space", r.WriteKeySpace,
@@ -53,9 +56,24 @@ func (r *runner[K, V]) monitor(ctx context.Context) {
 
 // meter is the previous snapshot the windowed rates (ops/sec, hit rates, CPU) are measured against.
 type meter struct {
-	t                                        time.Time
-	ops, gets, memHits, l2Gets, l2Hits, hits int64
-	cpu                                      time.Duration
+	t      time.Time
+	ops    int64
+	cpu    time.Duration
+	cache  counts
+	probed counts
+}
+
+// counts are the cache counters a stats line reports.
+type counts struct{ gets, sets, hits, misses, memHits, l2Gets, l2Hits int64 }
+
+func countsOf(st memstash.Stats) counts {
+	return counts{gets: st.Gets(), sets: st.Sets(), hits: st.Hits(), misses: st.Misses(), memHits: st.MemoryHits(),
+		l2Gets: st.L2Gets(), l2Hits: st.L2Hits()}
+}
+
+func (c counts) sub(o counts) counts {
+	return counts{gets: c.gets - o.gets, sets: c.sets - o.sets, hits: c.hits - o.hits, misses: c.misses - o.misses,
+		memHits: c.memHits - o.memHits, l2Gets: c.l2Gets - o.l2Gets, l2Hits: c.l2Hits - o.l2Hits}
 }
 
 // percent is part of whole in percent, 0 for an empty whole.
@@ -71,11 +89,10 @@ func (r *runner[K, V]) logStats(logger *slog.Logger, start time.Time, prev meter
 	wall := now.Sub(prev.t).Seconds()
 
 	ops, errs := r.ops.Load(), r.errs.Load()
-	st := r.cache.Stats()
-	gets, sets := st.Gets(), st.Sets()
-	memHits, l2Gets, l2Hits, hits, misses := st.MemoryHits(), st.L2Gets(), st.L2Hits(), st.Hits(), st.Misses()
-	hitRate, memHitRate := percent(hits-prev.hits, gets-prev.gets), percent(memHits-prev.memHits, gets-prev.gets)
-	l2HitRate := percent(l2Hits-prev.l2Hits, l2Gets-prev.l2Gets)
+	cache := countsOf(r.cache.Stats()).sub(prev.probed)
+	window := cache.sub(prev.cache)
+	hitRate, memHitRate := percent(window.hits, window.gets), percent(window.memHits, window.gets)
+	l2HitRate := percent(window.l2Hits, window.l2Gets)
 
 	opsPerSec := float64(0)
 	if wall > 0 {
@@ -93,6 +110,7 @@ func (r *runner[K, V]) logStats(logger *slog.Logger, start time.Time, prev meter
 	}
 
 	getMemNs, getNs, setNs := r.runProbe(context.Background())
+	probed := countsOf(r.cache.Stats()).sub(cache)
 
 	// Field order matters: the console wraps this line across the terminal, so the live numbers come first and the
 	// running totals after.
@@ -110,13 +128,13 @@ func (r *runner[K, V]) logStats(logger *slog.Logger, start time.Time, prev meter
 		"cache_weight", r.cache.Weight(),
 		"cache_total_size", r.cache.TotalSize(),
 		"ops_total", ops,
-		"gets_total", gets,
-		"sets_total", sets,
-		"hits_total", hits,
-		"mem_hits_total", memHits,
-		"l2_gets_total", l2Gets,
-		"l2_hits_total", l2Hits,
-		"misses_total", misses,
+		"gets_total", cache.gets,
+		"sets_total", cache.sets,
+		"hits_total", cache.hits,
+		"mem_hits_total", cache.memHits,
+		"l2_gets_total", cache.l2Gets,
+		"l2_hits_total", cache.l2Hits,
+		"misses_total", cache.misses,
 		"heap_alloc_bytes", mem.HeapAlloc,
 		"process_sys_bytes", mem.Sys,
 		"process_goroutines", runtime.NumGoroutine(),
@@ -127,5 +145,5 @@ func (r *runner[K, V]) logStats(logger *slog.Logger, start time.Time, prev meter
 	if cpuErr != nil {
 		cpu = prev.cpu // no fresh reading; keep the old baseline so the next interval measures from it
 	}
-	return meter{t: now, ops: ops, gets: gets, memHits: memHits, l2Gets: l2Gets, l2Hits: l2Hits, hits: hits, cpu: cpu}
+	return meter{t: now, ops: ops, cpu: cpu, cache: cache, probed: probed}
 }

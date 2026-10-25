@@ -23,7 +23,7 @@ const (
 	probeWindows = 10
 )
 
-// probeSink keeps the probe's reads from being optimised away.
+// probeSink keeps the probe's reads from being optimized away.
 var probeSink atomic.Int64
 
 // clockTick is the smallest interval time.Now can resolve here: tens of nanoseconds on Linux, hundreds of
@@ -127,8 +127,8 @@ func measure(ops int, op func(n int) int) (float64, int) {
 // on the monitor goroutine and draws its keys the way the workers do, so the figures carry the contention, the probe
 // distances the scenario has shaped by then.
 //
-// The probe goes through the cache's own counters, so its operations land in the totals and hit rates of the
-// following stats line.
+// Its operations go through the cache's own counters, and on a coarse clock they number in the hundreds of thousands:
+// logStats cuts the probe's window out of every figure it takes from them.
 func (r *runner[K, V]) runProbe(ctx context.Context) (getMemNs, getNs, setNs float64) {
 	if r.cache == nil {
 		return 0, 0, 0
