@@ -1,6 +1,6 @@
 module github.com/zakonnic/memstash/l2/dynamo_adapter
 
-go 1.24
+go 1.26.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.43.5
@@ -15,4 +15,5 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.12.13 // indirect
 	github.com/aws/smithy-go v1.27.7 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
+	github.com/stretchr/testify v1.12.1 // indirect
 )
