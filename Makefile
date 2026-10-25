@@ -106,9 +106,13 @@ bench:
 	go -C benchmarks test -run=xxx -bench='^Benchmark$(NAME)$$' ./...
 endif
 
-.PHONY: load-generator
-load-generator: ## Build the long-running load generator (+ config.yaml) into benchmarks/bin
+.PHONY: load-generator load-generator-docker load-generator-config
+load-generator: load-generator-config ## Build the long-running load generator (+ config.yaml) into benchmarks/bin
 	go -C benchmarks/load_generator build -o ../bin/load-generator$(if $(filter Windows_NT,$(OS)),.exe,) ./cmd/load-generator
+load-generator-docker: load-generator-config ## Run the load generator in compose next to its L2 servers; logs in benchmarks/bin/docker
+	$(DC) $(DC_FILES) --profile load run --rm --build load-generator
+load-generator-config: ## Copy the default config.yaml into benchmarks/bin, keeping one already there
+	mkdir -p benchmarks/bin
 	[ -f benchmarks/bin/config.yaml ] || cp benchmarks/load_generator/config.yaml benchmarks/bin/config.yaml
 
 check-new-libs: ## Checks for new versions of libraries

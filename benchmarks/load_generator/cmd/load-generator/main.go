@@ -23,7 +23,12 @@ import (
 
 func main() {
 	logDir := flag.String("log-dir", ".", "directory to write the per-scenario JSON-lines log files into")
-	configPath := flag.String("config", "config.yaml", "optional YAML file overriding per-scenario defaults")
+	var configPaths []string
+	flag.Func("config", "optional YAML file overriding per-scenario defaults (default config.yaml); "+
+		"repeat it to layer files, a later file overriding the fields it sets", func(path string) error {
+		configPaths = append(configPaths, path)
+		return nil
+	})
 	selfTest := flag.Bool("selftest", false,
 		"write one synthetic error of every kind and exit - checks the console and errors.log without running any load")
 	flag.Parse()
@@ -37,11 +42,17 @@ func main() {
 		return
 	}
 
-	cfg, err := loadConfig(*configPath)
-	if err != nil {
-		log.Fatalf("cannot load config %s: %v", *configPath, err)
+	if len(configPaths) == 0 {
+		configPaths = []string{"config.yaml"}
 	}
-	scenarios, err := buildScenarios(cfg)
+	cfgs := make([]fileConfig, len(configPaths))
+	for i, path := range configPaths {
+		var err error
+		if cfgs[i], err = loadConfig(path); err != nil {
+			log.Fatalf("cannot load config %s: %v", path, err)
+		}
+	}
+	scenarios, err := buildScenarios(cfgs)
 	if err != nil {
 		log.Fatalf("cannot build scenarios: %v", err)
 	}

@@ -12,9 +12,9 @@ import (
 // as well - the engine builds a memstash.Cache[K, V] out of whatever the scenario is instantiated with.
 type bytesScenario = load_generator.Scenario[string, []byte]
 
-// buildScenarios returns the three built-in scenarios with config.yaml's overrides applied. Write your own set like
-// this one and hand it to load_generator.New - nothing here is privileged.
-func buildScenarios(cfg fileConfig) ([]bytesScenario, error) {
+// buildScenarios returns the three built-in scenarios with the config files' overrides applied in order. Write your
+// own set like this one and hand it to load_generator.New - nothing here is privileged.
+func buildScenarios(cfgs []fileConfig) ([]bytesScenario, error) {
 	// Scenario 3 is byte-weighted: its capacity counts bytes, so its item count follows the value sizes.
 	byteWeighted := memstash.WithCostFunc(func(k string, v []byte) uint32 { return uint32(len(k) + len(v)) })
 
@@ -86,8 +86,10 @@ func buildScenarios(cfg fileConfig) ([]bytesScenario, error) {
 	}
 
 	for i := range scenarios {
-		if err := applyOverride(&scenarios[i], cfg); err != nil {
-			return nil, err
+		for _, cfg := range cfgs {
+			if err := applyOverride(&scenarios[i], cfg); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return scenarios, nil

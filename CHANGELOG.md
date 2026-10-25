@@ -7,6 +7,13 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 
 ## [Unreleased]
 
+### Added
+
+- **The load generator runs next to its L2 servers.** `make load-generator-docker` runs it as the compose service
+  `load-generator` (profile `load`, so `make up` never starts it), and its L2 traffic skips the Docker Desktop port
+  relay, which capped the L2 scenarios far below their target. `-config` now repeats, a later file overriding the
+  fields it sets.
+
 ### Changed
 
 - **The first level never holds a tombstone.** A deletion - `Delete`, an eviction, a lazy TTL removal - compacts its

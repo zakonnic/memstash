@@ -1,0 +1,8 @@
+.git
+.claude
+.idea
+var
+**/bin
+**/*.exe
+**/*.log
+**/*.test

@@ -1,0 +1,8 @@
+# Layered over benchmarks/bin/config.yaml when the load generator runs in compose (make load-generator-docker): only
+# the addresses change. The generator shares redis-cluster's network namespace, so the cluster is on 127.0.0.1 as
+# it announces itself, and the other servers resolve by service name on their container ports.
+scenarios:
+  scenario-2:
+    address: "127.0.0.1:43211,127.0.0.1:43212,127.0.0.1:43213"
+  scenario-3:
+    address: "valkey:6379"

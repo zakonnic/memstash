@@ -592,7 +592,11 @@ plus a 10% `random_percent` share drawn uniformly instead.
 **Every Get is verified** against what the scenario's `Value` function returns for that key — `load_generator.WithNoVerification()`
 turns that off when you want the load without the check. Everything that can go wrong lands in `errors.log`.
 Logged once per minute + on shutdown (`scenario-N.log`, JSON lines).
-Tuning via [config.yaml](benchmarks/load_generator/config.yaml). All fields optional.
+Tuning via [config.yaml](benchmarks/load_generator/config.yaml). All fields optional; `-config` repeats, a later file
+overriding the fields it sets.
+On Docker Desktop, run the L2 scenarios with `make load-generator-docker`: the generator then runs in compose next to
+the servers instead of going through the port relay, which adds milliseconds to every L2 round trip. Logs land in
+`benchmarks/bin/docker`.
 
 It's a standalone module, so the same engine can run your own scenarios — the three above
 live in [cmd/load-generator](benchmarks/load_generator/cmd/load-generator) and are nothing but a
