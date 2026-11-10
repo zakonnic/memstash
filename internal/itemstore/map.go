@@ -248,8 +248,9 @@ func GrowSlots(size int) int {
 // runs through the hole moves in, its old slot becomes the hole, and so on until nothing to the right is chained past
 // the hole; that slot is cleared. The table ends as the live keys alone would leave it.
 //
-// Chain bits come out exact from the hole on. Behind it only the nearest slot is looked at: the dead key's chain
-// may leave a stale bit further back, which costs a probe a longer walk until a later Reclaim walks over it.
+// Chain bits come out exact from idx to where the walk for the moves ended. Behind idx only the nearest slot is
+// looked at: the dead key's chain may leave a stale bit further back, which costs a probe a longer walk until a later
+// Reclaim walks over it.
 //
 // Only the moves run inside the moves bracket (odd while open). A reader whose probe overlapped it and missed probes
 // again, because a key sliding toward its home can cross a probe. Everything else stays outside, so the bracket lasts
@@ -310,7 +311,8 @@ func (t *FlatHashMap[K, V]) shift(idx uint32, scratch *[]int64, moves *atomic.Ui
 	if last > 0 {
 		// The moves, last one first, listed after the homes. A key can sit anywhere from its home to its slot. So the
 		// key in the last slot goes as far back as it may; if that is short of the hole, it takes the slot of the key
-		// that can itself go back the farthest, and so on down to the hole.
+		// that can itself go back the farthest, and so on down to the hole. Every slot before last has a key at or
+		// before last chained past it, so need drops at each append and the loop ends above the hole.
 		listed := len(homes)
 		homes = append(homes, last)
 		need, via := homes[last], last

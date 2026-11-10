@@ -20,6 +20,9 @@ type model struct {
 	rng   *rand.Rand
 	moves atomic.Uint32
 	next  uint64 // the last key homed handed out
+	// The last reclaim: its slot and how many slots its walk took in, the hole included. check wants exact chain
+	// bits there.
+	hole, walked uint32
 }
 
 func newModel(slots int, seed uint64) *model {
@@ -91,7 +94,13 @@ func (m *model) remove(key uint64, scratch *[]int64) {
 			m.t.Remove(m.t.Wrap(pos))
 			item.Kill()
 			m.t.ForgetDisplaced(hash, pos)
-			m.t.Reclaim(m.t.Wrap(pos), scratch, &m.moves)
+			m.hole, m.walked = m.t.Wrap(pos), 1
+			for metaWord := item.Metadata(); metaWord&HasNext != 0; m.walked++ {
+				if metaWord = m.t.At(m.hole + m.walked).Metadata(); Empty(metaWord) {
+					break
+				}
+			}
+			m.t.Reclaim(m.hole, scratch, &m.moves)
 			delete(m.live, key)
 			m.order = slices.DeleteFunc(m.order, func(k uint64) bool { return k == key })
 			return
@@ -103,10 +112,10 @@ func (m *model) remove(key uint64, scratch *[]int64) {
 }
 
 // check verifies the table against the oracle: every live key is found by a reader walk, queue 0 holds the live keys
-// in insertion order with consistent links, no slot is dead, chain bits are never missing where a chain runs,
-// overflow counters never under-count, and the occupied slot set is exactly what inserting the live keys into a
-// fresh table produces (linear probing's occupied set is order-independent, which is what backward-shift deletion
-// preserves).
+// in insertion order with consistent links, no slot is dead, chain bits are never missing where a chain runs and
+// exact where the last reclaim walked, overflow counters never under-count, and the occupied slot set is exactly what
+// inserting the live keys into a fresh table produces (linear probing's occupied set is order-independent, which is
+// what backward-shift deletion preserves).
 func (m *model) check(t *testing.T) {
 	t.Helper()
 	size := uint32(m.t.Len())
@@ -162,6 +171,12 @@ func (m *model) check(t *testing.T) {
 		if needBit[pos] {
 			require.NotZero(t, m.t.At(pos).Metadata()&HasNext, "slot %d lies on a live chain but its bit is clear", pos)
 		}
+	}
+	// A reclaim leaves no stale bit on the slots it walked, nor on the one behind its hole. Inserts keep that.
+	for d := uint32(0); d <= m.walked; d++ {
+		pos := m.t.Wrap(m.t.back(m.hole, 1) + d)
+		require.Equal(t, needBit[pos], m.t.At(pos).Metadata()&HasNext != 0,
+			"slot %d, %d from the reclaimed slot %d: a stale chain bit", pos, int(d)-1, m.hole)
 	}
 	for gb, n := range displaced {
 		got := m.t.overflowAt(gb[0]<<groupShift).Load() >> (gb[1] * overflowWidth) & overflowMax
@@ -250,13 +265,27 @@ func TestReclaimUncoveredHoleIsCheap(t *testing.T) {
 	require.Zero(t, m.t.At(idx).Metadata()&HasNext)
 	m.remove(1, &scratch)
 	require.True(t, Empty(m.t.At(idx).Metadata()))
-	require.Zero(t, m.moves.Load(), "an uncovered hole moves nothing, so it opens no bracket")
+	require.Zero(t, cap(scratch), "an uncovered hole needs no run scan")
+	m.check(t)
+}
+
+// TestReclaimClearsTheBitBehindTheHole: the dead key may have been the last one chained past the slot before it.
+func TestReclaimClearsTheBitBehindTheHole(t *testing.T) {
+	m := newModel(64, 4)
+	var scratch []int64
+	a, b := m.homed(8), m.homed(8) // slots 8 and 9
+	m.insert(a, a)
+	m.insert(b, b)
+	require.NotZero(t, m.t.At(8).Metadata()&HasNext)
+	m.remove(b, &scratch)
+	require.Zero(t, m.t.At(8).Metadata()&HasNext, "nothing is chained past slot 8 any more")
 	m.check(t)
 }
 
 // TestReclaimClearsStaleChainBits: a chain bit no key earns only makes the reclaim walk further. The hole still ends
-// in the first slot nothing is chained past, and the bits the walk crossed come out clear. Two shapes: the walk ends
-// on a live slot whose bit is clear, and on an empty slot.
+// in the first slot nothing is chained past, and the bits the walk crossed come out clear. Three shapes: the walk
+// ends on a live slot whose bit is clear, on an empty slot right after the last hole, and on an empty slot after a
+// live one that keeps its place.
 func TestReclaimClearsStaleChainBits(t *testing.T) {
 	m := newModel(64, 5)
 	var scratch []int64
@@ -288,6 +317,19 @@ func TestReclaimClearsStaleChainBits(t *testing.T) {
 	m.remove(e, &scratch)
 	require.Equal(t, f, m.t.At(20).Entry().Key, "the key chained past the hole must move in")
 	require.Equal(t, []bool{false, false}, chained(20, 21))
+	m.check(t)
+
+	g, h := m.homed(30), m.homed(30) // slots 30 and 31
+	m.insert(g, g)
+	m.insert(h, h)
+	stays := m.homed(32) // slot 32, slot 33 stays empty
+	m.insert(stays, stays)
+	m.t.At(31).MarkHasNext()
+	m.t.At(32).MarkHasNext()
+	m.remove(g, &scratch)
+	require.Equal(t, h, m.t.At(30).Entry().Key, "the key chained past the hole must move in")
+	require.Equal(t, stays, m.t.At(32).Entry().Key)
+	require.Equal(t, []bool{false, false, false}, chained(30, 31, 32))
 	m.check(t)
 }
 
