@@ -68,6 +68,14 @@ const (
 	// maxTTL caps the TTL at ~146 years. A TTL near math.MaxInt64, the usual way to write forever, would overflow the
 	// lifetimes the expiry scale computes.
 	maxTTL = time.Duration(math.MaxInt64 / 2)
+
+	// shardBytes pins the shard layout the read path depends on: the table pointer and the move sequence alone on the
+	// first cache line, the mutex and everything a writer touches past it, and a whole number of lines overall so that
+	// the shards of one cache keep that separation down the array. The padding makes it 192 with 4- and 8-byte words.
+	shardBytes = 192
+
+	cacheLine = 64
+	wordBytes = unsafe.Sizeof(uintptr(0))
 )
 
 // shard is one segment of the first level, picked by the key's hash. Every mutation runs under the shard mutex.
@@ -496,13 +504,9 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 	seq := sh.moveSeq.Load()
 	storage := sh.items.GetStorage()
 	home := storage.Home(keyHash)
-	groupEnd := (home | 7) + 1 // first position past home's overflow group
 	var entry itemstore.Entry[K, V]
 	var zero V
-	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
-			break // no key with this tag left the group: absent
-		}
+	for pos := home; ; {
 		item := storage.At(pos)
 		metaWord := item.Metadata()
 		for {
@@ -534,6 +538,13 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 		if metaWord&itemstore.HasNext == 0 {
 			break // no key homed at or before this slot lives past it
 		}
+		// At a group's edge the walk goes on only if a key with this tag lives past the edge of home's group. Asked
+		// in two steps: joined by &&, the answer goes through a stack slot.
+		if pos++; pos&itemstore.GroupMask == 0 {
+			if !storage.OverflowedTag(home, overflowBucket(keyHash)) {
+				break
+			}
+		}
 	}
 	if seq&1 == 0 && sh.moveSeq.Load() == seq {
 		return zero, false
@@ -550,11 +561,7 @@ func (c *Cache[K, V]) getMoved(sh *shard[K, V], keyHash uint64, key K) (V, bool)
 	seq := sh.moveSeq.Load()
 	storage := sh.items.GetStorage()
 	home := storage.Home(keyHash)
-	groupEnd := (home | 7) + 1
-	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
-			break
-		}
+	for pos := home; ; {
 		item := storage.At(pos)
 		metaWord := item.Metadata()
 		for {
@@ -578,6 +585,11 @@ func (c *Cache[K, V]) getMoved(sh *shard[K, V], keyHash uint64, key K) (V, bool)
 		}
 		if metaWord&itemstore.HasNext == 0 {
 			break
+		}
+		if pos++; pos&itemstore.GroupMask == 0 {
+			if !storage.OverflowedTag(home, overflowBucket(keyHash)) {
+				break
+			}
 		}
 	}
 	if seq&1 == 0 && sh.moveSeq.Load() == seq {
@@ -849,12 +861,7 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 		seq := sh.moveSeq.Load()
 		storage := sh.items.GetStorage()
 		home := storage.Home(keyHash)
-		groupEnd := (home | 7) + 1
-	probe:
-		for pos := home; ; pos++ {
-			if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
-				break probe
-			}
+		for pos := home; ; {
 			item := storage.At(pos)
 			metaWord := item.Metadata()
 			for {
@@ -871,7 +878,12 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 				break
 			}
 			if metaWord&itemstore.HasNext == 0 {
-				break probe
+				break
+			}
+			if pos++; pos&itemstore.GroupMask == 0 {
+				if !storage.OverflowedTag(home, overflowBucket(keyHash)) {
+					break
+				}
 			}
 		}
 		if seq&1 == 0 && sh.moveSeq.Load() == seq {
@@ -907,11 +919,7 @@ func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, 
 	storage := sh.items.GetStorage()
 	tagged := tagOf(keyHash)
 	home := storage.Home(keyHash)
-	groupEnd := (home | 7) + 1
-	for pos := home; ; pos++ {
-		if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
-			return 0, nil, false
-		}
+	for pos := home; ; {
 		item := storage.At(pos)
 		metaWord := item.Metadata()
 		if metaWord&itemstore.DeadOrTag == tagged && item.Entry().Key == key {
@@ -919,6 +927,11 @@ func (c *Cache[K, V]) findSlot(sh *shard[K, V], keyHash uint64, key K) (uint32, 
 		}
 		if metaWord&itemstore.HasNext == 0 {
 			return 0, nil, false
+		}
+		if pos++; pos&itemstore.GroupMask == 0 {
+			if !storage.OverflowedTag(home, overflowBucket(keyHash)) {
+				return 0, nil, false
+			}
 		}
 	}
 }
@@ -1440,13 +1453,3 @@ func (t List[K, V]) ToMap() map[K]V {
 	}
 	return m
 }
-
-// shardBytes pins the shard layout the read path depends on: the table pointer and the move sequence alone on the
-// first cache line, the mutex and everything a writer touches past it, and a whole number of lines overall so that
-// the shards of one cache keep that separation down the array. The padding makes it 192 with 4- and 8-byte words.
-const shardBytes = 192
-
-const (
-	cacheLine = 64
-	wordBytes = unsafe.Sizeof(uintptr(0))
-)

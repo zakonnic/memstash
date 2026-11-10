@@ -11,6 +11,9 @@ import (
 // zero count usually proves absence right at the group edge.
 const groupShift = 3
 
+// GroupMask is zero on a probe position that opens a group: the walk just crossed a group's edge.
+const GroupMask = 1<<groupShift - 1
+
 // chunkShift splits big tables into chunks of 64Ki slots, so the allocator never has to find one multi-gigabyte
 // block.
 const (

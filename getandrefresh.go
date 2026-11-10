@@ -171,12 +171,7 @@ func (c *Cache[K, V]) peekMemory(key K) (V, bool) {
 		seq := sh.moveSeq.Load()
 		storage := sh.items.GetStorage()
 		home := storage.Home(keyHash)
-		groupEnd := (home | 7) + 1
-	probe:
-		for pos := home; ; pos++ {
-			if pos == groupEnd && !storage.OverflowedTag(home, overflowBucket(keyHash)) {
-				break probe
-			}
+		for pos := home; ; {
 			item := storage.At(pos)
 			metaWord := item.Metadata()
 			for {
@@ -193,7 +188,12 @@ func (c *Cache[K, V]) peekMemory(key K) (V, bool) {
 				return entry.Value, true
 			}
 			if metaWord&itemstore.HasNext == 0 {
-				break probe
+				break
+			}
+			if pos++; pos&itemstore.GroupMask == 0 {
+				if !storage.OverflowedTag(home, overflowBucket(keyHash)) {
+					break
+				}
 			}
 		}
 		if seq&1 == 0 && sh.moveSeq.Load() == seq {
