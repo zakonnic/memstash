@@ -53,7 +53,7 @@ func TestRequeueBetweenQueues(t *testing.T) {
 // moves along when a compaction moves its item.
 func TestHandFollowsItsItem(t *testing.T) {
 	m := newModel(64, 2)
-	var scratch []ShiftEntry
+	var scratch []int64
 	for key := uint64(1); key <= 3; key++ {
 		m.insert(key, key)
 	}

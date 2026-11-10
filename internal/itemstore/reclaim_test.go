@@ -71,7 +71,7 @@ func (m *model) lookup(key uint64) (uint64, int, bool) {
 }
 
 // remove mirrors Cache.killAt: dequeue, kill, forget the overflow count, reclaim the slot.
-func (m *model) remove(key uint64, scratch *[]ShiftEntry) {
+func (m *model) remove(key uint64, scratch *[]int64) {
 	hash := m.hash(key)
 	tagged := TagOf(hash)
 	for pos := m.t.Home(hash); ; pos++ {
@@ -180,7 +180,7 @@ func (m *model) check(t *testing.T) {
 func TestReclaimMatchesFreshTable(t *testing.T) {
 	for _, slots := range []int{64, 256} {
 		m := newModel(slots, uint64(slots))
-		var scratch []ShiftEntry
+		var scratch []int64
 		target := slots * 4 / 5
 		next := uint64(1)
 		for step := 0; step < 4000; step++ {
@@ -209,7 +209,7 @@ func TestReclaimMatchesFreshTable(t *testing.T) {
 // the boundary are pushed past it, then deleted in every order.
 func TestReclaimAcrossChunkBoundary(t *testing.T) {
 	m := newModel(2*chunkSlots, 7)
-	var scratch []ShiftEntry
+	var scratch []int64
 	// Keys homed in the last group before the seam, found by rejection sampling.
 	var keys []uint64
 	for key := uint64(1); len(keys) < 12; key++ {
@@ -235,12 +235,56 @@ func TestReclaimAcrossChunkBoundary(t *testing.T) {
 // leaves an empty slot behind without touching its neighbors.
 func TestReclaimUncoveredHoleIsCheap(t *testing.T) {
 	m := newModel(64, 3)
-	var scratch []ShiftEntry
+	var scratch []int64
 	idx := m.insert(1, 1)
 	require.Zero(t, m.t.At(idx).Metadata()&HasNext)
 	m.remove(1, &scratch)
 	require.True(t, Empty(m.t.At(idx).Metadata()))
-	require.Empty(t, scratch, "an uncovered hole needs no run scan")
+	require.Zero(t, m.moves.Load(), "an uncovered hole moves nothing, so it opens no bracket")
+	m.check(t)
+}
+
+// TestReclaimClearsStaleChainBits: a chain bit no key earns only makes the reclaim walk further. The hole still ends
+// in the first slot nothing is chained past, and the bits the walk crossed come out clear. Two shapes: the walk ends
+// on a live slot whose bit is clear, and on an empty slot.
+func TestReclaimClearsStaleChainBits(t *testing.T) {
+	m := newModel(64, 5)
+	var scratch []int64
+	next := uint64(1)
+	homedAt := func(home uint32) uint64 {
+		for ; m.t.Home(m.hash(next)) != home; next++ {
+		}
+		next++
+		return next - 1
+	}
+	chained := func(slots ...uint32) (bits []bool) {
+		for _, slot := range slots {
+			bits = append(bits, m.t.At(slot).Metadata()&HasNext != 0)
+		}
+		return bits
+	}
+
+	a, b := homedAt(8), homedAt(8) // slots 8 and 9
+	m.insert(a, a)
+	m.insert(b, b)
+	for _, home := range []uint32{10, 11} {
+		key := homedAt(home)
+		m.insert(key, key)
+	}
+	m.t.At(9).MarkHasNext()
+	m.t.At(10).MarkHasNext()
+	m.remove(a, &scratch)
+	require.Equal(t, b, m.t.At(8).Entry().Key, "the key chained past the hole must move in")
+	require.Equal(t, []bool{false, false, false, false}, chained(8, 9, 10, 11))
+	m.check(t)
+
+	e, f := homedAt(20), homedAt(20) // slots 20 and 21, slot 22 stays empty
+	m.insert(e, e)
+	m.insert(f, f)
+	m.t.At(21).MarkHasNext()
+	m.remove(e, &scratch)
+	require.Equal(t, f, m.t.At(20).Entry().Key, "the key chained past the hole must move in")
+	require.Equal(t, []bool{false, false}, chained(20, 21))
 	m.check(t)
 }
 

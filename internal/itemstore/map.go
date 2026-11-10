@@ -126,11 +126,6 @@ func (t *FlatHashMap[K, V]) Dist(from, to uint32) uint32 {
 	return to + t.size - from
 }
 
-// Covers reports whether the probe chain of a key homed at home, living at pos, runs through slot q.
-func (t *FlatHashMap[K, V]) Covers(home, pos, q uint32) bool {
-	return t.Dist(home, q) < t.Dist(home, pos)
-}
-
 // A group's overflow word is 8 counters of 4 bits, picked by the key's tag, so a probe asks whether a key with ITS
 // tag left the group rather than whether any key did. Same word, same 4 bytes, but it turns 43% of misses that must
 // walk past the group edge into 9%. A counter sticks at 15 instead of wrapping into its neighbor; measured peak is
@@ -241,141 +236,117 @@ func GrowSlots(size int) int {
 	}
 }
 
-// ShiftEntry is Reclaim's record of one live slot in the run it compacts: where the slot is and where its key is
-// homed, both as offsets from the reclaimed slot so the table wrap never enters the arithmetic. homeOff is negative
-// when the home lies before the reclaimed slot.
-type ShiftEntry struct{ off, homeOff int64 }
-
 // Reclaim closes the hole a kill left at idx. The item there is dead, and its weight and overflow count are already
-// accounted. This is backward-shift deletion (Knuth, TAOCP 6.4, Algorithm R) with one twist: of the items to the
-// right whose probe chains run through the hole, the farthest one moves in, not the nearest. Its old slot becomes the
-// hole, and so on until nothing to the right covers the hole; that slot is cleared. The occupied set comes out the
-// same either way, but the farthest item is the most displaced one, so this halves the moves (~1 per deletion instead
-// of ~2 at load 0.75). The run then gets exact HasNext bits, which also repairs stale ones from earlier churn. The
-// table ends as the live keys alone would leave it.
+// accounted. This is backward-shift deletion (Knuth, TAOCP 6.4, Algorithm R): an item to the right whose probe chain
+// runs through the hole moves in, its old slot becomes the hole, and so on until nothing to the right is chained past
+// the hole; that slot is cleared. The table ends as the live keys alone would leave it.
+//
+// Chain bits come out exact from the hole on. Behind it only the nearest slot is looked at: the dead key's chain
+// may leave a stale bit further back, which costs a probe a longer walk until a later Reclaim walks over it.
 //
 // Only the moves run inside the moves bracket (odd while open). A reader whose probe overlapped it and missed probes
-// again, because a key sliding toward its home can cross a probe. The scan and the bit repass stay outside, so the
-// bracket lasts tens of nanoseconds, and an uncovered hole opens none. A moved item dies in its old slot before it
-// goes live in the new one, so no walk meets it twice. scratch is the caller's buffer, reused across calls.
-func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]ShiftEntry, moves *atomic.Uint32) {
-	if t.At(idx).Metadata()&HasNext == 0 {
-		t.Release(idx) // uncovered: nothing to move
-		return
+// again, because a key sliding toward its home can cross a probe. Everything else stays outside, so the bracket lasts
+// tens of nanoseconds, and an uncovered hole opens none. A moved item dies in its old slot before it goes live in the
+// new one, so no walk meets it twice. scratch is the caller's buffer, reused across calls.
+func (t *FlatHashMap[K, V]) Reclaim(idx uint32, scratch *[]int64, moves *atomic.Uint32) {
+	hole, minHome := int64(0), int64(math.MaxInt64)
+	if t.At(idx).Metadata()&HasNext != 0 {
+		hole, minHome = t.shift(idx, scratch, moves)
 	}
-	// The run: every live slot from the hole to the first slot nothing is chained past, with its key's home.
-	entries := (*scratch)[:0]
-	end := int64(0)
-	for d := int64(1); ; d++ {
-		if d >= int64(t.size) {
-			end = d // the whole table is one run: nothing left to examine
-			break
-		}
-		pos := idx + uint32(d)
-		item := t.At(pos)
+	// The dead key may have been the last one chained past the slot behind idx.
+	if behind := t.At(t.back(idx, 1)); minHome >= 0 && behind.Metadata()&HasNext != 0 {
+		behind.ClearHasNext()
+	}
+	t.At(idx + uint32(hole)).Clear()
+}
+
+// shift moves the hole at idx to the first slot nothing is chained past, and leaves exact chain bits on the slots in
+// between. It returns where the hole went, as an offset from idx, and the lowest home among the keys now before it.
+//
+// The work happens on homes, a copy of where the keys after idx are homed. Slot numbers there count from idx, so the
+// table wrap never enters the arithmetic, and a home behind idx is negative. A slot nothing is chained past has no
+// later key homed at or before it.
+//
+// Which item fills a hole does not change the occupied set, so the moves are picked to be the fewest (~1 per deletion
+// instead of the ~2 of taking the nearest, at load 0.75).
+func (t *FlatHashMap[K, V]) shift(idx uint32, scratch *[]int64, moves *atomic.Uint32) (hole, minHome int64) {
+	homes := append((*scratch)[:0], math.MaxInt64) // the dead key is chained past nothing now
+	for s := int64(1); s < int64(t.size); s++ {
+		item := t.At(idx + uint32(s))
 		metaWord := item.Metadata()
 		if Empty(metaWord) {
-			end = d
+			t.At(idx + uint32(s-1)).ClearHasNext() // nothing lies past that slot: its bit was stale
 			break
 		}
-		if metaWord&Dead == 0 {
-			disp := DispOf(metaWord)
-			if disp == DispMax { // saturated: ask the hash
-				disp = t.Dist(t.Home(t.hashOf(item.Entry().Key)), t.Wrap(pos))
-			}
-			entries = append(entries, ShiftEntry{off: d, homeOff: d - int64(disp)})
+		disp := DispOf(metaWord)
+		if disp == DispMax { // saturated: ask the hash
+			disp = t.Dist(t.Home(t.hashOf(item.Entry().Key)), t.Wrap(idx+uint32(s)))
 		}
+		homes = append(homes, s-int64(disp))
 		if metaWord&HasNext == 0 {
-			end = d // nothing further can cover the hole
 			break
 		}
 	}
-	*scratch = entries
 
-	// Fill the hole with the farthest item whose chain runs through it, then the hole it leaves, until none does.
-	hole, moved := int64(0), false
-	for {
-		pick := -1
-		for i := len(entries) - 1; i >= 0 && entries[i].off > hole; i-- {
-			if entries[i].homeOff <= hole {
-				pick = i
-				break
+	// The hole ends up in the first slot nothing is chained past. That is where the walk stopped, unless a stale
+	// chain bit carried it further; such a bit is cleared here.
+	last := int64(len(homes)) - 1
+	minHome = homes[last]
+	for s := last - 1; s >= 0; s-- {
+		if minHome > s {
+			last = s
+			t.At(idx + uint32(s)).ClearHasNext()
+		}
+		minHome = min(minHome, homes[s])
+	}
+
+	if last > 0 {
+		// The moves, last one first, listed after the homes. A key can sit anywhere from its home to its slot. So the
+		// key in the last slot goes as far back as it may; if that is short of the hole, it takes the slot of the key
+		// that can itself go back the farthest, and so on down to the hole.
+		listed := len(homes)
+		homes = append(homes, last)
+		need, via := homes[last], last
+		for s := last - 1; need > 0; s-- {
+			if homes[s] < homes[via] {
+				via = s
+			}
+			if s == need {
+				homes = append(homes, via)
+				need = homes[via]
 			}
 		}
-		if pick < 0 {
-			break
+
+		StoreU32(moves, moves.Load()+1)
+		for i := len(homes) - 1; i >= listed; i-- {
+			from := homes[i]
+			srcIdx, dstIdx := t.Wrap(idx+uint32(from)), t.Wrap(idx+uint32(hole))
+			src, dst := t.At(srcIdx), t.At(dstIdx)
+			itemHome := t.back(srcIdx, uint32(from-homes[from]))
+			bucket := BucketOf(src.Metadata())
+			src.Kill() // first: a moved item is never live in two slots
+			dst.PublishMoved(src, uint32(hole-homes[from]))
+			t.relink(srcIdx, dstIdx)
+			// Counted at the new slot before it is forgotten at the old one, so a reader never sees the group
+			// under-counted.
+			t.NoteDisplacedAt(itemHome, dstIdx, bucket)
+			t.ForgetDisplacedAt(itemHome, srcIdx, bucket)
+			homes[hole], hole = homes[from], from
 		}
-		if !moved {
-			StoreU32(moves, moves.Load()+1)
-			moved = true
-		}
-		srcIdx, dstIdx := t.Wrap(idx+uint32(entries[pick].off)), t.Wrap(idx+uint32(hole))
-		src, dst := t.At(srcIdx), t.At(dstIdx)
-		itemHome := t.back(srcIdx, uint32(entries[pick].off-entries[pick].homeOff))
-		bucket := BucketOf(src.Metadata())
-		src.Kill() // first: a moved item is never live in two slots
-		dst.PublishMoved(src, uint32(hole-entries[pick].homeOff))
-		t.relink(srcIdx, dstIdx)
-		// Counted at the new slot before it is forgotten at the old one, so a reader never sees the group
-		// under-counted.
-		t.NoteDisplacedAt(itemHome, dstIdx, bucket)
-		t.ForgetDisplacedAt(itemHome, srcIdx, bucket)
-		hole, entries[pick].off = entries[pick].off, hole
-	}
-	if moved {
 		StoreU32(moves, moves.Load()+1)
 	}
 
-	// Back to slot order. Only the moved entries are out of place, so this is a few swaps.
-	for i := 1; i < len(entries); i++ {
-		for j := i; j > 0 && entries[j].off < entries[j-1].off; j-- {
-			entries[j], entries[j-1] = entries[j-1], entries[j]
+	// A moved key earned chain bits up to the slot it left, so every slot before the hole carries one, and keeps it
+	// only if a key beyond is still homed at or before it.
+	minHome = math.MaxInt64
+	for s := hole - 1; s >= 0; s-- {
+		if minHome > s {
+			t.At(idx + uint32(s)).ClearHasNext()
 		}
+		minHome = min(minHome, homes[s])
 	}
-	// Exact chain bits over [idx, idx+end): a slot's bit is earned by an item beyond it homed at or before it. Every
-	// such item lies in the run, since one past end would contradict the clear bit that ended the scan.
-	minHome, i := int64(1)<<62, len(entries)-1
-	for s := end - 1; s >= 0; s-- {
-		for ; i >= 0 && entries[i].off > s; i-- {
-			minHome = min(minHome, entries[i].homeOff)
-		}
-		slot := t.At(idx + uint32(s))
-		if want := minHome <= s; (slot.Metadata()&HasNext != 0) != want {
-			slot.SetHasNext(want)
-		}
-	}
-	t.Release(t.Wrap(idx + uint32(hole)))
-}
-
-// cascadeLimit caps the walk left of a freed slot. The walk stops on its own within a slot or two; the cap only
-// keeps a run of stale chain bits from turning one release into a long scan.
-const cascadeLimit = 64
-
-// Release empties an uncovered dead slot and retires the chain bits to its left that nothing can earn any more. If a
-// slot is uncovered and holds no live key, its left neighbor is uncovered too: the only key that could cover the
-// neighbor lived in the slot itself. So the walk goes left until a live item, whose stale bit it still clears, or an
-// empty slot.
-func (t *FlatHashMap[K, V]) Release(idx uint32) {
-	t.At(idx).Clear()
-	pos := idx
-	for back := 0; back < cascadeLimit; back++ {
-		if pos == 0 {
-			pos = t.size
-		}
-		pos--
-		item := t.At(pos)
-		metaWord := item.Metadata()
-		if Empty(metaWord) {
-			break // already empty and its bit is clear: nothing left of here can be stale through it
-		}
-		if metaWord&HasNext != 0 {
-			item.ClearHasNext()
-		}
-		if metaWord&Dead == 0 {
-			break // a live key: its bit is fixed, but it may still cover what lies further left
-		}
-		item.Clear()
-	}
+	*scratch = homes[:0]
+	return hole, minHome
 }
 
 // insertFresh copies a live item into a table nobody reads yet (growth) and returns its slot index.

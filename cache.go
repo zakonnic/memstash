@@ -85,9 +85,9 @@ type shard[K comparable, V any] struct {
 	policy  EvictionPolicy[K, V]
 	weight  atomic.Int64
 	cap     int64
-	live    int                    // alive items; guarded by mu
-	scratch []itemstore.ShiftEntry // Reclaim's buffer for the run it compacts; guarded by mu
-	sweepAt uint32                 // the next slot the TTL sweep looks at; guarded by mu
+	live    int     // alive items; guarded by mu
+	scratch []int64 // Reclaim's buffer for the run it compacts; guarded by mu
+	sweepAt uint32  // the next slot the TTL sweep looks at; guarded by mu
 	// evicted is set once the policy has picked a victim. From then on its queues carry more than insertion order,
 	// and growth must keep the queue order. Guarded by mu.
 	evicted bool

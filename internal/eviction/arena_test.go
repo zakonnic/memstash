@@ -18,7 +18,7 @@ type policy interface {
 type arena struct {
 	items   itemstore.StorageProxy[string, string]
 	h       maphash.Seed
-	scratch []itemstore.ShiftEntry
+	scratch []int64
 	moves   atomic.Uint32
 }
 

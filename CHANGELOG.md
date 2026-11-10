@@ -17,8 +17,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 ### Changed
 
 - **The first level never holds a tombstone.** A deletion - `Delete`, an eviction, a lazy TTL removal - compacts its
-  probe run on the spot with backward-shift deletion (Knuth's Algorithm R, taking the farthest eligible item first,
-  which halves the moves), so the table always holds exactly what inserting the live keys into a fresh table would:
+  probe run on the spot with backward-shift deletion (Knuth's Algorithm R, with the fewest moves that close the
+  hole, half of what taking the nearest item costs), so the table always holds exactly what inserting the live keys
+  into a fresh table would:
   probe walks stay at their fresh-table values however long the cache churns, and dead slots never eat into the free
   space. Measured on the churn harness at the default preallocation ratio: 0 dead slots and 0 purges over 4M inserts
   with 30% deletes (before: 4-5% dead held there by a purge every ~630 inserts per shard), hit walks 2.45 slots
@@ -82,6 +83,12 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   more too: 8M items into one shard +8% on the inserts alone and +11% with the table growing under them. A growth
   after the first eviction carries the eviction queues over in order; one before it, while the queues hold nothing
   but insertion order, queues the items in their new slot order and spares that pass. Hit rates are unchanged.
+- **A compaction reads its run once.** It used to walk the run again for every item it moved, sort its notes of the
+  run after the moves and rewrite the chain bits of the whole run. It now copies where the keys from the hole to the
+  first slot nothing is chained past are homed, picks the moves on that copy and clears only the chain bits the
+  deletion uncovered. An insert that evicts, single-threaded at the default preallocation ratio (the new
+  `MemstashSetEvictSerial`, 8 interleaved rounds): -9% for S3-FIFO, -10% for Clock, -12% for SIEVE, -7% for
+  W-TinyLFU. The parallel `Set` and `Delete` benchmarks do not move: the shard mutex and cache misses bound them.
 
 ### Fixed
 

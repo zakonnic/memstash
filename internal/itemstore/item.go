@@ -37,7 +37,7 @@ const (
 
 	// HasNext is the probe terminator. Clear means the slot is uncovered: no key homed at or before it lives past
 	// it, so a probe that got here without a match may stop. Inserts set it on the slots a key flies over; Reclaim
-	// recomputes it exactly over the run a deletion compacts.
+	// clears it on the slots a deletion uncovers. It is never missing; it may be stale behind a deleted key.
 	HasNext uint64 = 1 << 41
 
 	// TagShift and TagMask place the tag, which filters probe candidates before the key compare.
@@ -178,14 +178,6 @@ func (s *Item[K, V]) Clear() {
 // ClearHasNext retires a chain bit whose key is gone, on a slot proven uncovered. A reader that still sees the bit
 // walks one slot too far, nothing worse.
 func (s *Item[K, V]) ClearHasNext() { andMeta(&s.meta, ^HasNext) }
-
-func (s *Item[K, V]) SetHasNext(set bool) {
-	if set {
-		orMeta(&s.meta, HasNext)
-	} else {
-		andMeta(&s.meta, ^HasNext)
-	}
-}
 
 // SetValue overwrites the value in place, between beginWrite and endWrite, so a reader copying it meanwhile fails
 // validation.
