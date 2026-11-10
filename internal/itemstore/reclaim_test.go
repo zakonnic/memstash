@@ -19,6 +19,7 @@ type model struct {
 	order []uint64
 	rng   *rand.Rand
 	moves atomic.Uint32
+	next  uint64 // the last key homed handed out
 }
 
 func newModel(slots int, seed uint64) *model {
@@ -28,6 +29,15 @@ func newModel(slots int, seed uint64) *model {
 }
 
 func (m *model) hash(key uint64) uint64 { return maphash.Comparable(m.h, key) }
+
+// homed returns a key it has not handed out yet whose home is the given slot.
+func (m *model) homed(home uint32) uint64 {
+	for {
+		if m.next++; m.t.Home(m.hash(m.next)) == home {
+			return m.next
+		}
+	}
+}
 
 // insert mirrors Cache.setMemory for a key known to be absent.
 func (m *model) insert(key, value uint64) uint32 {
@@ -144,7 +154,7 @@ func (m *model) check(t *testing.T) {
 		for d := uint32(0); d < steps; d++ {
 			needBit[m.t.Wrap(home+d)] = true
 		}
-		if home>>groupShift != pos>>groupShift {
+		if home>>groupShift != pos>>groupShift || pos < home { // past the group's edge on the key's walk
 			displaced[[2]uint32{home >> groupShift, OverflowBucket(hash)}]++
 		}
 	}
@@ -250,13 +260,6 @@ func TestReclaimUncoveredHoleIsCheap(t *testing.T) {
 func TestReclaimClearsStaleChainBits(t *testing.T) {
 	m := newModel(64, 5)
 	var scratch []int64
-	next := uint64(1)
-	homedAt := func(home uint32) uint64 {
-		for ; m.t.Home(m.hash(next)) != home; next++ {
-		}
-		next++
-		return next - 1
-	}
 	chained := func(slots ...uint32) (bits []bool) {
 		for _, slot := range slots {
 			bits = append(bits, m.t.At(slot).Metadata()&HasNext != 0)
@@ -264,11 +267,11 @@ func TestReclaimClearsStaleChainBits(t *testing.T) {
 		return bits
 	}
 
-	a, b := homedAt(8), homedAt(8) // slots 8 and 9
+	a, b := m.homed(8), m.homed(8) // slots 8 and 9
 	m.insert(a, a)
 	m.insert(b, b)
 	for _, home := range []uint32{10, 11} {
-		key := homedAt(home)
+		key := m.homed(home)
 		m.insert(key, key)
 	}
 	m.t.At(9).MarkHasNext()
@@ -278,13 +281,37 @@ func TestReclaimClearsStaleChainBits(t *testing.T) {
 	require.Equal(t, []bool{false, false, false, false}, chained(8, 9, 10, 11))
 	m.check(t)
 
-	e, f := homedAt(20), homedAt(20) // slots 20 and 21, slot 22 stays empty
+	e, f := m.homed(20), m.homed(20) // slots 20 and 21, slot 22 stays empty
 	m.insert(e, e)
 	m.insert(f, f)
 	m.t.At(21).MarkHasNext()
 	m.remove(e, &scratch)
 	require.Equal(t, f, m.t.At(20).Entry().Key, "the key chained past the hole must move in")
 	require.Equal(t, []bool{false, false}, chained(20, 21))
+	m.check(t)
+}
+
+// TestWrappedKeyCountsAsDisplaced: in a table with one free slot a key can walk all the way around and settle in its
+// home group, before its home. A probe leaves that group at its edge, so the overflow counter has to count the key,
+// or the probe stops there and misses it. The count follows the key through a compaction and goes when it does.
+func TestWrappedKeyCountsAsDisplaced(t *testing.T) {
+	m := newModel(16, 9)
+	var scratch []int64
+	var atHome [16]uint64
+	for home := range uint32(16) {
+		if home != 4 {
+			atHome[home] = m.homed(home)
+			m.insert(atHome[home], atHome[home])
+		}
+	}
+	wrapped := m.homed(5)
+	require.EqualValues(t, 4, m.insert(wrapped, wrapped), "the only free slot lies behind the key's home, in its group")
+	m.check(t)
+
+	m.remove(atHome[0], &scratch)
+	require.Equal(t, wrapped, m.t.At(0).Entry().Key, "the wrapped key is the only one chained past slot 0")
+	m.check(t)
+	m.remove(wrapped, &scratch)
 	m.check(t)
 }
 

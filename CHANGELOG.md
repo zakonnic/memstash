@@ -92,6 +92,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 
 ### Fixed
 
+- **A key in a table with one free slot left could be lost to reads.** A table that cannot grow, under a policy that
+  evicts nothing, fills up to its last free slot, and a key can then walk around the whole table and settle in its
+  home group, before its home. The group's overflow counters counted only the keys in another group, so a probe
+  stopped at the group's edge: `Get` missed the key, and `Delete` left it in place until a `Set` overwrote it. Such a
+  key is counted now. `TestFullTableKeepsASlotFree` hit it in 2% of its runs.
 - **A lock-free read could return a torn multi-word value on arm64 and other weakly ordered CPUs.** An in-place
   overwrite of a value wider than a word marks the item's generation odd, writes the value, then marks it even; the
   odd mark is an atomic store, which on arm64 is a release (`STLR`) and orders nothing after it, so the value stores
