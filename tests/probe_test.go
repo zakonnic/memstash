@@ -1,4 +1,4 @@
-package memstash
+package tests
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zakonnic/memstash"
 )
 
 // TestProbeFindsEverythingUnderChurn is the property HasNext has to keep: a key the cache holds must always be
@@ -18,7 +19,7 @@ func TestProbeFindsEverythingUnderChurn(t *testing.T) {
 	ctx := context.Background()
 	const capacity = 2000
 
-	c, err := New[uint64, uint64](WithMemoryCapacity(capacity), WithShardsCount(1))
+	c, err := memstash.New[uint64, uint64](memstash.WithMemoryCapacity(capacity), memstash.WithShardsCount(1))
 	require.NoError(t, err)
 	defer c.Close()
 
@@ -68,7 +69,7 @@ func TestNoFalseMissUnderConcurrentChurn(t *testing.T) {
 		readers  = 4
 		churnOps = 300_000
 	)
-	c, err := New[uint64, uint64](WithMemoryCapacity(capacity), WithShardsCount(1))
+	c, err := memstash.New[uint64, uint64](memstash.WithMemoryCapacity(capacity), memstash.WithShardsCount(1))
 	require.NoError(t, err)
 	defer c.Close()
 
