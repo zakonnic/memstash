@@ -131,9 +131,9 @@ func (t *FlatHashMap[K, V]) Dist(from, to uint32) uint32 {
 }
 
 // A group's overflow word is 8 counters of 4 bits, picked by the key's tag, so a probe asks whether a key with ITS
-// tag left the group rather than whether any key did. Same word, same 4 bytes, but it turns 43% of misses that must
-// walk past the group edge into 9%. A counter sticks at 15 instead of wrapping into its neighbor; measured peak is
-// 5, and a stuck counter only makes the group over-walk that one tag.
+// tag left the group rather than whether any key did. Same word, same 4 bytes, but far fewer misses walk past the
+// group edge. A counter sticks at 15 instead of wrapping into its neighbor; real counts stay well below that, and a
+// stuck counter only makes the group over-walk that one tag.
 const (
 	overflowBuckets = 8
 	overflowWidth   = 4

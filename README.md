@@ -10,12 +10,11 @@
 Simple by default, deep when you need it.**
 
 Memstash can serve as a pure in-memory cache. It keeps the keys you touch most in your process,
-where a read can cost less than a nanosecond (with memstash, anyway). That number comes from a flat,
-inline hash table and a read path that takes no locks. But your whole dataset is
-usually far larger — that's when you add a second tier (backed by Redis or any storage you want),
-and the same cache will serve millions of entries, shared by every node and still warm after a
-restart. Reads fall back to L2 only on memory misses; writes land in memory immediately and reach
-L2 in the background.
+where a read takes nanoseconds instead of a network round trip (and fewer of them with memstash). But
+your whole dataset is usually far larger. That's when you add a second level, L2 (Redis or any storage
+you want): the same cache now serves all of it from a store every node shares, and stays warm across
+restarts. Reads fall back to L2 only on memory misses; writes land in memory immediately and reach L2
+in the background.
 
 ```go
 c, _ := memstash.New[string, string]()
@@ -25,25 +24,21 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 
 ## Why memstash?
 
-- **Very fast.** More than 7× the parallel read throughput of
-  [Ristretto](https://github.com/dgraph-io/ristretto), and at least 4× every other cache in the
-  [benchmarks](#benchmarks); once writes enter the mix the gap widens even more. With a
-  pointer-free key, a hit usually touches a single 64-byte cache line. Even a plain Go map needs
-  at least two.
-- **Top-tier hit ratio.** The S3-FIFO policy sits with the best of them — [Otter](https://github.com/maypok86/otter),
-  [Theine](https://github.com/Yiling-J/theine-go), Ristretto — and takes the lead at the small and
-  mid capacities where a cache actually has to choose, especially under scans and one-hit wonders.
-- **Lowest memory overhead.** ~2× smaller footprint than Otter or
-  [Bigcache](https://github.com/allegro/bigcache), see
-  [benchmarks](#heap-footprint-lower-is-better). Less overhead means more keys.
-- **Easy on the GC.** Items live inline in a per-shard flat hash table, so an insert allocates
-  nothing. Growth swaps one array for a larger one - a few objects for the collector, never one per
-  entry - and stops once the cache is at capacity. A deletion compacts its probe run in place, so
-  the table never holds dead slots and is never rebuilt to get rid of them.
-- **Generic and type-safe.** `Cache[K, V]` works with any `comparable` key and any value. No
-  `interface{}`, no casts.
-- **Second-level cache out of the box.** Add an L2 (write-through or write-back), and after a
-  restart or on a cold node, it reads from the shared tier instead of your database.
+- **Very fast.** A hit usually costs one memory access, a single 64-byte block; even a plain Go map needs at least
+  two. That makes reads the fastest in the [benchmarks](#benchmarks): well ahead of the nearest contender and
+  several times ahead of most. Writes keep level with the fastest caches there.
+- **Low memory overhead.** An entry lives inline in its table slot, and everything the cache tracks about it fits
+  in 16 bytes beside it. That gives the smallest [heap footprint](#heap-footprint-lower-is-better), more than a
+  quarter below the next smallest cache. Less overhead means more keys.
+- **Easy on the GC.** `Get`, `Set` and `Delete` allocate nothing. The collector sees one large array per shard
+  instead of an object per entry.
+- **High hit rate.** The default S3-FIFO eviction policy keeps level with the best in the
+  [benchmarks](#hit-rate---higher-is-better) and leads under scans and one-hit wonders at small and mid
+  capacities. You can switch to any of the other built-in policies, or plug in your own, to get the most out of
+  your workload.
+- **Second-level cache out of the box.** Put a shared store such as Redis behind the in-memory cache, or memory in
+  front of the Redis you already use. It is one call either way, and you get a cache that is as fast as memory,
+  shared between nodes and warm after a restart.
 - **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB,
   DynamoDB, Badger, Tarantool and Aerospike — each in its own module so the core stays clean. With
   **write-back** and **auto-batching**.
@@ -64,7 +59,7 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 - [Benchmarks](#benchmarks)
   - [Throughput](#throughput---nsop-lower-is-better)
   - [Parallel throughput](#parallel-throughput---millions-of-opss-higher-is-better)
-  - [Hit ratio](#hit-ratio---higher-is-better)
+  - [Hit rate](#hit-rate---higher-is-better)
   - [Heap footprint](#heap-footprint-lower-is-better)
   - [Load generator](#load-generator)
 - [Contributing](#contributing)
@@ -149,8 +144,8 @@ user, err := lc.GetOrLoad(ctx, "user:42")
 
 ### Two-level cache with Redis
 
-Add a shared L2 in one call. Memory serves the hot set; anything evicted from L1 (or missing after a
-restart) is fetched from Redis and promoted back into memory. Writes are **write-back by default**:
+Add a shared L2 in one call. Memory serves the hot set; anything evicted from L1 (the in-memory level)
+or missing after a restart is fetched from Redis and promoted back into memory. Writes are **write-back by default**:
 `Set` returns immediately and a background worker flushes to Redis. Single **Sets are grouped into
 batches** asynchronously. The example uses rueidis, but every client in the [adapters
 table](#l2-adapters) works the same way.
@@ -167,7 +162,7 @@ client, _ := rueidis.NewClient(rueidis.ClientOption{
 	InitAddress: []string{"127.0.0.1:6379"},
 })
 
-// JSON values, string keys, 10-minute TTL applied to both tiers (L1 uses the default capacity).
+// JSON values, string keys, 10-minute TTL applied to both levels (L1 uses the default capacity).
 c, _ := rueidis_adapter.NewJSONCache[string, User](client, memstash.WithTTL(10*time.Minute))
 defer c.Close() // waits for the write-back buffer to drain
 
@@ -239,8 +234,8 @@ u, ok, err := c.GetBatched(ctx, "user:42") // L1 hit → instant; a miss rides o
 
 **Observability and iteration** — `Stats()` returns operation counters (collected with striped
 counters, so an increment stays contention-free even under heavy parallelism). It's opt-in via
-`WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it — otherwise
-counters stay at zero. `Iterator()` walks the live first-level entries lock-free, independent of
+`WithStats()`: off by default so a cache that doesn't read `Stats()` doesn't pay for it. Without it,
+the counters stay at zero. `Iterator()` walks the live first-level entries lock-free, independent of
 stats:
 
 ```go
@@ -254,8 +249,8 @@ for key, value := range c.Iterator() {
 ```
 
 **Removal events** — get told when an item leaves memory, and why. Handlers run after the shard lock
-is released, so they may take their time and may call back into the cache; costs 24 B and 13 ns when
-a handler is set; otherwise zero overhead:
+is released, so they may take their time and may call back into the cache; a small cost per removal
+when a handler is set, otherwise zero overhead:
 
 ```go
 c, _ := memstash.New[string, *Conn](
@@ -302,7 +297,7 @@ c, _ := rueidis_adapter.NewJSONCache[int, User](client,
 ```
 
 **Ordered MGET** — on the Redis-family adapters `BatchGet` reads the MGET reply array positionally
-when every key of a batch lands on the same server, which drops the key-to-reply map (~37% fewer
+when every key of a batch lands on the same server, which drops the key-to-reply map (fewer
 bytes allocated per `BatchGet`). Adapters probe the client for it by default; override the probe
 when you know better — for example a cluster client whose batches stay inside one slot:
 
@@ -369,7 +364,8 @@ c, err := memstash.New[string, User](
 )
 ```
 
-Affects the hit rate — you control which items stay and which get evicted, for instance based on the items themselves.
+A custom policy changes the hit rate: you decide which items stay and which are evicted, for instance by looking
+at the items themselves.
 
 ## Full option list
 
@@ -449,7 +445,9 @@ make bench
 
 # make help # List all commands and benchmarks
 ```
-Configuration for all of them lives in [benchmarks/adapters.go](benchmarks/adapters.go).
+
+Configuration for all of them lives in [benchmarks/adapters.go](benchmarks/adapters.go). In the tables, bold marks a
+memstash result ahead of every other cache in its column.
 
 ![Read throughput](benchmarks/results/read_throughput.svg)
 
@@ -457,17 +455,17 @@ Configuration for all of them lives in [benchmarks/adapters.go](benchmarks/adapt
 
 | Cache | GetHit | Get (50% hit rate) | Set | 90 Get / 10 Set | Set alloc |
 |---|--:|------------------:|--:|----------------:|--:|
-| **memstash-s3fifo** | **0.72** |          **0.96** | 23.9 |            3.61 | 0 B / 0 |
-| **memstash-clock** | **0.72** |          **0.96** | 23.5 |            3.47 | 1 B / 0 |
-| **memstash-wtinylfu** | **0.73** |          **0.93** | 26.4 |            3.47 | 1 B / 0 |
-| **memstash-sieve** | **0.72** |          **0.96** | 24.5 |            3.59 | 0 B / 0 |
-| otter-wtinylfu | 2.05 |              3.35 | 434.8 |           49.86 | 48 B / 1 |
-| theine-wtinylfu | 3.29 |              3.34 | 293.6 |           48.73 | 35 B / 0 |
-| ristretto | 6.06 |              6.22 | 118.9 |           21.23 | 85 B / 1 |
-| bigcache | 8.86 |              7.25 | 37.7 |           21.00 | 24 B / 2 |
-| freecache | 13.96 |             11.36 | 20.5 |           14.28 |  0 B / 0 |
-| hashicorp-lru | 90.10 |             84.29 | 137.6 |           92.86 | 65 B / 0 |
-| sync.Map\* | 1.61 |              1.69 | 11.6 |            4.10 | 63 B / 2 |
+| **memstash-s3fifo** | **0.74** |          **0.86** | 24.5 |        **2.33** | 0 B / 0 |
+| **memstash-clock** | **0.76** |          **0.88** | 29.8 |        **2.26** | 0 B / 0 |
+| **memstash-wtinylfu** | **0.77** |          **0.86** | 23.0 |        **2.19** | 0 B / 0 |
+| **memstash-sieve** | **0.76** |          **0.88** | 30.4 |        **2.24** | 0 B / 0 |
+| otter-wtinylfu | 1.55 |              1.35 | 50.0 |            3.92 | 23 B / 0 |
+| theine-wtinylfu | 3.56 |              3.30 | 328.1 |           51.56 | 43 B / 0 |
+| ristretto | 6.13 |              6.22 | 120.4 |           20.85 | 85 B / 1 |
+| bigcache | 9.02 |              7.25 | 36.6 |           20.99 |  8 B / 1 |
+| freecache | 13.90 |             11.73 | 20.9 |           14.22 |  0 B / 0 |
+| hashicorp-lru | 95.09 |             88.65 | 131.3 |           99.78 | 61 B / 0 |
+| sync.Map\* | 1.77 |              1.78 | 12.7 |            4.29 | 63 B / 2 |
 
 \* `sync.Map` performs no eviction — a lower-bound baseline, not a comparable cache.
 
@@ -475,108 +473,100 @@ Configuration for all of them lives in [benchmarks/adapters.go](benchmarks/adapt
 
 | Cache | 100% reads | 75% reads | 50% reads | 25% reads | 0% (writes only) |
 |---|--:|--:|--:|--:|-----------------:|
-| **memstash-s3fifo** | **1280** | **155** | **97** | **74** |           **51** |
-| **memstash-clock** | **1264** | **149** | **84** | **72** |           **53** |
-| **memstash-wtinylfu** | **1266** | **151** | **101** | **80** |           **58** |
-| **memstash-sieve** | **1268** | **149** | **99** | **75** |           **61** |
-| theine-wtinylfu | 290 | 11 | 6.3 | 4.5 |              5.0 |
-| ristretto | 172 | 19 | 10 | 6.2 |              6.1 |
-| otter-wtinylfu | 167 | 9.7 | 5.3 | 3.7 |              2.9 |
-| bigcache | 112 | 34 | 27 | 25 |               27 |
-| freecache | 73 | 69 | 68 | 67 |               67 |
-| hashicorp-lru | 11 | 10 | 10 | 9.6 |              9.9 |
-| sync.Map\* | 592 | 157 | 111 | 88 |               76 |
+| **memstash-s3fifo** | **1227** | **242** | **151** | **115** |               88 |
+| **memstash-clock** | **1218** | **241** | **153** | **114** |               65 |
+| **memstash-wtinylfu** | **1225** | **242** | **148** | **110** |           **95** |
+| **memstash-sieve** | **1237** | **245** | **152** | 101 |               93 |
+| otter-wtinylfu | 611 | 180 | 127 | 109 |               94 |
+| theine-wtinylfu | 284 | 10 | 6.1 | 4.5 |              3.4 |
+| ristretto | 161 | 19 | 9.5 | 6.2 |              4.7 |
+| bigcache | 108 | 35 | 27 | 25 |               28 |
+| freecache | 72 | 69 | 67 | 66 |               64 |
+| hashicorp-lru | 9.9 | 9.9 | 10 | 9.8 |              9.1 |
+| sync.Map\* | 562 | 155 | 107 | 82 |               75 |
 
-Reads are only half the story. Once writes enter the mix, the W-TinyLFU caches (Otter, Theine) slow
-down by more than an order of magnitude, while memstash stays within reach of the eviction-free
-`sync.Map` baseline.
-
-### Hit ratio - higher is better
-
-The "Est. Size" column is the cache's estimated memory footprint at the end of the one-hit-30% run
-(key + value bytes plus each implementation's own bookkeeping). This is a rough estimate — for
-measured resident bytes see [heap footprint](#heap-footprint-lower-is-better).
+### Hit rate - higher is better
 
 **Capacity = 500k items (~36% of the working set):**
 
-| Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
-|---|--:|--:|--:|----------:|
-| ristretto | 58.29% | 35.37% | 37.02% | 69 MB |
-| **memstash-s3fifo** | **58.12%** | **34.66%** | **36.39%** | 34 MB |
-| memstash-wtinylfu | 57.96% | 34.78% | 36.45% | 34 MB |
-| memstash-sieve | 57.73% | 34.07% | 35.86% | 35 MB |
-| theine-wtinylfu | 57.41% | 34.50% | 35.56% | 54 MB |
-| memstash-clock | 57.04% | 33.01% | 34.63% | 30 MB |
-| otter-wtinylfu | 55.99% | 32.94% | 34.54% | 41 MB |
-| hashicorp-lru | 55.64% | 31.61% | 32.99% | 45 MB |
-| freecache | 52.11% | 27.99% | 29.03% | 54 MB |
-| bigcache | 51.29% | 27.95% | 29.23% | 25 MB |
+| Cache | Zipf | Zipf+scan | One-hit 30% |
+|---|--:|--:|--:|
+| ristretto | 58.31% | 35.38% | 37.01% |
+| **memstash-s3fifo** | 58.12% | 34.72% | 36.39% |
+| **memstash-wtinylfu** | 58.11% | 34.92% | 36.63% |
+| **memstash-sieve** | 57.73% | 34.12% | 35.85% |
+| theine-wtinylfu | 57.30% | 34.44% | 35.66% |
+| **memstash-clock** | 57.07% | 33.08% | 34.65% |
+| otter-wtinylfu | 56.63% | 33.77% | 34.91% |
+| hashicorp-lru | 55.64% | 31.61% | 32.99% |
+| freecache | 52.10% | 28.22% | 29.03% |
+| bigcache | 51.29% | 27.95% | 29.23% |
 
 **Capacity = 100k items (~7% of the working set):**
 
-| Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
-|---|--:|--:|--:|--:|
-| memstash-wtinylfu | 41.80% | 26.29% | 27.04% | 8.4 MB |
-| theine-wtinylfu | 41.14% | 25.94% | 26.55% | 12 MB |
-| **memstash-s3fifo** | **41.11%** | **26.32%** | **27.19%** | 8.4 MB |
-| memstash-sieve | 39.62% | 25.21% | 25.14% | 8.3 MB |
-| ristretto | 39.10% | 23.55% | 24.87% | 14 MB |
-| otter-wtinylfu | 37.80% | 23.63% | 23.77% | 7.3 MB |
-| memstash-clock | 33.11% | 18.22% | 18.94% | 7.3 MB |
-| hashicorp-lru | 30.03% | 15.62% | 16.53% | 9.6 MB |
-| bigcache | 28.26% | 15.71% | 15.48% | 6.1 MB |
-| freecache | 25.65% | 14.48% | 13.95% | 19 MB |
+| Cache | Zipf | Zipf+scan | One-hit 30% |
+|---|--:|--:|--:|
+| **memstash-wtinylfu** | **41.84%** | **26.30%** | **27.05%** |
+| **memstash-s3fifo** | **41.11%** | **26.33%** | **27.18%** |
+| theine-wtinylfu | 41.03% | 25.96% | 26.46% |
+| otter-wtinylfu | 40.13% | 25.31% | 25.83% |
+| **memstash-sieve** | 39.62% | 25.20% | 25.14% |
+| ristretto | 39.09% | 23.55% | 24.86% |
+| **memstash-clock** | 33.11% | 18.22% | 18.93% |
+| hashicorp-lru | 30.03% | 15.62% | 16.53% |
+| bigcache | 28.26% | 15.71% | 15.48% |
+| freecache | 25.75% | 14.48% | 14.00% |
 
 **Capacity = 10k items (~1% of the working set):**
 
-| Cache | Zipf | Zipf+scan | One-hit 30% | Est. Size |
-|---|--:|--:|--:|--:|
-| theine-wtinylfu | 15.34% | 9.24% | 10.25% | 1.5 MB |
-| **memstash-s3fifo** | **14.78%** | **9.89%** | **10.28%** | 1.1 MB |
-| memstash-wtinylfu | 14.48% | 8.34% | 8.66% | 1.1 MB |
-| memstash-sieve | 13.52% | 8.85% | 8.84% | 1.1 MB |
-| otter-wtinylfu | 12.92% | 8.59% | 8.98% | 803 kB |
-| bigcache | 11.75% | 7.46% | 6.09% | 1.5 MB |
-| ristretto | 10.14% | 5.56% | 5.40% | 1.9 MB |
-| freecache | 6.00% | 3.93% | 3.03% | 7.1 MB |
-| memstash-clock | 5.34% | 3.50% | 2.62% | 930 kB |
-| hashicorp-lru | 5.01% | 3.30% | 2.49% | 1.0 MB |
+| Cache | Zipf | Zipf+scan | One-hit 30% |
+|---|--:|--:|--:|
+| theine-wtinylfu | 15.36% | 9.24% | 10.22% |
+| otter-wtinylfu | 14.81% | 8.57% | 8.84% |
+| **memstash-s3fifo** | 14.75% | **9.88%** | **10.27%** |
+| **memstash-wtinylfu** | 14.47% | 8.34% | 8.62% |
+| **memstash-sieve** | 13.48% | 8.86% | 8.86% |
+| bigcache | 11.75% | 7.46% | 6.09% |
+| ristretto | 10.16% | 5.62% | 5.39% |
+| freecache | 6.00% | 3.93% | 3.03% |
+| **memstash-clock** | 5.34% | 3.50% | 2.62% |
+| hashicorp-lru | 5.01% | 3.30% | 2.49% |
 
 ### Heap footprint, lower is better
 
 Each cache is filled with 100M `uint64 -> uint64` entries — 16 bytes of raw payload apiece — and the
 heap growth it causes is read back from the Go runtime, so these are real resident bytes rather than
-the cache's own estimate. The [measurements](benchmarks/results/heap-size-100kk.txt) run one
+an estimate. The [measurements](benchmarks/results/heap-size-100kk.txt) run one
 contender at a time: a single pass costs several GiB. The caches that only accept byte-slice or
-string keys were given the same values converted to `[8]byte`.
+string keys were given the same keys converted to `[8]byte`. Reproduce with `make bench-100kk`
+(memstash) and `make bench-100kk-others`.
 
 | Cache | Heap | B/entry |  Get hot | Get full | Set hot | Set full |
 |---|--:|--:|---------:|--:|--:|--:|
-| xsync.MapOf\* | 3.7 GiB | 39.24 |    1.71 ns | 9.17 ns | 5.52 ns | 13.49 ns |
-| **memstash-s3fifo** | **3.9 GiB** | **42.05** | **2.69 ns** | **8.94 ns** | **17.26 ns** | **24.27 ns** |
-| freecache | 5.7 GiB | 61.53 |    38.52 ns | 49.16 ns | 40.03 ns | 52.00 ns |
-| otter-wtinylfu | 7.6 GiB | 81.98 |     4.90 ns | 13.74 ns | 440.2 ns | 525.0 ns |
-| bigcache | 7.7 GiB | 84.84 |    11.16 ns | 20.48 ns | 55.27 ns | 64.02 ns |
-| hashicorp-lru | 9.7 GiB | 104.2 |    215.3 ns | 577.4 ns | 227.4 ns | 518.0 ns |
-| theine-wtinylfu | 11 GiB | 115.0 |    10.08 ns | 20.17 ns | 345.4 ns | 476.6 ns |
-| ristretto | 14 GiB | 153.1 |    21.46 ns | 25.30 ns | 230.6 ns | 249.9 ns |
+| xsync.MapOf\* | 3.7 GiB | 39.24 |    1.60 ns | 9.71 ns | 5.61 ns | 15.29 ns |
+| **memstash-s3fifo** | **4.1 GiB** | **43.72** |    3.17 ns | **9.66 ns** | 12.19 ns | 19.10 ns |
+| bigcache | 5.4 GiB | 59.92 |    15.59 ns | 22.41 ns | 55.49 ns | 63.25 ns |
+| freecache | 5.7 GiB | 61.53 |    40.32 ns | 49.31 ns | 41.78 ns | 51.91 ns |
+| otter-wtinylfu | 7.6 GiB | 81.99 |     3.07 ns | 13.41 ns | 10.80 ns | 17.65 ns |
+| hashicorp-lru | 9.7 GiB | 104.2 |    167.8 ns | 524.9 ns | 203.0 ns | 520.6 ns |
+| theine-wtinylfu | 11 GiB | 115.0 |     9.54 ns | 19.46 ns | 371.0 ns | 494.9 ns |
+| ristretto | 14 GiB | 153.1 |    17.19 ns | 22.71 ns | 275.5 ns | 294.5 ns |
 
-\* `xsync.MapOf` performs no eviction — a lower-bound baseline, not a comparable cache. Switched from sync.Map: it uses too much memory.
+\* `xsync.MapOf` performs no eviction — a lower-bound baseline, not a comparable cache. Switched from sync.Map: it
+uses too much memory.
 
 The four latency columns are measured on that same filled cache, so they show what a read and a
 write cost at 100M entries rather than at a benchmark-sized capacity. **hot** replays a 64k-key
 window from the middle of the fill: it stays in CPU cache and measures the code path itself.
 **full** draws uniformly over all 100M keys, so nearly every op is an LLC and a TLB miss — the gap
 between the two columns is what memory stalls cost per op at this cardinality. Both are aggregate
-ns/op across all cores, like the parallel table above. As a side effect, this shows how well the library
-is optimized for hardware caches and CPU-level operations. Memstash is squeezed to the max — with short
-keys, a typical read costs one memory load — even a plain Go map takes at least two.
+ns/op across all cores, like the parallel table above.
 
 ### Load generator
 
-Long-running soak test, located [in benchmarks](benchmarks/load_generator) (run `make load-generator`), this tool hammers three independently configured 
-caches with continuous, realistic load to verify correctness and measure real-world hit rates under
-sustained pressure.
+A long-running soak test lives [in benchmarks](benchmarks/load_generator) (run `make load-generator`). It hammers
+three independently configured caches with continuous, realistic load to verify correctness and measure
+real-world hit rates under sustained pressure.
 
 Three parallel scenarios, each with its own cache, goroutines, and key space:
 
@@ -589,8 +579,9 @@ Three parallel scenarios, each with its own cache, goroutines, and key space:
 Keys follow a Zipf distribution (`zipf_s` 1.001–1.05) over a key space orders of magnitude larger than L1 capacity,
 plus a 10% `random_percent` share drawn uniformly instead.
 
-**Every Get is verified** against what the scenario's `Value` function returns for that key — `load_generator.WithNoVerification()`
-turns that off when you want the load without the check. Everything that can go wrong lands in `errors.log`.
+**Every Get is verified** against what the scenario's `Value` function returns for that key —
+`load_generator.WithNoVerification()` turns that off when you want the load without the check. Everything that
+can go wrong lands in `errors.log`.
 Logged once per minute + on shutdown (`scenario-N.log`, JSON lines).
 Tuning via [config.yaml](benchmarks/load_generator/config.yaml). All fields optional; `-config` repeats, a later file
 overriding the fields it sets.
@@ -600,7 +591,7 @@ the servers instead of going through the port relay, which adds milliseconds to 
 
 It's a standalone module, so the same engine can run your own scenarios — the three above
 live in [cmd/load-generator](benchmarks/load_generator/cmd/load-generator) and are nothing but a
-`[]Scenario[K, V]`. You can use it as an example and create the app with `load_generator.New`. 
+`[]Scenario[K, V]`. You can use it as an example and create the app with `load_generator.New`.
 
 **What you can check:**
 - **Correctness** — empty `errors.log` after hours of 1M+ rps

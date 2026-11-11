@@ -18,12 +18,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 
 - **The first level never holds a tombstone.** A deletion - `Delete`, an eviction, a lazy TTL removal - compacts its
   probe run on the spot with backward-shift deletion (Knuth's Algorithm R, with the fewest moves that close the
-  hole, half of what taking the nearest item costs), so the table always holds exactly what inserting the live keys
-  into a fresh table would:
+  hole), so the table always holds exactly what inserting the live keys into a fresh table would:
   probe walks stay at their fresh-table values however long the cache churns, and dead slots never eat into the free
-  space. Measured on the churn harness at the default preallocation ratio: 0 dead slots and 0 purges over 4M inserts
-  with 30% deletes (before: 4-5% dead held there by a purge every ~630 inserts per shard), hit walks 2.45 slots
-  instead of 3.0-3.6, p99 hit walk 18 instead of 27.
+  space.
 - **No same-size rebuilds.** With nothing to purge, a preallocated table is never allocated again after `New`, and a
   non-preallocated one only grows; the transient second table of a purge is gone. `Stats.TablePurges` is always 0
   and will be removed with the next stats revision.
@@ -39,12 +36,11 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   overwrite that changes a weight, so S3-FIFO's small and W-TinyLFU's window weigh exactly what they hold. `Items`
   also gives `Cost` and `Fingerprint` - a key's home slot and tag bits, which S3-FIFO's ghost table keys on without
   hashing the key; W-TinyLFU's sketch hashes the key as in 0.9.8, since
-  a fingerprint changes when the table grows and the sketch's history must not. The links take 8 bytes per slot: a
-  preallocated 100M-item `uint64` cache measures 43.7 bytes per item instead of 41.0 (heap 4.1 GiB instead of 3.9);
-  a table that is not preallocated runs at a lower load and pays ~8 bytes per item more (+12-14% at 1M items), except
-  under SIEVE, which drops its own 16-byte node array and comes out ~3% smaller.
+  a fingerprint changes when the table grows and the sketch's history must not. The links take 8 bytes per slot, so
+  every item costs more memory, and a table that is not preallocated, which runs at a lower load, pays for them on
+  more slots per item. SIEVE drops its own 16-byte node array and comes out smaller.
 - **The item's meta word carries its distance from its home slot**, so a compaction reads the run it moves instead of
-  rehashing every key it passes - the difference between 1.0 us and 0.6 us per delete on 100M string keys. It costs
+  rehashing every key it passes, which makes a delete cheaper the costlier the key is to hash. It costs
   the six generation bits the seqlock had to spare (22 left, 2M writes to one slot before a stalled reader could
   validate against a stale word).
 - **The slot tag carries all 13 hash bits.** A tag must never be 0, or an empty slot would pass the candidate compare;
@@ -53,7 +49,7 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   often.
 - **A shard's read line carries nothing a writer touches.** The table pointer and the move sequence share the first
   cache line and the mutex opens the second, where before a `Set` taking the mutex invalidated the line every reader
-  loads on every probe. Worth 30-37% on every mixed read/write benchmark.
+  loads on every probe. Mixed read/write workloads gain the most.
 - Lock-free reads stay exact across the compaction: a miss that overlapped moves is re-probed (a per-shard move
   sequence on the line every read loads anyway), the third time under the shard mutex; hits are unchanged.
   `Iterator` and `SaveTo` may skip an item a concurrent deletion slid toward its home - the same weak consistency the
@@ -61,8 +57,8 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - `WithPreallocationRatio` is now a pure memory-for-latency dial, and `WithGrowthThreshold` only means growth; the
   rule that the ratio must stay below the threshold is gone.
 - **Meta words are written plainly under the shard mutex on amd64.** One writer holds the mutex, so a meta write
-  needs release ordering, not a locked instruction, and on amd64 a plain aligned store is release-ordered; five
-  locked writes measure 18.5 ns against 1.5 ns plain, and an insert that evicts issues a dozen. Readers keep their
+  needs release ordering, not a locked instruction, and on amd64 a plain aligned store is release-ordered; a locked
+  write costs far more than a plain one, and an insert that evicts issues a dozen. Readers keep their
   atomic loads and compare-and-swaps; the race detector, which cannot see the ordering argument, builds the atomic
   variant (`internal/itemstore/write_generic.go`).
 - **The hot paths inline in user programs too.** A generic method of this package is compiled where it is
@@ -70,33 +66,28 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   inlines only if its body is in this package's export data, which the compiler writes only for helpers it inlined
   in this package's own build. Every such helper was a call in every program but this repository's own tests: the
   tag, the overflow bucket and the empty test on every read; the meta-word and weight stores, the generation and
-  distance encoders, the queue node accessors and the policies' own helpers on every write - 683 call sites in the
-  benchmarks module. The package now instantiates the cache once inside itself, which inlines them all there; the
-  155 calls left go to functions that are not inlinable anywhere. The instance adds nothing to a program's binary and
-  ~0.15 s to this package's compile. On the benchmarks module, which builds the way a user does: `GetHit` -16%, `Set`
-  and `Delete` -4% to -6%, the reads and writes of `Mixed90_10` unchanged.
-- **What the compaction costs.** Measured against the tombstone design: reads are ahead (`GetHit` -13%, `Get` -21%,
-  `GetMiss` -9%, `DeleteMiss` -19%) and so is every mixed workload (`Mixed90_10` -41%, parallel throughput -11% at
-  100% reads to -38% at 75%: the shard read line no longer bounces on every `Set`). Writes that remove still pay for a
-  table that never holds a tombstone: `Set` at capacity costs +17%, and the `Delete`+`Set` pair of one hot key 48 ns
-  against 34 ns, where the old design resurrected the item in place. Filling a cache that is not preallocated costs
-  more too: 8M items into one shard +8% on the inserts alone and +11% with the table growing under them. A growth
+  distance encoders, the queue node accessors and the policies' own helpers on every write. The package now
+  instantiates the cache once inside itself, which inlines them all there; the calls left go to functions that are
+  not inlinable anywhere. The instance adds nothing to a program's binary and little to this package's compile time.
+  Reads gain the most; `Set` and `Delete` gain less.
+- **What the compaction costs.** Against the tombstone design, reads are faster, and so is every mixed workload: the
+  shard read line no longer bounces on every `Set`. Writes that remove pay for a table that never holds a tombstone:
+  `Set` at capacity costs more, and so does a `Delete`+`Set` pair on one hot key, which the old design resurrected in
+  place. Filling a cache that is not preallocated costs more too, on the inserts and on the growth under them. A growth
   after the first eviction carries the eviction queues over in order; one before it, while the queues hold nothing
   but insertion order, queues the items in their new slot order and spares that pass. Hit rates are unchanged.
 - **A compaction reads its run once.** It used to walk the run again for every item it moved, sort its notes of the
   run after the moves and rewrite the chain bits of the whole run. It now copies where the keys from the hole to the
   first slot nothing is chained past are homed, picks the moves on that copy and clears only the chain bits the
-  deletion uncovered. An insert that evicts, single-threaded at the default preallocation ratio (the new
-  `MemstashSetEvictSerial`, 8 interleaved rounds): -9% for S3-FIFO, -10% for Clock, -12% for SIEVE, -7% for
-  W-TinyLFU. The parallel `Set` and `Delete` benchmarks do not move: the shard mutex and cache misses bound them.
-  The test for a key past its group's edge is two compares on the position, so the overflow counters inline into
-  the moves: another -3% for Clock, the other policies within noise.
+  deletion uncovered. An insert that evicts gets cheaper under every policy (the new single-threaded
+  `MemstashSetEvictSerial` shows it). The parallel `Set` and `Delete` benchmarks do not move: the shard mutex and cache
+  misses bound them. The test for a key past its group's edge is two compares on the position, so the overflow
+  counters inline into the moves.
 - **A probe asks about its group's edge only once a slot has sent it on.** Every probe loop tested for the edge of
   the home group before it loaded a slot, the home slot included, and for some key types the compiler kept the
-  answer in a stack slot. The test now follows the chain-bit test, so a hit in the home slot never runs it. Hits on
-  64Ki keys read in turn: `uuid` keys -3.0%, `string` keys -2.8%; the serial Zipf hit -2.2%; `GetAndRefresh` -6.0%,
-  `BatchGetOrLoad` on a warm cache -3.6% to -4.7%, `BatchGetAndRefresh` -2.2% to -2.5% (8 interleaved rounds). The
-  parallel Zipf `GetHit` and `GetMiss`, where almost every read ends in the home slot, stay within noise.
+  answer in a stack slot. The test now follows the chain-bit test, so a hit in the home slot never runs it. Serial
+  hits get cheaper, `uuid` and `string` keys among them, and so do `GetAndRefresh`, `BatchGetOrLoad` on a warm cache
+  and `BatchGetAndRefresh`. The parallel Zipf `GetHit` and `GetMiss` do not move.
 
 ### Fixed
 
@@ -104,7 +95,7 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   evicts nothing, fills up to its last free slot, and a key can then walk around the whole table and settle in its
   home group, before its home. The group's overflow counters counted only the keys in another group, so a probe
   stopped at the group's edge: `Get` missed the key, and `Delete` left it in place until a `Set` overwrote it. Such a
-  key is counted now. `TestFullTableKeepsASlotFree` hit it in 2% of its runs.
+  key is counted now. `TestFullTableKeepsASlotFree` caught it as an intermittent failure.
 - **A lock-free read could return a torn multi-word value on arm64 and other weakly ordered CPUs.** An in-place
   overwrite of a value wider than a word marks the item's generation odd, writes the value, then marks it even; the
   odd mark is an atomic store, which on arm64 is a release (`STLR`) and orders nothing after it, so the value stores
@@ -114,15 +105,14 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **A lock-free read could return a value that an in-place overwrite wrote with several stores, half old and half
   new.** The overwrite skipped the generation bracket for any value of up to 8 bytes, and size does not say how many
   stores gc emits. On 386, arm and mips an 8-byte string, interface, int64 or float64 is two stores, so a reader could
-  pair one string's pointer with another's length: 0.9.8 on 386 returned such strings in every 2 s run. On every
+  pair one string's pointer with another's length, and 0.9.8 on 386 did return such strings. On every
   platform a `struct{A, B uint32}` is stored field by field, and so is a `struct{_ [0]uint64; A, B uint32}`, which
   is word-sized and word-aligned like a `uint64`. `New` now classifies the value type once with reflect: only a
   single scalar no wider than a word, possibly wrapped in one-element arrays and structs whose other fields take no
-  space, skips the bracket. Bracketing every overwrite instead cost a serial overwrite of `uint64` values +7%
-  (14.5 -> 15.5 ns, p=0.026); the classified path is no slower than before (14.95 -> 14.56 ns, parallel `Set`
-  unchanged).
+  space, skips the bracket. Bracketing every overwrite instead would slow down the overwrite of a plain `uint64`; the
+  classified path is no slower than before.
 - **32-bit platforms are supported again.** On a 32-bit int the growth test overflowed past ~524k items in a shard,
-  and the shard then grew on every insert until it ran out of memory (250-500k items into one shard on 386). It is
+  and the shard then grew on every insert until it ran out of memory. It is
   computed in int64 now, the table size cap fits an int, and the shard's cache-line padding follows the word size.
   New CI jobs run the suite on 386 and arm64, under qemu on s390x and riscv64, and vet every other port.
 - **An in-place overwrite of a pointer value had no release ordering off amd64.** A reader on arm64 could get the new
@@ -424,7 +414,7 @@ to avoid it grows and memory allocations on Set at all.
 
 ### Changed
 
-- Revert a Stats micro-refactoring that prevented inlining and added (embarrassingly, unforgivable) 0.06 ns to Get.
+- Revert a Stats micro-refactoring that prevented inlining and slowed down Get.
 
 ## [0.9.5] - 2026-07-30
 
@@ -515,8 +505,8 @@ Inline entries, lower memory footprint.
 ### Changed
 
 - **An item's Entry lives inside its state record** instead of behind a pointer to a separately allocated box. Same
-  API, same behaviour, ~18% less memory: 46.59 B/entry against 56.59 on 10M `uint64 -> uint64` entries, and filling
-  the cache got ~30% faster because a `Set` no longer allocates per write.
+  API, same behaviour, less memory per entry, and filling the cache got faster because a `Set` no longer allocates
+  per write.
 
 ## [0.9.1] - 2026-07-14
 

@@ -1,62 +1,62 @@
 goos: windows
 goarch: amd64
-pkg: memstash-bench
+pkg: github.com/zakonnic/memstash/benchmarks
 cpu: AMD Ryzen 9 9900X 12-Core Processor
-BenchmarkMemoryFootprintMemstash/100,000,000-entries-24                        1        29215262200 ns/op               41.04 B/entry-estimate          42.05 B/entry-heap          4009 MiB-heap-total                2.628 x-payload
+BenchmarkMemoryFootprintMemstash/100,000,000-entries-24                        1        4109073800 ns/op                43.71 B/entry-estimate          43.72 B/entry-heap            4168 MiB-heap-total                2.732 x-payload
 --- BENCH: BenchmarkMemoryFootprintMemstash/100,000,000-entries-24
-    memory_test.go:80: capacity=100000000 live=99978159 heap=3.9 GiB size-estimate=3.8 GiB
-BenchmarkMemoryFootprintMemstash/GetFromMemory/hot-24                          1                 2.691 ns/op           371.7 Mops/s            100.0 hit%
-BenchmarkMemoryFootprintMemstash/GetFromMemory/full-24                         1                 8.940 ns/op           111.9 Mops/s             99.98 hit%
-BenchmarkMemoryFootprintMemstash/BatchGetFromMemory/full-24                    1                 6.801 ns/op           147.0 Mops/s             99.98 hit%
-BenchmarkMemoryFootprintMemstash/Set/hot-24                                    1                17.26 ns/op             57.94 Mops/s
-BenchmarkMemoryFootprintMemstash/Set/full-24                                   1                24.27 ns/op             41.20 Mops/s
-BenchmarkMemoryFootprintOtter/100,000,000-entries-24                   1        28998154400 ns/op               81.98 B/entry-heap            7819 MiB-heap-total                5.124 x-payload
+    memory_test.go:77: capacity=100000000 live=99980161 heap=4.1 GiB size-estimate=4.1 GiB
+BenchmarkMemoryFootprintMemstash/GetFromMemory/hot-24                          1                 3.169 ns/op           315.5 Mops/s            100.0 hit%
+BenchmarkMemoryFootprintMemstash/GetFromMemory/full-24                         1                 9.662 ns/op           103.5 Mops/s             99.98 hit%
+BenchmarkMemoryFootprintMemstash/BatchGetFromMemory/full-24                    1                 8.052 ns/op           124.2 Mops/s             99.98 hit%
+BenchmarkMemoryFootprintMemstash/Set/hot-24                                    1                12.19 ns/op             82.04 Mops/s
+BenchmarkMemoryFootprintMemstash/Set/full-24                                   1                19.10 ns/op             52.35 Mops/s
+BenchmarkMemoryFootprintOtter/100,000,000-entries-24                   1        19611015900 ns/op               81.99 B/entry-heap            7819 MiB-heap-total                5.124 x-payload
 --- BENCH: BenchmarkMemoryFootprintOtter/100,000,000-entries-24
-    memory_others_test.go:266: capacity=100000000 live=100000000 heap=7.6 GiB size-estimate=0 B
-BenchmarkMemoryFootprintOtter/Get/hot-24                               1                 4.903 ns/op           204.0 Mops/s            100.0 hit%
-BenchmarkMemoryFootprintOtter/Get/full-24                              1                13.74 ns/op             72.80 Mops/s           100.0 hit%
-BenchmarkMemoryFootprintOtter/Set/hot-24                               1               440.2 ns/op               2.272 Mops/s
-BenchmarkMemoryFootprintOtter/Set/full-24                              1               525.0 ns/op               1.905 Mops/s
-BenchmarkMemoryFootprintBigcache/100,000,000-entries-24                1        21833162100 ns/op               35.00 B/entry-estimate          84.84 B/entry-heap            7861 MiB-heap-total                5.303 x-payload
+    memory_others_test.go:256: capacity=100000000 live=100000000 heap=7.6 GiB size-estimate=0 B
+BenchmarkMemoryFootprintOtter/Get/hot-24                               1                 3.072 ns/op           325.5 Mops/s            100.0 hit%
+BenchmarkMemoryFootprintOtter/Get/full-24                              1                13.41 ns/op             74.57 Mops/s           100.0 hit%
+BenchmarkMemoryFootprintOtter/Set/hot-24                               1                10.80 ns/op             92.60 Mops/s
+BenchmarkMemoryFootprintOtter/Set/full-24                              1                17.65 ns/op             56.65 Mops/s
+BenchmarkMemoryFootprintBigcache/100,000,000-entries-24                1        3438591800 ns/op                35.00 B/entry-estimate          59.92 B/entry-heap            5552 MiB-heap-total                3.745 x-payload
 --- BENCH: BenchmarkMemoryFootprintBigcache/100,000,000-entries-24
-    memory_others_test.go:266: capacity=100000000 live=97158016 heap=7.7 GiB size-estimate=3.2 GiB
-BenchmarkMemoryFootprintBigcache/Get/hot-24                            1                11.16 ns/op             89.62 Mops/s           100.0 hit%
-BenchmarkMemoryFootprintBigcache/Get/full-24                           1                20.48 ns/op             48.84 Mops/s            97.16 hit%
-BenchmarkMemoryFootprintBigcache/Set/hot-24                            1                55.27 ns/op             18.09 Mops/s
-BenchmarkMemoryFootprintBigcache/Set/full-24                           1                64.02 ns/op             15.62 Mops/s
-BenchmarkMemoryFootprintXsyncMap/100,000,000-entries-24                1        26203703800 ns/op               39.24 B/entry-estimate          39.24 B/entry-heap            3742 MiB-heap-total                2.453 x-payload
+    memory_others_test.go:256: capacity=100000000 live=97158016 heap=5.4 GiB size-estimate=3.2 GiB
+BenchmarkMemoryFootprintBigcache/Get/hot-24                            1                15.59 ns/op             64.15 Mops/s           100.0 hit%
+BenchmarkMemoryFootprintBigcache/Get/full-24                           1                22.41 ns/op             44.62 Mops/s            97.16 hit%
+BenchmarkMemoryFootprintBigcache/Set/hot-24                            1                55.49 ns/op             18.02 Mops/s
+BenchmarkMemoryFootprintBigcache/Set/full-24                           1                63.25 ns/op             15.81 Mops/s
+BenchmarkMemoryFootprintXsyncMap/100,000,000-entries-24                1        14397956400 ns/op               39.24 B/entry-estimate          39.24 B/entry-heap            3742 MiB-heap-total                2.453 x-payload
 --- BENCH: BenchmarkMemoryFootprintXsyncMap/100,000,000-entries-24
-    memory_others_test.go:266: capacity=100000000 live=100000000 heap=3.7 GiB size-estimate=3.7 GiB
-BenchmarkMemoryFootprintXsyncMap/Get/hot-24                            1                 1.710 ns/op           584.9 Mops/s            100.0 hit%
-BenchmarkMemoryFootprintXsyncMap/Get/full-24                           1                 9.173 ns/op           109.0 Mops/s            100.0 hit%
-BenchmarkMemoryFootprintXsyncMap/Set/hot-24                            1                 5.520 ns/op           181.2 Mops/s
-BenchmarkMemoryFootprintXsyncMap/Set/full-24                           1                13.49 ns/op             74.15 Mops/s
-BenchmarkMemoryFootprintRistretto/100,000,000-entries-24               1        59114746100 ns/op              153.1 B/entry-heap            14602 MiB-heap-total                9.570 x-payload
+    memory_others_test.go:256: capacity=100000000 live=100000000 heap=3.7 GiB size-estimate=3.7 GiB
+BenchmarkMemoryFootprintXsyncMap/Get/hot-24                            1                 1.602 ns/op           624.0 Mops/s            100.0 hit%
+BenchmarkMemoryFootprintXsyncMap/Get/full-24                           1                 9.707 ns/op           103.0 Mops/s            100.0 hit%
+BenchmarkMemoryFootprintXsyncMap/Set/hot-24                            1                 5.608 ns/op           178.3 Mops/s
+BenchmarkMemoryFootprintXsyncMap/Set/full-24                           1                15.29 ns/op             65.40 Mops/s
+BenchmarkMemoryFootprintRistretto/100,000,000-entries-24               1        57543740500 ns/op              153.1 B/entry-heap            14603 MiB-heap-total                9.570 x-payload
 --- BENCH: BenchmarkMemoryFootprintRistretto/100,000,000-entries-24
-    memory_others_test.go:266: capacity=100000000 live=100000000 heap=14 GiB size-estimate=0 B
-BenchmarkMemoryFootprintRistretto/Get/hot-24                           1                21.46 ns/op             46.59 Mops/s           100.0 hit%
-BenchmarkMemoryFootprintRistretto/Get/full-24                          1                25.30 ns/op             39.53 Mops/s           100.0 hit%
-BenchmarkMemoryFootprintRistretto/Set/hot-24                           1               230.6 ns/op               4.337 Mops/s
-BenchmarkMemoryFootprintRistretto/Set/full-24                          1               249.9 ns/op               4.001 Mops/s
-BenchmarkMemoryFootprintTheine/100,000,000-entries-24                  1        45114847100 ns/op              115.0 B/entry-heap            10963 MiB-heap-total                7.185 x-payload
+    memory_others_test.go:256: capacity=100000000 live=100000000 heap=14 GiB size-estimate=0 B
+BenchmarkMemoryFootprintRistretto/Get/hot-24                           1                17.19 ns/op             58.18 Mops/s           100.0 hit%
+BenchmarkMemoryFootprintRistretto/Get/full-24                          1                22.71 ns/op             44.03 Mops/s           100.0 hit%
+BenchmarkMemoryFootprintRistretto/Set/hot-24                           1               275.5 ns/op               3.630 Mops/s
+BenchmarkMemoryFootprintRistretto/Set/full-24                          1               294.5 ns/op               3.396 Mops/s
+BenchmarkMemoryFootprintTheine/100,000,000-entries-24                  1        39439650700 ns/op              115.0 B/entry-heap            10963 MiB-heap-total                7.185 x-payload
 --- BENCH: BenchmarkMemoryFootprintTheine/100,000,000-entries-24
-    memory_others_test.go:266: capacity=100000000 live=100000000 heap=11 GiB size-estimate=0 B
-BenchmarkMemoryFootprintTheine/Get/hot-24                              1                10.08 ns/op             99.26 Mops/s           100.0 hit%
-BenchmarkMemoryFootprintTheine/Get/full-24                             1                20.17 ns/op             49.57 Mops/s           100.0 hit%
-BenchmarkMemoryFootprintTheine/Set/hot-24                              1               345.4 ns/op               2.895 Mops/s
-BenchmarkMemoryFootprintTheine/Set/full-24                             1               476.6 ns/op               2.098 Mops/s
-BenchmarkMemoryFootprintFreecache/100,000,000-entries-24               1        78198985200 ns/op               61.51 B/entry-estimate          61.53 B/entry-heap            5864 MiB-heap-total                3.846 x-payload
+    memory_others_test.go:256: capacity=100000000 live=100000000 heap=11 GiB size-estimate=0 B
+BenchmarkMemoryFootprintTheine/Get/hot-24                              1                 9.540 ns/op           104.8 Mops/s            100.0 hit%
+BenchmarkMemoryFootprintTheine/Get/full-24                             1                19.46 ns/op             51.39 Mops/s           100.0 hit%
+BenchmarkMemoryFootprintTheine/Set/hot-24                              1               371.0 ns/op               2.696 Mops/s
+BenchmarkMemoryFootprintTheine/Set/full-24                             1               494.9 ns/op               2.020 Mops/s
+BenchmarkMemoryFootprintFreecache/100,000,000-entries-24               1        30703594600 ns/op               61.51 B/entry-estimate          61.53 B/entry-heap            5864 MiB-heap-total                3.846 x-payload
 --- BENCH: BenchmarkMemoryFootprintFreecache/100,000,000-entries-24
-    memory_others_test.go:266: capacity=100000000 live=99939879 heap=5.7 GiB size-estimate=5.7 GiB
-BenchmarkMemoryFootprintFreecache/Get/hot-24                           1                38.52 ns/op             25.96 Mops/s           100.0 hit%
-BenchmarkMemoryFootprintFreecache/Get/full-24                          1                49.16 ns/op             20.34 Mops/s            99.94 hit%
-BenchmarkMemoryFootprintFreecache/Set/hot-24                           1                40.03 ns/op             24.98 Mops/s
-BenchmarkMemoryFootprintFreecache/Set/full-24                          1                52.00 ns/op             19.23 Mops/s
-BenchmarkMemoryFootprintLRU/100,000,000-entries-24                     1        26730255700 ns/op              104.2 B/entry-heap             9938 MiB-heap-total                6.513 x-payload
+    memory_others_test.go:256: capacity=100000000 live=99939879 heap=5.7 GiB size-estimate=5.7 GiB
+BenchmarkMemoryFootprintFreecache/Get/hot-24                           1                40.32 ns/op             24.80 Mops/s           100.0 hit%
+BenchmarkMemoryFootprintFreecache/Get/full-24                          1                49.31 ns/op             20.28 Mops/s            99.94 hit%
+BenchmarkMemoryFootprintFreecache/Set/hot-24                           1                41.78 ns/op             23.94 Mops/s
+BenchmarkMemoryFootprintFreecache/Set/full-24                          1                51.91 ns/op             19.26 Mops/s
+BenchmarkMemoryFootprintLRU/100,000,000-entries-24                     1        29673153400 ns/op              104.2 B/entry-heap             9938 MiB-heap-total                6.513 x-payload
 --- BENCH: BenchmarkMemoryFootprintLRU/100,000,000-entries-24
-    memory_others_test.go:266: capacity=100000000 live=100000000 heap=9.7 GiB size-estimate=0 B
-BenchmarkMemoryFootprintLRU/Get/hot-24                                 1               215.3 ns/op               4.645 Mops/s          100.0 hit%
-BenchmarkMemoryFootprintLRU/Get/full-24                                1               577.4 ns/op               1.732 Mops/s          100.0 hit%
-BenchmarkMemoryFootprintLRU/Set/hot-24                                 1               227.4 ns/op               4.397 Mops/s
-BenchmarkMemoryFootprintLRU/Set/full-24                                1               518.0 ns/op               1.930 Mops/s
+    memory_others_test.go:256: capacity=100000000 live=100000000 heap=9.7 GiB size-estimate=0 B
+BenchmarkMemoryFootprintLRU/Get/hot-24                                 1               167.8 ns/op               5.959 Mops/s          100.0 hit%
+BenchmarkMemoryFootprintLRU/Get/full-24                                1               524.9 ns/op               1.905 Mops/s          100.0 hit%
+BenchmarkMemoryFootprintLRU/Set/hot-24                                 1               203.0 ns/op               4.926 Mops/s
+BenchmarkMemoryFootprintLRU/Set/full-24                                1               520.6 ns/op               1.921 Mops/s
 PASS

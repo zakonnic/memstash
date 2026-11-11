@@ -157,7 +157,8 @@ type Config[K comparable, V any] struct {
 	// Like OnL2Error, it must not write to the cache: on a write-back worker that write would wait for the worker.
 	OnPanic PanicHandler
 
-	// StatsEnabled turns on the operation counters returned by Stats(). Off by default: counting costs ~0.6 ns.
+	// StatsEnabled turns on the operation counters returned by Stats(). Off by default: counting costs a little on
+	// every operation.
 	StatsEnabled bool
 }
 
