@@ -60,17 +60,13 @@ func (m *model) insert(key, value uint64) uint32 {
 	}
 }
 
-// lookup mirrors the lock-free reader's walk: tag compare, key compare, group-edge and HasNext exits.
+// lookup mirrors the lock-free reader's walk: tag compare, key compare, HasNext and group-edge exits.
 func (m *model) lookup(key uint64) (uint64, int, bool) {
 	hash := m.hash(key)
 	tagged := TagOf(hash)
 	home := m.t.Home(hash)
-	groupEnd := (home | 7) + 1
 	walk := 0
-	for pos := home; ; pos++ {
-		if pos == groupEnd && !m.t.OverflowedTag(home, OverflowBucket(hash)) {
-			return 0, walk, false
-		}
+	for pos := home; ; {
 		item := m.t.At(pos)
 		metaWord := item.Metadata()
 		walk++
@@ -78,6 +74,9 @@ func (m *model) lookup(key uint64) (uint64, int, bool) {
 			return item.Entry().Value, walk, true
 		}
 		if metaWord&HasNext == 0 {
+			return 0, walk, false
+		}
+		if pos++; pos&GroupMask == 0 && !m.t.OverflowedTag(home, OverflowBucket(hash)) {
 			return 0, walk, false
 		}
 	}
@@ -113,9 +112,9 @@ func (m *model) remove(key uint64, scratch *[]int64) {
 
 // check verifies the table against the oracle: every live key is found by a reader walk, queue 0 holds the live keys
 // in insertion order with consistent links, no slot is dead, chain bits are never missing where a chain runs and
-// exact where the last reclaim walked, overflow counters never under-count, and the occupied slot set is exactly what
-// inserting the live keys into a fresh table produces (linear probing's occupied set is order-independent, which is
-// what backward-shift deletion preserves).
+// exact where the last reclaim walked, overflow counters count exactly the keys past their group's edge, and the
+// occupied slot set is exactly what inserting the live keys into a fresh table produces (linear probing's occupied
+// set is order-independent, which is what backward-shift deletion preserves).
 func (m *model) check(t *testing.T) {
 	t.Helper()
 	size := uint32(m.t.Len())
@@ -143,8 +142,8 @@ func (m *model) check(t *testing.T) {
 	}
 	require.True(t, slices.Equal(m.order, listed), "queue 0 is %v, want the insertion order %v", listed, m.order)
 
-	// Chain bits: a slot some live key's chain runs through must carry HasNext. Overflow counters: at least the
-	// number of keys displaced past their group, per tag bucket, saturating at overflowMax.
+	// Chain bits: a slot some live key's chain runs through must carry HasNext. Overflow counters: the number of
+	// keys past the edge of their home group, per tag bucket. A counter that reached overflowMax stays there.
 	needBit := make([]bool, size)
 	displaced := map[[2]uint32]uint32{}
 	for pos := uint32(0); pos < size; pos++ {
@@ -163,7 +162,7 @@ func (m *model) check(t *testing.T) {
 		for d := uint32(0); d < steps; d++ {
 			needBit[m.t.Wrap(home+d)] = true
 		}
-		if home>>groupShift != pos>>groupShift || pos < home { // past the group's edge on the key's walk
+		if steps >= 1<<groupShift-home&GroupMask { // the walk from home to pos crosses the group's edge
 			displaced[[2]uint32{home >> groupShift, OverflowBucket(hash)}]++
 		}
 	}
@@ -178,9 +177,14 @@ func (m *model) check(t *testing.T) {
 		require.Equal(t, needBit[pos], m.t.At(pos).Metadata()&HasNext != 0,
 			"slot %d, %d from the reclaimed slot %d: a stale chain bit", pos, int(d)-1, m.hole)
 	}
-	for gb, n := range displaced {
-		got := m.t.overflowAt(gb[0]<<groupShift).Load() >> (gb[1] * overflowWidth) & overflowMax
-		require.GreaterOrEqual(t, got, min(n, overflowMax), "group %d bucket %d under-counts its displaced keys", gb[0], gb[1])
+	for group := range size >> groupShift {
+		for bucket := range uint32(overflowBuckets) {
+			got := m.t.overflowAt(group<<groupShift).Load() >> (bucket * overflowWidth) & overflowMax
+			if got != overflowMax {
+				require.Equal(t, displaced[[2]uint32{group, bucket}], got,
+					"group %d bucket %d miscounts the keys past its edge", group, bucket)
+			}
+		}
 	}
 
 	// The occupied set of a fresh table holding the same keys.

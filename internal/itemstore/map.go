@@ -11,7 +11,8 @@ import (
 // zero count usually proves absence right at the group edge.
 const groupShift = 3
 
-// GroupMask is zero on a probe position that opens a group: the walk just crossed a group's edge.
+// GroupMask masks a position's place in its group: zero on a probe position that opens one, which means the walk
+// just crossed a group's edge.
 const GroupMask = 1<<groupShift - 1
 
 // chunkShift splits big tables into chunks of 64Ki slots, so the allocator never has to find one multi-gigabyte
@@ -148,12 +149,10 @@ func (t *FlatHashMap[K, V]) OverflowedTag(home, bucket uint32) bool {
 	return t.overflowAt(home).Load()>>(bucket*overflowWidth)&overflowMax != 0
 }
 
-// pastGroup reports whether a key homed at home and living at pos lies past the edge of its home group: in another
-// group, or in its own before its home, where only a walk around the whole table takes it.
-func (t *FlatHashMap[K, V]) pastGroup(home, pos uint32) bool {
-	pos = t.Wrap(pos)
-	return home>>groupShift != pos>>groupShift || pos < home
-}
+// pastGroup reports whether a key homed at home and living at pos lies past the edge of its home group: beyond the
+// group's last slot, or before its home, where only a walk around the whole table takes it. pos may be a slot or a
+// probe position: one past the table's end is beyond every group's last slot.
+func pastGroup(home, pos uint32) bool { return pos < home || pos > home|GroupMask }
 
 // NoteDisplaced counts a key that settled past the edge of its home group, under the counter its tag picks.
 func (t *FlatHashMap[K, V]) NoteDisplaced(keyHash uint64, pos uint32) {
@@ -163,7 +162,7 @@ func (t *FlatHashMap[K, V]) NoteDisplaced(keyHash uint64, pos uint32) {
 // NoteDisplacedAt is NoteDisplaced for a caller that already has the key's home and bucket. It loads and stores
 // rather than adds: the shard mutex excludes other writers, and a reader only needs the word to land whole.
 func (t *FlatHashMap[K, V]) NoteDisplacedAt(home, pos, bucket uint32) {
-	if !t.pastGroup(home, pos) {
+	if !pastGroup(home, pos) {
 		return
 	}
 	word, shift := t.overflowAt(home), bucket*overflowWidth
@@ -179,7 +178,7 @@ func (t *FlatHashMap[K, V]) ForgetDisplaced(keyHash uint64, pos uint32) {
 
 // ForgetDisplacedAt is ForgetDisplaced for a caller that already has the key's home and bucket.
 func (t *FlatHashMap[K, V]) ForgetDisplacedAt(home, pos, bucket uint32) {
-	if !t.pastGroup(home, pos) {
+	if !pastGroup(home, pos) {
 		return
 	}
 	word, shift := t.overflowAt(home), bucket*overflowWidth

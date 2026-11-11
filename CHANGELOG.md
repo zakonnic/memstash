@@ -89,6 +89,8 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   deletion uncovered. An insert that evicts, single-threaded at the default preallocation ratio (the new
   `MemstashSetEvictSerial`, 8 interleaved rounds): -9% for S3-FIFO, -10% for Clock, -12% for SIEVE, -7% for
   W-TinyLFU. The parallel `Set` and `Delete` benchmarks do not move: the shard mutex and cache misses bound them.
+  The test for a key past its group's edge is two compares on the position, so the overflow counters inline into
+  the moves: another -3% for Clock, the other policies within noise.
 - **A probe asks about its group's edge only once a slot has sent it on.** Every probe loop tested for the edge of
   the home group before it loaded a slot, the home slot included, and for some key types the compiler kept the
   answer in a stack slot. The test now follows the chain-bit test, so a hit in the home slot never runs it. Hits on

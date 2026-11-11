@@ -128,8 +128,8 @@ func (s *walkStats) log(t *testing.T, label string) {
 		100*float64(s.firedAny)/float64(max(s.reached, 1)))
 }
 
-// displacedShare counts the live items sitting outside their home group: exactly the ones NoteDisplaced pays a
-// load/store for, on every insert and every reclaim move.
+// displacedShare counts the live items sitting in another group than their home's: the ones NoteDisplaced pays a
+// load/store for, on every insert and every reclaim move, short of a key that walked around a full table.
 func displacedShare(c *Cache[uint64, uint64]) (live, displaced int) {
 	for i := range c.shards {
 		storage := c.shards[i].items.GetStorage()
