@@ -218,7 +218,9 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
 - **The rainycape adapter's `BatchGet` turned every failure into misses.** The client's `GetMulti` drops the errors
   of its per-server reads - an unreachable server, a batch that runs past the connection's deadline, an illegal
   key - and just answers with fewer items, so a failing memcached read as an empty one: no error, no `OnL2Error`,
-  and the loaders ran for everything. `BatchGet` now runs concurrent `Get`s, which report their errors.
+  and the loaders ran for everything. `BatchGet` now asks again, with `Get`, for every key missing from the
+  `GetMulti` answer: a `Get` reports its error, so a failure no longer reads as a miss. A batch the server answers
+  in full is still one round trip; the keys it does not hold cost a `Get` each on top.
 - **The memcached adapters failed on keys memcached rejects.** A key with a space or a control character, or longer
   than 250 bytes, made every gomemcache call on it fail with `ErrMalformedKey` - a `Get` included, which should have
   been a miss - and one such key failed a whole `GetMulti`, so every caller sharing a `GetBatched` batch with it got

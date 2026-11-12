@@ -120,11 +120,55 @@ func (c *Cache[K, V]) Delete(_ context.Context, key K) error {
 	return nil
 }
 
-// BatchGet fetches the keys with concurrent Gets. Not the client's GetMulti: it drops every error - an unreachable
-// server, a read past the connection's deadline, an illegal key - and answers with fewer items, so a failure would
-// read as misses. The context is ignored: the client has no context support.
+// BatchGet fetches the keys in one GetMulti round trip and asks again, with Get, for every key missing from the
+// answer. GetMulti drops its errors - an unreachable server, a read past the connection's deadline - and answers with
+// fewer items, so a key it leaves out is a miss or a failure, and Get tells which. A batch of misses therefore costs
+// the concurrent Gets on top. The context is ignored: the client has no context support.
 func (c *Cache[K, V]) BatchGet(ctx context.Context, keys []K) (memstash.List[K, V], error) {
-	return l2.BatchGetConcurrent(ctx, c, keys, BatchWorkers)
+	if len(keys) <= 1 {
+		return l2.BatchGetSequential(ctx, c, keys)
+	}
+	storageKeys := make([]string, len(keys))
+	for i, key := range keys {
+		storageKeys[i] = c.keyFunc(key)
+	}
+	items, err := c.client.GetMulti(storageKeys)
+	if err != nil {
+		return nil, err
+	}
+	found := make(memstash.List[K, V], 0, len(keys))
+	var absent []K
+	var errs []error
+	for i, key := range keys {
+		item, ok := items[storageKeys[i]]
+		if !ok {
+			absent = append(absent, key)
+			continue
+		}
+		value, err := c.codec.Unmarshal(item.Value)
+		if err != nil {
+			errs = append(errs, l2.KeyErr(key, err))
+			continue
+		}
+		found = append(found, memstash.KeyVal[K, V]{Key: key, Value: value})
+	}
+	if len(absent) == 0 {
+		return found, errors.Join(errs...)
+	}
+	reread, err := l2.BatchGetConcurrent(ctx, c, absent, BatchWorkers)
+	if err != nil {
+		// The failure concerns the keys Get did not find or did not reach, never the ones GetMulti returned: a miss
+		// read before the failure is not told apart. reread keeps absent's order.
+		answered := 0
+		for _, key := range absent {
+			if answered < len(reread) && reread[answered].Key == key {
+				answered++
+				continue
+			}
+			errs = append(errs, l2.KeyErr(key, err))
+		}
+	}
+	return append(found, reread...), errors.Join(errs...)
 }
 
 // BatchWorkers is the number of goroutines the concurrent batch fallback runs. Raise the connection limit via
