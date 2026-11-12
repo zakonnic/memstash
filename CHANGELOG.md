@@ -123,6 +123,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   `Set(v3)` could leave `v2` in L2, and a `Delete` could land before the queued `Set` that resurrected the key. A write
   that finds the buffer full now waits for room, so the writes of one key reach L2 in order; after `Close` it still
   runs synchronously. `OnL2Error` receives write-back errors on the worker goroutine and must not write to the cache.
+  The callers no longer write to L2 beside the pool, so a worker that falls behind makes up for it itself: once its
+  buffer holds more than a batch it sends up to four batches at once, split by key so that the writes of one key
+  never travel side by side. While the pool keeps up, a worker has one batch in flight, as before. A panic in
+  `OnL2Error` now costs the reports of its own batch only: the tasks the worker took along with it are still sent.
 - **`sql_adapter.DefaultTable` and `tarantool_adapter.DefaultSpace` were `"github.com/zakonnic/memstash_cache"`.** A
   module-path rename had rewritten both names, so an adapter built with an empty table or space name failed on every
   call (a SQL syntax error, a missing space). Both are `"memstash_cache"` again, the name the docker setup and the

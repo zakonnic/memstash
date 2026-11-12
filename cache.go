@@ -1313,13 +1313,20 @@ func (c *Cache[K, V]) sweepLocked(sh *shard[K, V], nowOff, units uint32) (deleti
 	return deletions
 }
 
-// WriteBackBatchMax caps one drain batch: the writes are flushed through the adapter's BatchSet.
+// WriteBackBatchMax caps one write-back batch: the writes are flushed through the adapter's BatchSet.
 const WriteBackBatchMax = 128
 
+// writeBackFanout is how many batches a worker keeps in flight once its queue holds more than a batch.
+const writeBackFanout = 4
+
+// writeBackRunMax caps what a worker takes off its queue at once: 3/4 of writeBackFanout batches, because the split
+// by key hash is uneven. A part of distinct keys then gets 96 tasks with a binomial deviation of 8.5, so one past
+// WriteBackBatchMax, which costs it a second batch, is nearly 4 deviations out.
+const writeBackRunMax = writeBackFanout * WriteBackBatchMax * 3 / 4
+
 // flushWrite hands one write-back task to L2, coalescing the tasks already queued behind it in the same worker's
-// queue into one BatchSet.
+// queue into batches.
 func (c *Cache[K, V]) flushWrite(queue chan l2Write[K, V], first l2Write[K, V]) {
-	defer c.recoverWorker() // deliver recovers the adapter: a panic reaching here is OnL2Error's own
 	for more := true; more; {
 		if first.flush != nil {
 			close(first.flush) // a Wait checkpoint: everything enqueued before it has already been flushed
@@ -1335,52 +1342,93 @@ func (c *Cache[K, V]) flushWrite(queue chan l2Write[K, V], first l2Write[K, V]) 
 	}
 }
 
-// flushRun coalesces the tasks of first's kind queued behind it and delivers them as one batch.
-// A run ends where the kind changes - a delete after writes, or a write carrying a different ttl.
+// flushRun takes the tasks of first's kind queued behind it and delivers them together. A delete travels as its key
+// with a zero value. A run ends where the kind changes - a delete after writes, or a write carrying a different ttl.
 func (c *Cache[K, V]) flushRun(queue chan l2Write[K, V], first l2Write[K, V]) (next l2Write[K, V], more bool) {
-	var sets List[K, V]
-	var deletes []K
-	if first.del {
-		deletes = append(deletes, first.key)
-	} else {
-		sets = append(sets, KeyVal[K, V]{Key: first.key, Value: first.value})
-	}
-	for len(sets)+len(deletes) < WriteBackBatchMax {
+	run := List[K, V]{{Key: first.key, Value: first.value}}
+	for len(run) < writeBackRunMax {
 		select {
 		case write := <-queue:
 			switch {
 			case write.flush != nil:
 				defer close(write.flush) // a Wait checkpoint must be released even if the delivery panics
-				c.deliverRun(sets, deletes, first.ttl)
+				c.deliverRun(run, first.del, first.ttl)
 				return next, false
 			case write.del != first.del || write.ttl != first.ttl:
-				c.deliverRun(sets, deletes, first.ttl)
+				c.deliverRun(run, first.del, first.ttl)
 				return write, true
-			case write.del:
-				deletes = append(deletes, write.key)
 			default:
-				sets = append(sets, KeyVal[K, V]{Key: write.key, Value: write.value})
+				run = append(run, KeyVal[K, V]{Key: write.key, Value: write.value})
 			}
 		default:
-			c.deliverRun(sets, deletes, first.ttl)
+			c.deliverRun(run, first.del, first.ttl)
 			return next, false
 		}
 	}
-	c.deliverRun(sets, deletes, first.ttl)
+	c.deliverRun(run, first.del, first.ttl)
 	return next, false
 }
 
-func (c *Cache[K, V]) deliverRun(sets List[K, V], deletes []K, ttl time.Duration) {
-	if len(deletes) > 0 {
-		c.deleteBatch(deletes)
+// deliverRun hands a run to L2: one batch, or writeBackFanout parts at once when it is more than a batch, each part
+// in batches one after another. The split is by key, so the tasks of a key share a part and reach L2 in the order
+// they were queued.
+func (c *Cache[K, V]) deliverRun(run List[K, V], del bool, ttl time.Duration) {
+	if len(run) <= WriteBackBatchMax {
+		c.deliverBatch(run, del, ttl)
 		return
 	}
-	c.writeBatch(sets, ttl)
+	var wg sync.WaitGroup
+	for _, part := range c.splitByKey(run) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for len(part) > 0 {
+				n := min(len(part), WriteBackBatchMax)
+				c.deliverBatch(part[:n:n], del, ttl) // capped: an adapter appending to its batch stays out of the next
+				part = part[n:]
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// splitByKey sorts run into writeBackFanout parts by key hash, keeping the order within a part. The low hash bits
+// pick the part: writeQueueOf spent the high ones.
+func (c *Cache[K, V]) splitByKey(run List[K, V]) (parts [writeBackFanout]List[K, V]) {
+	var partOf [writeBackRunMax]uint8
+	var sizes [writeBackFanout]int
+	for i, item := range run {
+		partOf[i] = uint8(uint32(c.keyHash(item.Key)) % writeBackFanout)
+		sizes[partOf[i]]++
+	}
+	sorted := make(List[K, V], len(run))
+	start := 0
+	for part, size := range sizes {
+		parts[part] = sorted[start : start : start+size]
+		start += size
+	}
+	for i, item := range run {
+		parts[partOf[i]] = append(parts[partOf[i]], item)
+	}
+	return parts
+}
+
+func (c *Cache[K, V]) deliverBatch(batch List[K, V], del bool, ttl time.Duration) {
+	if !del {
+		c.writeBatch(batch, ttl)
+		return
+	}
+	keys := make([]K, len(batch))
+	for i, item := range batch {
+		keys[i] = item.Key
+	}
+	c.deleteBatch(keys)
 }
 
 // writeBatch delivers drained writes to L2: one Set for a single item, one BatchSet otherwise. A batch error is
 // reported for every key it concerns (see KeyError).
 func (c *Cache[K, V]) writeBatch(batch List[K, V], ttl time.Duration) {
+	defer c.recoverWorker() // deliver recovers the adapter: a panic reaching here is OnL2Error's own
 	err := c.deliver(func() error {
 		if len(batch) == 1 {
 			return c.l2Cache.Set(context.Background(), batch[0].Key, batch[0].Value, ttl)
@@ -1399,6 +1447,7 @@ func (c *Cache[K, V]) writeBatch(batch List[K, V], ttl time.Duration) {
 // deleteBatch delivers drained deletes to L2: one Delete for a single key, one BatchDelete otherwise. A batch error
 // is reported for every key it concerns (see KeyError).
 func (c *Cache[K, V]) deleteBatch(keys []K) {
+	defer c.recoverWorker() // as in writeBatch
 	err := c.deliver(func() error {
 		if len(keys) == 1 {
 			return c.l2Cache.Delete(context.Background(), keys[0])

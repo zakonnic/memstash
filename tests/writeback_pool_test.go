@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sync"
@@ -22,6 +23,7 @@ type blockingL2Stub struct {
 	mu       sync.Mutex
 	inFlight int
 	peak     int
+	largest  int                 // the biggest batch L2 received
 	values   map[string][]string // per key, in the order L2 received them
 
 	releaseOnce sync.Once
@@ -82,6 +84,9 @@ func (b *blockingL2Stub) Set(_ context.Context, key, value string, _ time.Durati
 
 func (b *blockingL2Stub) BatchSet(_ context.Context, items memstash.List[string, string], _ time.Duration) error {
 	b.hold()
+	b.mu.Lock()
+	b.largest = max(b.largest, len(items))
+	b.mu.Unlock()
 	for _, item := range items {
 		b.record(item.Key, item.Value)
 	}
@@ -93,7 +98,8 @@ func (b *blockingL2Stub) Delete(context.Context, string) error { return nil }
 func (b *blockingL2Stub) BatchDelete(context.Context, []string) error { return nil }
 
 // TestWriteBackPoolRunsWorkersInParallel: the write-back pool must have as many workers writing to L2 at once as it
-// was configured for - DefaultWriteBackWorkers when the option is not given.
+// was configured for - DefaultWriteBackWorkers when the option is not given - and no more while no queue holds more
+// than a batch.
 func TestWriteBackPoolRunsWorkersInParallel(t *testing.T) {
 	for _, workers := range []int{memstash.DefaultWriteBackWorkers, 1, 2, 7, 13} {
 		t.Run(fmt.Sprintf("%d workers", workers), func(t *testing.T) {
@@ -111,8 +117,9 @@ func TestWriteBackPoolRunsWorkersInParallel(t *testing.T) {
 			require.NoError(t, err)
 			defer c.Close()
 
-			// Plenty of distinct keys, so every queue gets work whatever the hash does.
-			for i := range 500 {
+			// 32 distinct keys a worker: every queue gets work whatever the hash does, and none of them more than a
+			// batch, which a worker would send beside the first.
+			for i := range 32 * workers {
 				require.NoError(t, c.Set(context.Background(), fmt.Sprintf("k-%d", i), "v"))
 			}
 			c.Wait(context.Background())
@@ -147,6 +154,154 @@ func TestWriteBackPoolKeepsPerKeyOrder(t *testing.T) {
 	require.NotEmpty(t, got)
 	assert.Equal(t, fmt.Sprintf("v-%04d", writes-1), got[len(got)-1], "the last write must land last")
 	assert.IsIncreasing(t, got)
+}
+
+// backlogL2 is blockingL2Stub that keeps the worker inside the Set of the key "gate" until open is closed, so a test
+// can queue a backlog behind it.
+type backlogL2 struct {
+	*blockingL2Stub
+	entered, open chan struct{}
+	failBatch     atomic.Bool // the next BatchSet fails
+}
+
+const deleted = "<deleted>" // what backlogL2 records for a Delete
+
+func newBacklogL2(releaseAt int) *backlogL2 {
+	stub := newBlockingL2Stub(releaseAt)
+	return &backlogL2{blockingL2Stub: stub, entered: make(chan struct{}), open: make(chan struct{})}
+}
+
+func (g *backlogL2) Set(ctx context.Context, key, value string, ttl time.Duration) error {
+	if key == "gate" {
+		close(g.entered)
+		<-g.open
+		return nil
+	}
+	return g.blockingL2Stub.Set(ctx, key, value, ttl)
+}
+
+func (g *backlogL2) BatchSet(ctx context.Context, items memstash.List[string, string], ttl time.Duration) error {
+	if g.failBatch.CompareAndSwap(true, false) {
+		return errors.New("l2 is down")
+	}
+	return g.blockingL2Stub.BatchSet(ctx, items, ttl)
+}
+
+func (g *backlogL2) Delete(_ context.Context, key string) error {
+	g.record(key, deleted)
+	return nil
+}
+
+// backlogFanout is writeBackFanout in cache.go: the batches one worker sends at once from a backlog.
+const backlogFanout = 4
+
+// TestWriteBackBacklogFansOut: a worker that finds more than a batch in its queue sends backlogFanout batches at
+// once instead of one after another, none of them over WriteBackBatchMax.
+func TestWriteBackBacklogFansOut(t *testing.T) {
+	ctx := context.Background()
+	l2 := newBacklogL2(backlogFanout)
+	c, err := memstash.New[string, string](
+		memstash.WithL2Cache[string, string](l2),
+		memstash.WithWriteBackWorkers(1),
+		memstash.WithWriteBackBuffer(4096),
+	)
+	require.NoError(t, err)
+	defer c.Close()
+
+	require.NoError(t, c.Set(ctx, "gate", ""))
+	<-l2.entered
+	const keys = 300 // more than a batch, less than one run takes: all of it goes out together
+	for i := range keys {
+		require.NoError(t, c.Set(ctx, fmt.Sprintf("k-%d", i), "v"))
+	}
+	close(l2.open)
+	require.NoError(t, c.Wait(ctx))
+
+	peak, values := l2.snapshot()
+	assert.Equal(t, backlogFanout, peak)
+	assert.Len(t, values, keys)
+	assert.LessOrEqual(t, l2.largest, memstash.WriteBackBatchMax)
+}
+
+// TestWriteBackBacklogKeepsPerKeyOrder: the batches a backlog goes out in at once must not share a key, or its
+// writes would race each other to L2. The hot key alone is more than a batch, so its part goes out in several,
+// one after another. The delete queued behind the backlog must wait for all of it.
+func TestWriteBackBacklogKeepsPerKeyOrder(t *testing.T) {
+	ctx := context.Background()
+	l2 := newBacklogL2(1) // no barrier: the batches run into L2 as they come
+	c, err := memstash.New[string, string](
+		memstash.WithL2Cache[string, string](l2),
+		memstash.WithWriteBackWorkers(1),
+		memstash.WithWriteBackBuffer(4096),
+	)
+	require.NoError(t, err)
+	defer c.Close()
+
+	require.NoError(t, c.Set(ctx, "gate", ""))
+	<-l2.entered
+	const rounds, keys = 15, 10
+	for round := range rounds {
+		for k := range keys {
+			require.NoError(t, c.Set(ctx, fmt.Sprintf("k-%d", k), fmt.Sprintf("v-%04d", round)))
+		}
+		for i := range 10 {
+			require.NoError(t, c.Set(ctx, "hot", fmt.Sprintf("v-%04d", round*10+i)))
+		}
+	}
+	require.NoError(t, c.Delete(ctx, "hot"))
+	close(l2.open)
+	require.NoError(t, c.Wait(ctx))
+
+	_, values := l2.snapshot()
+	require.Len(t, values, keys+1)
+	for key, got := range values {
+		want := rounds
+		if key == "hot" {
+			want = rounds * 10
+			require.Equal(t, deleted, got[len(got)-1], "the delete made last must land last")
+			got = got[:len(got)-1]
+		}
+		assert.Len(t, got, want, "key %s", key)
+		assert.IsIncreasing(t, got, "key %s", key)
+	}
+	assert.LessOrEqual(t, l2.largest, memstash.WriteBackBatchMax)
+}
+
+// TestWriteBackHandlerPanicCostsOnlyItsBatch: an OnL2Error that panics over the first batch of a backlog must not
+// take along the batches the worker holds behind it. The hot key fills three, one after another in one part: with
+// the last of them lost, L2 would keep a stale value.
+func TestWriteBackHandlerPanicCostsOnlyItsBatch(t *testing.T) {
+	ctx := context.Background()
+	l2 := newBacklogL2(1)
+	var panicked atomic.Bool
+	c, err := memstash.New[string, string](
+		memstash.WithL2Cache[string, string](l2),
+		memstash.WithWriteBackWorkers(1),
+		memstash.WithWriteBackBuffer(4096),
+		memstash.WithOnL2Error[string, string](func(string, error) {
+			if panicked.CompareAndSwap(false, true) {
+				panic("the handler exploded")
+			}
+		}),
+	)
+	require.NoError(t, err)
+	defer c.Close()
+
+	require.NoError(t, c.Set(ctx, "gate", ""))
+	<-l2.entered
+	const writes = 300
+	for i := range writes {
+		require.NoError(t, c.Set(ctx, "hot", fmt.Sprintf("v-%04d", i)))
+	}
+	l2.failBatch.Store(true)
+	close(l2.open)
+	require.NoError(t, c.Wait(ctx))
+
+	_, values := l2.snapshot()
+	got := values["hot"]
+	require.True(t, panicked.Load())
+	require.Len(t, got, writes-memstash.WriteBackBatchMax, "all but the failed batch")
+	assert.Equal(t, fmt.Sprintf("v-%04d", writes-1), got[len(got)-1])
 }
 
 // TestWriteBackWorkersValidation: a negative worker count is a configuration error, zero means the default.

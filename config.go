@@ -124,7 +124,8 @@ type Config[K comparable, V any] struct {
 
 	// WriteBackWorkers is the number of goroutines draining the WriteBack buffer. 0 means DefaultWriteBackWorkers.
 	// A key always goes to the same worker, so the L2 writes of one key keep their order; the workers themselves
-	// write to L2 concurrently, and batching happens within a worker's own share of the buffer.
+	// write to L2 concurrently, and batching happens within a worker's own share of the buffer. A worker has one
+	// batch in flight, and up to four once its share holds more than a batch.
 	WriteBackWorkers int
 
 	// WriteBackBatching is how a WriteBack worker drains its share of the buffer. Defaults to BatchingFull.
@@ -141,7 +142,7 @@ type Config[K comparable, V any] struct {
 
 	// OnL2Error is an optional handler for L2Cache errors on paths where the error cannot be returned to the caller
 	// (write-back, the write after a load in GetOrLoad, the L2Cache read inside GetOrLoad before the loader runs).
-	// Write-back errors are reported on the worker goroutine, so the handler must not write to the cache: with the
+	// Write-back errors are reported on the pool's goroutines, so the handler must not write to the cache: with the
 	// worker's buffer full, that write would wait for the worker itself.
 	OnL2Error func(key K, err error)
 
