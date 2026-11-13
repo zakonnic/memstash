@@ -90,6 +90,8 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   and `BatchGetAndRefresh`. The parallel Zipf `GetHit` and `GetMiss` do not move.
 - **The aerospike, badger, goredis, mongo, pgx, rueidis and valkey adapters require Go 1.26.** The current releases
   of go-redis, golang.org/x/*, grpc and OpenTelemetry need it. The core and the other adapters stay on Go 1.24.
+- **The core depends on xsync v4.** `WithStats` counters are `xsync.Counter` from v4 instead of v3. v4 needs Go 1.24,
+  like the core.
 
 ### Fixed
 

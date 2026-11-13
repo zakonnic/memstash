@@ -3,7 +3,7 @@ module github.com/zakonnic/memstash
 go 1.24
 
 require (
-	github.com/puzpuzpuz/xsync/v3 v3.5.1
+	github.com/puzpuzpuz/xsync/v4 v4.5.0
 	github.com/stretchr/testify v1.12.1
 )
 

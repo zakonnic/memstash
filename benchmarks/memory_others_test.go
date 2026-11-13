@@ -16,7 +16,7 @@ import (
 	"github.com/dustin/go-humanize"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/maypok86/otter/v2"
-	"github.com/puzpuzpuz/xsync/v3"
+	"github.com/puzpuzpuz/xsync/v4"
 )
 
 // Shared harness for the BenchmarkMemoryFootprint family, plus the non-memstash contenders.
@@ -61,17 +61,17 @@ func BenchmarkMemoryFootprintBigcache(b *testing.B) {
 	})
 }
 
-// BenchmarkMemoryFootprintXsyncMap measures xsync.MapOf. It performs no eviction, so it holds the full fill and serves
+// BenchmarkMemoryFootprintXsyncMap measures xsync.Map. It performs no eviction, so it holds the full fill and serves
 // as the lower-bound baseline: what a bare concurrent map costs per entry before any cache bookkeeping is added.
 func BenchmarkMemoryFootprintXsyncMap(b *testing.B) {
 	runFootprint(b, footprintCase{
 		build: func() benchCache { return newXsyncMap() },
 		live: func(c benchCache) int {
-			return c.Expose().(*xsync.MapOf[uint64, uint64]).Size()
+			return c.Expose().(*xsync.Map[uint64, uint64]).Size()
 		},
 		// Stats() gives exact bucket and entry counts.
 		sizeEstimate: func(c benchCache) uint64 {
-			return xsyncMapOfBytes(c.Expose().(*xsync.MapOf[uint64, uint64]))
+			return xsyncMapBytes(c.Expose().(*xsync.Map[uint64, uint64]))
 		},
 	})
 }

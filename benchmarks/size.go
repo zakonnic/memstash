@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"unsafe"
 
-	"github.com/puzpuzpuz/xsync/v3"
+	"github.com/puzpuzpuz/xsync/v4"
 )
 
 const (
@@ -14,7 +14,7 @@ const (
 	mapGroupCtrlBytes = 8
 	mapHeaderSize     = 48
 
-	// xsyncBucketBytes is the fixed size of one xsync.MapOf bucket.
+	// xsyncBucketBytes is the fixed size of one xsync.Map bucket.
 	xsyncBucketBytes = 64
 )
 
@@ -27,8 +27,8 @@ func SizeOf(v any) uint64 {
 	return uint64(rv.Type().Size()) + s.sizeOf(rv)
 }
 
-// xsyncMapOfBytes estimates the real footprint of an xsync.MapOf.
-func xsyncMapOfBytes[K comparable, V any](m *xsync.MapOf[K, V]) uint64 {
+// xsyncMapBytes estimates the real footprint of an xsync.Map.
+func xsyncMapBytes[K comparable, V any](m *xsync.Map[K, V]) uint64 {
 	if m == nil {
 		return 0
 	}
@@ -39,11 +39,11 @@ func xsyncMapOfBytes[K comparable, V any](m *xsync.MapOf[K, V]) uint64 {
 	return uint64(stats.TotalBuckets)*xsyncBucketBytes + uint64(stats.Size)*entryBytes
 }
 
-// simulateMapBucketBytes builds a throwaway xsync.MapOf[K, V], inserts `count` entries (keys produced by keyAt,
+// simulateMapBucketBytes builds a throwaway xsync.Map[K, V], inserts `count` entries (keys produced by keyAt,
 // values left zero), and returns the bucket/overflow-chain overhead from its Stats() - not the entries themselves,
 // see the call sites for why.
 func simulateMapBucketBytes[K comparable, V any](count int, keyAt func(i int) K) uint64 {
-	m := xsync.NewMapOf[K, V]()
+	m := xsync.NewMap[K, V]()
 	var zero V
 	for i := 0; i < count; i++ {
 		m.Store(keyAt(i), zero)

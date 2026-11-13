@@ -1,6 +1,6 @@
 package memstash
 
-import "github.com/puzpuzpuz/xsync/v3"
+import "github.com/puzpuzpuz/xsync/v4"
 
 // counters are the operation counters behind WithStats, striped so an increment stays contention-free. Each add
 // method is one branch around one Add, which keeps it inlinable; a second call would push it over the budget and cost

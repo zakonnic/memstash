@@ -544,16 +544,16 @@ string keys were given the same keys converted to `[8]byte`. Reproduce with `mak
 
 | Cache | Heap | B/entry |  Get hot | Get full | Set hot | Set full |
 |---|--:|--:|---------:|--:|--:|--:|
-| xsync.MapOf\* | 3.7 GiB | 39.24 |    1.60 ns | 9.71 ns | 5.61 ns | 15.29 ns |
-| **memstash-s3fifo** | **4.1 GiB** | **43.72** |    3.17 ns | **9.66 ns** | 12.19 ns | 19.10 ns |
-| bigcache | 5.4 GiB | 59.92 |    15.59 ns | 22.41 ns | 55.49 ns | 63.25 ns |
-| freecache | 5.7 GiB | 61.53 |    40.32 ns | 49.31 ns | 41.78 ns | 51.91 ns |
-| otter-wtinylfu | 7.6 GiB | 81.99 |     3.07 ns | 13.41 ns | 10.80 ns | 17.65 ns |
-| hashicorp-lru | 9.7 GiB | 104.2 |    167.8 ns | 524.9 ns | 203.0 ns | 520.6 ns |
-| theine-wtinylfu | 11 GiB | 115.0 |     9.54 ns | 19.46 ns | 371.0 ns | 494.9 ns |
-| ristretto | 14 GiB | 153.1 |    17.19 ns | 22.71 ns | 275.5 ns | 294.5 ns |
+| xsync.Map\* | 3.7 GiB | 39.24 |    1.56 ns | 8.82 ns | 5.69 ns | 16.09 ns |
+| **memstash-s3fifo** | **4.1 GiB** | **43.72** |    **3.17 ns** | **9.66 ns** | 12.19 ns | 19.10 ns |
+| bigcache | 5.4 GiB | 59.92 |    15.38 ns | 21.73 ns | 54.55 ns | 66.60 ns |
+| freecache | 5.7 GiB | 61.53 |    40.42 ns | 50.29 ns | 41.88 ns | 54.24 ns |
+| otter-wtinylfu | 7.6 GiB | 81.99 |     3.77 ns | 15.39 ns | 10.99 ns | 18.33 ns |
+| hashicorp-lru | 9.7 GiB | 104.2 |    366.5 ns | 511.4 ns | 164.0 ns | 483.7 ns |
+| theine-wtinylfu | 11 GiB | 115.0 |    11.78 ns | 19.38 ns | 237.7 ns | 325.7 ns |
+| ristretto | 14 GiB | 153.1 |    16.77 ns | 24.81 ns | 198.3 ns | 213.5 ns |
 
-\* `xsync.MapOf` performs no eviction — a lower-bound baseline, not a comparable cache. Switched from sync.Map: it
+\* `xsync.Map` performs no eviction — a lower-bound baseline, not a comparable cache. Switched from sync.Map: it
 uses too much memory.
 
 The four latency columns are measured on that same filled cache, so they show what a read and a

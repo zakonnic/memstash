@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto/v2"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/maypok86/otter/v2"
-	"github.com/puzpuzpuz/xsync/v3"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/zakonnic/memstash"
 )
 
@@ -129,7 +129,7 @@ type otterNode[K comparable, V any] struct {
 	queueType uint8
 }
 
-// GetSize simulates otter's hash table: it reports no byte total, and the table is an xsync.MapOf fork in an
+// GetSize simulates otter's hash table: it reports no byte total, and the table is an xsync.Map fork in an
 // unexported package, so Stats() is out of reach and reflection cannot see through its unsafe.Pointer nodes.
 func (a *otterAdapter) GetSize() uint64 {
 	a.c.StopAllGoroutines()
@@ -312,13 +312,13 @@ func (a *syncMapAdapter) Expose() any           { return &a.m }
 // pointers, not unsafe.Pointer.
 func (a *syncMapAdapter) GetSize() uint64 { return SizeOf(&a.m) }
 
-// --- xsync.MapOf (no eviction; lower bound on the cost of map operations) ---
+// --- xsync.Map (no eviction; lower bound on the cost of map operations) ---
 
-type xsyncMapAdapter struct{ m *xsync.MapOf[uint64, uint64] }
+type xsyncMapAdapter struct{ m *xsync.Map[uint64, uint64] }
 
-func newXsyncMap() benchCache { return &xsyncMapAdapter{m: xsync.NewMapOf[uint64, uint64]()} }
+func newXsyncMap() benchCache { return &xsyncMapAdapter{m: xsync.NewMap[uint64, uint64]()} }
 
-func (a *xsyncMapAdapter) Name() string                  { return "xsync.MapOf" }
+func (a *xsyncMapAdapter) Name() string                  { return "xsync.Map" }
 func (a *xsyncMapAdapter) Get(key uint64) (uint64, bool) { return a.m.Load(key) }
 func (a *xsyncMapAdapter) Set(key, value uint64)         { a.m.Store(key, value) }
 func (a *xsyncMapAdapter) Delete(key uint64)             { a.m.Delete(key) }
@@ -328,4 +328,4 @@ func (a *xsyncMapAdapter) Expose() any                   { return a.m }
 
 // GetSize goes through Stats(): the buckets sit behind unsafe.Pointer, invisible to reflection, but Stats() gives
 // exact bucket and entry counts.
-func (a *xsyncMapAdapter) GetSize() uint64 { return xsyncMapOfBytes(a.m) }
+func (a *xsyncMapAdapter) GetSize() uint64 { return xsyncMapBytes(a.m) }
