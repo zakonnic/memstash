@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/dgraph-io/badger/v4 v4.9.6
-	github.com/zakonnic/memstash v0.9.7
+	github.com/zakonnic/memstash v0.9.8
 )
 
 require (
