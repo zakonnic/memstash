@@ -137,6 +137,24 @@ func stall(t *testing.T, c *memstash.Cache[string, string], l2 *gatedL2) {
 	<-l2.entered
 }
 
+// drainAll lets every call into the stub through until Wait returns, so a mode that makes fewer calls than a test
+// expects fails its asserts instead of hanging.
+func drainAll(c *memstash.Cache[string, string], l2 *gatedL2) {
+	done := make(chan struct{})
+	go func() {
+		c.Wait(context.Background())
+		close(done)
+	}()
+	for {
+		select {
+		case <-l2.entered:
+			l2.release <- struct{}{}
+		case <-done:
+			return
+		}
+	}
+}
+
 // TestWriteBackBatchingModes drives the write-back worker through a controlled queue and checks which L2 calls each
 // WriteBackBatching mode produces.
 func TestWriteBackBatchingModes(t *testing.T) {
@@ -203,6 +221,45 @@ func TestWriteBackBatchingModes(t *testing.T) {
 
 		sets, batches, sizes := l2.counters()
 		assert.Equal(t, 4, sets, "the two stalled firsts plus the two under-half writes")
+		assert.Equal(t, 1, batches)
+		assert.Equal(t, []int{6}, sizes)
+	})
+
+	t.Run("no batching sends one Delete per delete", func(t *testing.T) {
+		l2 := newGatedL2()
+		c := newWriteBackCache(t, l2, memstash.WithNoBatchingForWriteBack())
+
+		stall(t, c, l2)
+		for _, key := range []string{"a", "b", "c", "d", "e", "f"} {
+			require.NoError(t, c.Delete(ctx, key))
+		}
+		l2.release <- struct{}{}
+		drainAll(c, l2)
+
+		deletes, batches, _ := l2.deleteCounters()
+		assert.Equal(t, 6, deletes)
+		assert.Equal(t, 0, batches)
+	})
+
+	t.Run("adaptive batches deletes over half the buffer and goes per-item under it", func(t *testing.T) {
+		l2 := newGatedL2()
+		c := newWriteBackCache(t, l2, memstash.WithAdaptiveBatchingForWriteBack())
+
+		stall(t, c, l2)
+		for _, key := range []string{"a", "b", "c", "d", "e", "f"} {
+			require.NoError(t, c.Delete(ctx, key))
+		}
+		l2.release <- struct{}{}
+		drainAll(c, l2)
+
+		stall(t, c, l2)
+		require.NoError(t, c.Delete(ctx, "g"))
+		require.NoError(t, c.Delete(ctx, "h"))
+		l2.release <- struct{}{}
+		drainAll(c, l2)
+
+		deletes, batches, sizes := l2.deleteCounters()
+		assert.Equal(t, 2, deletes, "the two under-half deletes")
 		assert.Equal(t, 1, batches)
 		assert.Equal(t, []int{6}, sizes)
 	})

@@ -13,6 +13,13 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   `load-generator` (profile `load`, so `make up` never starts it), and its L2 traffic skips the Docker Desktop port
   relay, which capped the L2 scenarios far below their target. `-config` now repeats, a later file overriding the
   fields it sets.
+- **Write-back sends single calls to stores without batches.** An adapter whose `BatchSet` and `BatchDelete` are
+  single calls underneath implements the optional `SingleCallL2` and reports how many calls its client serves at
+  once. Unless `WriteBackWorkers` is set, write-back then runs that many workers (at least 128, 512 for a client that
+  queues calls itself), each sending one call at a time, the last task of a key per run. On the memcached adapters
+  the batched pool kept at most 4 workers × 4 batches × 8 goroutines of calls in flight, however many goroutines
+  wrote, and each batch waited for its slowest call. The gomemcache, mc and rainycape adapters implement it, reading
+  `MaxIdleConns`, nothing (mc queues calls) and `MaxIdleConnsPerAddr`.
 
 ### Changed
 
@@ -92,6 +99,10 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   of go-redis, golang.org/x/*, grpc and OpenTelemetry need it. The core and the other adapters stay on Go 1.24.
 - **The core depends on xsync v4.** `WithStats` counters are `xsync.Counter` from v4 instead of v3. v4 needs Go 1.24,
   like the core.
+- **Per-item write-back covers deletes.** `BatchingNone` sends every queued delete as its own `Delete`, and
+  `BatchingAdaptive` does so below half a buffer, as both already did for writes. Before, deletes always went through
+  `BatchDelete`. On memcached that is single calls on 8 goroutines per batch, so many write-back workers turned into
+  several times more concurrent calls than workers, each one past the client's idle pool dialing a connection.
 
 ### Fixed
 

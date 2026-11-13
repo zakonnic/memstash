@@ -142,3 +142,10 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	return l2.BatchDeleteConcurrent(ctx, c, keys, BatchWorkers)
 }
+
+// memstash.SingleCallL2, spelled out so the module still builds against a core without it.
+var _ interface{ ConcurrentCalls() int } = (*Cache[string, []byte])(nil)
+
+// ConcurrentCalls is 0: the client's pool is a channel of Config.PoolSize connections, so a call past it waits for one,
+// and the client does not expose the size. It makes the adapter a memstash.SingleCallL2.
+func (c *Cache[K, V]) ConcurrentCalls() int { return 0 }

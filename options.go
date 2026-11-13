@@ -254,11 +254,11 @@ func withWriteBackBatching(mode WriteBackBatching) Option {
 // WithBatchingForWriteBack makes a WriteBack worker drain its buffer share in BatchSet batches (the default).
 func WithBatchingForWriteBack() Option { return withWriteBackBatching(BatchingFull) }
 
-// WithNoBatchingForWriteBack makes a WriteBack worker send one Set per write.
+// WithNoBatchingForWriteBack makes a WriteBack worker send one Set per write and one Delete per delete.
 func WithNoBatchingForWriteBack() Option { return withWriteBackBatching(BatchingNone) }
 
-// WithAdaptiveBatchingForWriteBack sends per-item Sets while the worker's buffer share is at most half full, BatchSet
-// batches above.
+// WithAdaptiveBatchingForWriteBack sends per-item Sets and Deletes while the worker's buffer share is at most half
+// full, BatchSet and BatchDelete batches above.
 func WithAdaptiveBatchingForWriteBack() Option { return withWriteBackBatching(BatchingAdaptive) }
 
 // WithGetBatchedBuffer sets Config.GetBatchedBufferSize: the queue GetBatched coalesces reads through.

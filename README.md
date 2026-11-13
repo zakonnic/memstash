@@ -61,6 +61,7 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
   - [Parallel throughput](#parallel-throughput---millions-of-opss-higher-is-better)
   - [Hit rate](#hit-rate---higher-is-better)
   - [Heap footprint](#heap-footprint-lower-is-better)
+  - [Batching and write-back](#batching-and-write-back)
   - [Load generator](#load-generator)
 - [Contributing](#contributing)
 - [License](#license)
@@ -385,9 +386,9 @@ at the items themselves.
 | `WithShardsCount(n)` | Number of eviction shards (default: auto by GOMAXPROCS). |
 | `WithL2Cache(l2)` | Attach a second level directly. |
 | `WithWritePolicy(p)` | How writes reach L2, ignored when no L2 is attached: `WriteBack` (default) hands `Set` to the background worker pool, `WriteThrough` writes on `Set` and returns the L2 error, `WriteDisabled` makes L2 read-only. Deletes follow the same policy as writes. |
-| `WithWriteBackBuffer(n)` | Size of the async write-back buffer for every worker (default: 500). A write that finds it full waits for room, so the writes of one key reach L2 in order. |
-| `WithWriteBackWorkers(n)` | Number of goroutines draining the write-back buffers (default: 4). Each key belongs to one worker, so its L2 writes keep their order; each worker has its own buffer, and batching happens within it. A worker sends one batch at a time, and up to four at once when its buffer holds more than a batch. |
-| `WithBatchingForWriteBack()` / `WithNoBatchingForWriteBack()` / `WithAdaptiveBatchingForWriteBack()` | How a write-back worker drains its buffer share to L2: coalesced into `BatchSet` (default), one `Set` per write, or adaptive. |
+| `WithWriteBackBuffer(n)` | Size of the async write-back buffer for every worker (default: 500, or 64 for the memcached adapters, see below). A write that finds it full waits for room, so the writes of one key reach L2 in order. |
+| `WithWriteBackWorkers(n)` | Number of goroutines draining the write-back buffers (default: 4, or the client's connection pool for the memcached adapters, see below). Each key belongs to one worker, so its L2 writes keep their order; each worker has its own buffer, and batching happens within it. A worker sends one batch at a time, and up to four at once when its buffer holds more than a batch. |
+| `WithBatchingForWriteBack()` / `WithNoBatchingForWriteBack()` / `WithAdaptiveBatchingForWriteBack()` | How a write-back worker drains its buffer share to L2: coalesced into `BatchSet`/`BatchDelete` (default), one `Set` or `Delete` per task, or adaptive. |
 | `WithGetBatchedBuffer(n)` | Size of the worker pool buffer queue `GetBatched` coalesces L2 reads through (default: 1024). |
 | `WithGetBatchedWorkers(n)` | Number of goroutines resolving the coalesced reads (default: 4), and with that the number of `BatchGet` calls in flight. A batch only forms while every worker is busy, so fewer workers mean fuller batches. |
 | `WithGhostSize(n)` | Capacity (in keys) of the S3-FIFO ghost queues and the W-TinyLFU frequency sketch. |
@@ -405,6 +406,12 @@ plus native batch pipelining where the client supports it.
 
 The write path favors throughput by default: instead of one round trip per key, each background
 write-back worker coalesces the Sets into the adapter's native `BatchSet` call (an `MSET` or a pipeline).
+
+memcached has no multi-set or multi-delete, so the memcached adapters implement `SingleCallL2` and write-back skips
+batches for them: it runs a worker per connection the client keeps idle (`memcache.Client.MaxIdleConns`, rainycape's
+`SetMaxIdleConnsPerAddr`, at least 128; mc queues calls itself and gets 512), each sending one call at a time. Size
+the client's idle pool for your concurrency: past it, a call dials a connection and closes it after.
+`WithWriteBackWorkers` turns this off and sizes the batched pool instead.
 
 | Module | Backend / client | context |
 |---|---|---|
@@ -562,6 +569,53 @@ window from the middle of the fill: it stays in CPU cache and measures the code 
 **full** draws uniformly over all 100M keys, so nearly every op is an LLC and a TLB miss — the gap
 between the two columns is what memory stalls cost per op at this cardinality. Both are aggregate
 ns/op across all cores, like the parallel table above.
+
+### Batching and write-back
+
+memstash's L2 path against the same client called directly, the key absent from memory, so every memstash call
+goes to L2. **Direct** is the client library's own single-key call, in microseconds per operation: wall time over
+operations, with that many goroutines calling at once. The other columns are memstash's time per operation and, in
+brackets, its change against Direct: **Write-back Set** and **Write-back Delete** are the time to deliver one to L2
+with the queue full. Negative is faster, `~` is no significant difference.
+
+| Adapter | Goroutines | Direct Set, µs/op | Write-back Set | Direct Delete, µs/op | Write-back Delete | Direct Get, µs/op | GetBatched |
+|---|---|---|---|---|---|---|---|
+| goredis | 24 | 14.5 | 1.2 (-91%) | 13.9 | 0.4 (-97%) | 14.3 | 9.0 (-37%) |
+|  | 192 | 11.6 | 1.9 (-84%) | 10.6 | 1.4 (-87%) | 10.9 | 2.8 (-74%) |
+| rueidis | 24 | 8.6 | 1.2 (-86%) | 8.3 | 0.4 (-96%) | 8.8 | ~10.3 (+17%)* |
+|  | 192 | 2.3 | 2.0 (-12%) | 2.0 | 1.5 (-21%) | 2.2 | ~2.9 (+33%)* |
+| redigo | 24 | 14.6 | 1.2 (-92%) | 13.8 | 0.4 (-97%) | 14.2 | 8.9 (-37%) |
+|  | 192 | 11.5 | 1.9 (-84%) | 10.7 | 1.5 (-86%) | 10.9 | 2.8 (-74%) |
+| redispipe | 24 | 55.2 | 1.2 (-98%) | 54.3 | 0.5 (-99%) | 55.2 | 74.0 (+34%) |
+|  | 192 | 3.5 | 1.6 (-54%) | 7.4 | 1.4 (-81%) | 7.6 | ~9.5 (+25%)* |
+| valkey | 24 | 8.4 | 1.0 (-88%) | 8.2 | 0.3 (-96%) | 8.7 | 10.3 (+18%) |
+|  | 192 | 2.1 | 2.1 (~) | 1.9 | 1.6 (-17%) | 2.1 | ~2.4 (+13%)* |
+| gomemcache | 24 | 13.3 | 3.4 (-74%) | 12.6 | 2.9 (-77%) | 13.1 | ~10.4 (-20%)* |
+|  | 192 | 3.3 | 3.2 (~) | 3.1 | 2.9 (-7%) | 3.3 | 3.0 (-7%) |
+| mc | 24 | 12.8 | 3.3 (-74%) | 12.8 | 2.8 (-78%) | 12.7 | 22.7 (+79%) |
+|  | 192 | 3.4 | 3.1 (-8%) | 3.1 | 2.8 (-13%) | 3.2 | 13.7 (+326%) |
+| rainycape | 24 | 13.0 | 5.0 (-61%) | 12.6 | 2.8 (-78%) | 12.8 | 12.1 (-6%) |
+|  | 192 | 5.1 | 4.9 (~) | 3.2 | ~2.8 (-10%)* | 3.2 | 5.1 (+59%) |
+| pgx | 24 | 19.2 | 3.5 (-82%) | 17.4 | 0.5 (-97%) | 18.2 | 14.9 (-18%) |
+|  | 192 | 14.4 | 4.2 (-71%) | 12.4 | 1.7 (-87%) | 12.5 | 2.7 (-78%) |
+| sql (PostgreSQL) | 24 | 19.3 | 3.5 (-82%) | 17.6 | 0.6 (-97%) | 18.4 | 15.3 (-17%) |
+|  | 192 | 14.6 | 4.4 (-70%) | 12.3 | 1.6 (-87%) | 12.8 | 3.4 (-74%) |
+| sql (MySQL) | 24 | 16.9 | 1.1 (-94%) | 16.0 | 0.8 (-95%) | 17.0 | 14.9 (-12%) |
+|  | 192 | 8.5 | 1.8 (-79%) | 10.1 | 1.6 (-84%) | 6.6 | 2.8 (-58%) |
+| mongo | 24 | 18.6 | 2.9 (-84%) | 17.1 | 0.5 (-97%) | 18.5 | 18.9 (~) |
+|  | 192 | 7.4 | 3.3 (-55%) | 6.9 | 1.0 (-85%) | 7.4 | 4.0 (-46%) |
+| dynamo | 24 | 280 | 123 (-56%) | 129 | 79.7 (-38%) | 94.4 | 76.0 (-19%) |
+|  | 192 | 285 | 117 (-59%) | 130 | 70.0 (-46%) | 97.8 | 47.5 (-51%) |
+| aerospike | 24 | 13.9 | 0.7 (-95%) | 13.3 | 1.1 (-91%) | 13.8 | 12.7 (-8%) |
+|  | 192 | 2.4 | 2.4 (~) | 2.2 | 1.5 (-33%) | 2.3 | 3.1 (+37%) |
+| tarantool | 24 | 17.7 | 4.1 (-77%) | 14.7 | 1.2 (-92%) | 12.7 | 18.1 (+42%) |
+|  | 192 | 4.0 | 4.3 (+9%) | 3.0 | 1.5 (-50%) | 2.6 | 3.6 (+35%) |
+
+\* The medians differ, but the rounds overlap (some match Direct), so the difference is not significant.
+
+Measured on one machine (Ryzen 9 9900X, 24 threads) against the servers of `docker/docker-compose.yml` on the same
+host, connection pools of 512 (40 for PostgreSQL and 64 for MySQL, within the servers' limits), 256-byte values,
+medians of 6 rounds.
 
 ### Load generator
 

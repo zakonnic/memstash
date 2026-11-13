@@ -186,3 +186,11 @@ func (c *Cache[K, V]) BatchSet(ctx context.Context, items memstash.List[K, V], t
 func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 	return l2.BatchDeleteConcurrent(ctx, c, keys, BatchWorkers)
 }
+
+// memstash.SingleCallL2, spelled out so the module still builds against a core without it.
+var _ interface{ ConcurrentCalls() int } = (*Cache[string, []byte])(nil)
+
+// ConcurrentCalls is the client's MaxIdleConnsPerAddr: past it memcache.Client dials a connection for one call and
+// closes it after. A client keeping no idle connections reports 1, since 0 would mean it queues calls. It makes the
+// adapter a memstash.SingleCallL2.
+func (c *Cache[K, V]) ConcurrentCalls() int { return max(c.client.MaxIdleConnsPerAddr(), 1) }

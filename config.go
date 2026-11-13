@@ -118,14 +118,15 @@ type Config[K comparable, V any] struct {
 	// 0 means choose automatically: MemoryCapacity (but no more than 1<<20) when CostFunc == nil, otherwise 8192.
 	GhostSize int
 
-	// WriteBackBufferSize is the buffer size of each WriteBack worker. 0 means 500. A write that finds the buffer full
-	// waits for room.
+	// WriteBackBufferSize is the buffer size of each WriteBack worker. 0 means 500, or 64 in a SingleCallL2 pool. A
+	// write that finds the buffer full waits for room.
 	WriteBackBufferSize int
 
-	// WriteBackWorkers is the number of goroutines draining the WriteBack buffer. 0 means DefaultWriteBackWorkers.
+	// WriteBackWorkers is the number of goroutines draining the WriteBack buffer. 0 means DefaultWriteBackWorkers, or
+	// the client's call limit when L2Cache is a SingleCallL2.
 	// A key always goes to the same worker, so the L2 writes of one key keep their order; the workers themselves
 	// write to L2 concurrently, and batching happens within a worker's own share of the buffer. A worker has one
-	// batch in flight, and up to four once its share holds more than a batch.
+	// batch in flight, and up to four once its share holds more than a batch; a SingleCallL2 worker has one call.
 	WriteBackWorkers int
 
 	// WriteBackBatching is how a WriteBack worker drains its share of the buffer. Defaults to BatchingFull.

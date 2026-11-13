@@ -168,6 +168,7 @@ type Cache[K comparable, V any] struct {
 	// it before it takes its mark, so a Delete that still saw it false came before that read.
 	fills             atomic.Bool
 	writeBackBatching WriteBackBatching
+	writeBackSingle   bool // the L2 is a SingleCallL2 and sized the pool: runs go out through deliverEach
 	onL2Error         func(key K, err error)
 	onPanic           PanicHandler
 	// writeQueues is one buffer per write-back worker; a key always lands on the same one, so its L2 writes stay
@@ -363,11 +364,21 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	}
 
 	if c.l2WritePolicy == WriteBack {
-		workers := cfg.writeBackWorkers()
+		workers, buffer := cfg.writeBackWorkers(), cfg.writeBackBuffer()
+		if store, ok := cfg.L2Cache.(SingleCallL2); ok && cfg.WriteBackWorkers == 0 {
+			c.writeBackSingle = true
+			workers = queuedCallWorkers
+			if calls := store.ConcurrentCalls(); calls > 0 {
+				workers = max(calls, singleCallWorkersMin)
+			}
+			if cfg.WriteBackBufferSize == 0 {
+				buffer = singleCallBuffer
+			}
+		}
 		c.writeQueues = make([]chan l2Write[K, V], workers)
 		c.wg.Add(workers)
 		for i := range c.writeQueues {
-			c.writeQueues[i] = make(chan l2Write[K, V], cfg.writeBackBuffer())
+			c.writeQueues[i] = make(chan l2Write[K, V], buffer)
 			go c.writeBackLoop(c.writeQueues[i])
 		}
 	}
@@ -1324,6 +1335,19 @@ const writeBackFanout = 4
 // WriteBackBatchMax, which costs it a second batch, is nearly 4 deviations out.
 const writeBackRunMax = writeBackFanout * WriteBackBatchMax * 3 / 4
 
+// singleCallWorkersMin is the smallest WriteBack pool for a SingleCallL2: the calls the batched pool could keep in
+// flight on the memcached adapters, DefaultWriteBackWorkers × writeBackFanout × their 8 batch goroutines. A client
+// whose idle pool is smaller gets dialed past.
+const singleCallWorkersMin = 128
+
+// queuedCallWorkers is the WriteBack pool for a SingleCallL2 whose client queues extra calls itself. Workers past its
+// connection pool only wait in it, so the count bounds goroutines, not calls.
+const queuedCallWorkers = 512
+
+// singleCallBuffer is a SingleCallL2 worker's default buffer. With hundreds of workers, 500 each would hold over 100k
+// tasks; 64 still collapses that many queued writes of a hot key into one call.
+const singleCallBuffer = 64
+
 // flushWrite hands one write-back task to L2, coalescing the tasks already queued behind it in the same worker's
 // queue into batches.
 func (c *Cache[K, V]) flushWrite(queue chan l2Write[K, V], first l2Write[K, V]) {
@@ -1333,9 +1357,9 @@ func (c *Cache[K, V]) flushWrite(queue chan l2Write[K, V], first l2Write[K, V]) 
 			return
 		}
 		// len(queue) is the buffer fill counter the adaptive mode switches on.
-		if !first.del && (c.writeBackBatching == BatchingNone ||
-			(c.writeBackBatching == BatchingAdaptive && len(queue) <= cap(queue)/2)) {
-			c.writeBatch(List[K, V]{{Key: first.key, Value: first.value}}, first.ttl)
+		if c.writeBackBatching == BatchingNone ||
+			(c.writeBackBatching == BatchingAdaptive && len(queue) <= cap(queue)/2) {
+			c.deliverBatch(List[K, V]{{Key: first.key, Value: first.value}}, first.del, first.ttl)
 			return
 		}
 		first, more = c.flushRun(queue, first)
@@ -1373,6 +1397,10 @@ func (c *Cache[K, V]) flushRun(queue chan l2Write[K, V], first l2Write[K, V]) (n
 // in batches one after another. The split is by key, so the tasks of a key share a part and reach L2 in the order
 // they were queued.
 func (c *Cache[K, V]) deliverRun(run List[K, V], del bool, ttl time.Duration) {
+	if c.writeBackSingle {
+		c.deliverEach(run, del, ttl)
+		return
+	}
 	if len(run) <= WriteBackBatchMax {
 		c.deliverBatch(run, del, ttl)
 		return
@@ -1390,6 +1418,23 @@ func (c *Cache[K, V]) deliverRun(run List[K, V], del bool, ttl time.Duration) {
 		}()
 	}
 	wg.Wait()
+}
+
+// deliverEach hands a run to a SingleCallL2 one call per key, newest task first. A key's older tasks in the run are
+// dropped, as a batch would drop them.
+func (c *Cache[K, V]) deliverEach(run List[K, V], del bool, ttl time.Duration) {
+	if len(run) == 1 {
+		c.deliverBatch(run, del, ttl)
+		return
+	}
+	sent := make(map[K]struct{}, len(run))
+	for i := len(run) - 1; i >= 0; i-- {
+		if _, dup := sent[run[i].Key]; dup {
+			continue
+		}
+		sent[run[i].Key] = struct{}{}
+		c.deliverBatch(run[i:i+1:i+1], del, ttl)
+	}
 }
 
 // splitByKey sorts run into writeBackFanout parts by key hash, keeping the order within a part. The low hash bits

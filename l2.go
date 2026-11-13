@@ -28,6 +28,19 @@ type L2Cache[K comparable, V any] interface {
 	BatchDelete(ctx context.Context, keys []K) error
 }
 
+// SingleCallL2 is an optional L2Cache extension for a store whose BatchSet and BatchDelete are single calls
+// underneath, like memcached's: the protocol has no multi-set or multi-delete. Unless WriteBackWorkers is set, the
+// WriteBack pool then runs one worker per call the client serves at once, and a worker sends each key of its run as
+// its own call, the key's last task only. A worker's buffer defaults to 64 tasks, and Wait passes a marker through
+// every worker.
+type SingleCallL2 interface {
+	// ConcurrentCalls is how many calls the client serves at once without dialing extra connections, read from the
+	// client. The pool takes at least 128 workers whatever it says, and 512 when it is 0: the client queues extra
+	// calls itself. A per-server limit may be reported as is; a client over several servers then gets fewer workers
+	// than it could serve.
+	ConcurrentCalls() int
+}
+
 // KeyError is an L2 failure confined to one key of a batch, such as a value the codec rejects. The cache reports and
 // fails only the keys a batch error names this way; an error that names no key concerns them all. Key must be the K
 // value the batch was called with.
@@ -89,9 +102,10 @@ type WriteBackBatching uint8
 const (
 	// BatchingFull coalesces the queued writes into BatchSet batches (the default).
 	BatchingFull WriteBackBatching = iota
-	// BatchingNone sends every write as its own Set.
+	// BatchingNone sends every write as its own Set and every delete as its own Delete.
 	BatchingNone
-	// BatchingAdaptive sends individual Sets until the worker's queue is half full, then switches to BatchSet.
+	// BatchingAdaptive sends individual Sets and Deletes until the worker's queue is half full, then switches to
+	// BatchSet and BatchDelete.
 	BatchingAdaptive
 )
 
