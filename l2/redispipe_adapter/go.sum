@@ -4,8 +4,8 @@ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSs
 github.com/joomcode/errorx v1.0.3/go.mod h1:eQzdtdlNyN7etw6YCS4W4+lu442waxZYw5yvz0ULrRo=
 github.com/joomcode/errorx v1.2.0 h1:7Y/fguon+9r6a/75Rv3nrUwS7nXNEcJjLShjCvz00Og=
 github.com/joomcode/errorx v1.2.0/go.mod h1:Mbz68VA9hsQLT50iCQQUZ2Z1XYAKYB4EoFkFCTFyiJM=
-github.com/joomcode/redispipe v0.9.9 h1:eYy0SHuU3jn6LRhTz+kysJE0RmJ7OzZl3BBHBY+zHgI=
-github.com/joomcode/redispipe v0.9.9/go.mod h1:yQLAH4e25MC2xhpNG2Zi/qOZExVpOGuAQnduS/dS0CU=
+github.com/joomcode/redispipe v0.9.10 h1:TClYgEtgIN0N8w84W3cJgVJv6rmF2FmYaSc49q+Ut90=
+github.com/joomcode/redispipe v0.9.10/go.mod h1:yQLAH4e25MC2xhpNG2Zi/qOZExVpOGuAQnduS/dS0CU=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/puzpuzpuz/xsync/v3 v3.5.1 h1:GJYJZwO6IdxN/IKbneznS6yPkVC+c3zyY/j19c++5Fg=

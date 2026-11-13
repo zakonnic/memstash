@@ -6,6 +6,6 @@ require github.com/zakonnic/memstash v0.9.8
 
 require (
 	github.com/joomcode/errorx v1.2.0 // indirect
-	github.com/joomcode/redispipe v0.9.9
+	github.com/joomcode/redispipe v0.9.10
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
 )

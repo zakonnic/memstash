@@ -3,7 +3,7 @@ module github.com/zakonnic/memstash/l2/pgx_adapter
 go 1.25.0
 
 require (
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/zakonnic/memstash v0.9.8
 )
 
