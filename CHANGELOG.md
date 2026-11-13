@@ -88,6 +88,8 @@ Every module - the root and each `l2/*_adapter` - is tagged with the same versio
   answer in a stack slot. The test now follows the chain-bit test, so a hit in the home slot never runs it. Serial
   hits get cheaper, `uuid` and `string` keys among them, and so do `GetAndRefresh`, `BatchGetOrLoad` on a warm cache
   and `BatchGetAndRefresh`. The parallel Zipf `GetHit` and `GetMiss` do not move.
+- **The aerospike, badger, goredis, mongo, pgx, rueidis and valkey adapters require Go 1.26.** The current releases
+  of go-redis, golang.org/x/*, grpc and OpenTelemetry need it. The core and the other adapters stay on Go 1.24.
 
 ### Fixed
 

@@ -73,7 +73,8 @@ go get github.com/zakonnic/memstash
 
 Memstash requires Go 1.24+ and has a single core dependency
 ([xsync](https://github.com/puzpuzpuz/xsync)). Client SDKs are pulled in only by the specific L2
-adapter module you import. It builds for every Go port. On mips and on arm before ARMv7 the runtime emulates 64-bit
+adapter module you import. The aerospike, badger, goredis, mongo, pgx, rueidis and valkey adapters need Go 1.26,
+because their client SDKs do. It builds for every Go port. On mips and on arm before ARMv7 the runtime emulates 64-bit
 atomics with a lock, so reads there are correct but not lock-free.
 
 ## Usage

@@ -1,6 +1,6 @@
 module github.com/zakonnic/memstash/benchmarks/load_generator
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/bradfitz/gomemcache v0.0.0-20260422231931-4d751bb6e37c
@@ -8,7 +8,7 @@ require (
 	github.com/joomcode/redispipe v0.9.10
 	github.com/memcachier/mc/v3 v3.0.3
 	github.com/rainycape/memcache v0.0.0-20150622160815-1031fa0ce2f2
-	github.com/redis/go-redis/v9 v9.22.0
+	github.com/redis/go-redis/v9 v9.23.0
 	github.com/redis/rueidis v1.0.79
 	github.com/stretchr/testify v1.12.1
 	github.com/valkey-io/valkey-go v1.0.79
@@ -21,7 +21,7 @@ require (
 	github.com/zakonnic/memstash/l2/redispipe_adapter v0.9.8
 	github.com/zakonnic/memstash/l2/rueidis_adapter v0.9.8
 	github.com/zakonnic/memstash/l2/valkey_adapter v0.9.8
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
