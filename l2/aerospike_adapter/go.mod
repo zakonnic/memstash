@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/aerospike/aerospike-client-go/v7 v7.10.2
-	github.com/zakonnic/memstash v0.9.7
+	github.com/zakonnic/memstash v0.9.8
 )
 
 require (
