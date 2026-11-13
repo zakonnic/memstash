@@ -12,15 +12,15 @@ require (
 	github.com/redis/rueidis v1.0.79
 	github.com/stretchr/testify v1.12.1
 	github.com/valkey-io/valkey-go v1.0.79
-	github.com/zakonnic/memstash v0.9.7
-	github.com/zakonnic/memstash/l2/gomemcache_adapter v0.9.7
-	github.com/zakonnic/memstash/l2/goredis_adapter v0.9.7
-	github.com/zakonnic/memstash/l2/mc_adapter v0.9.7
-	github.com/zakonnic/memstash/l2/rainycape_adapter v0.9.7
-	github.com/zakonnic/memstash/l2/redigo_adapter v0.9.7
-	github.com/zakonnic/memstash/l2/redispipe_adapter v0.9.7
-	github.com/zakonnic/memstash/l2/rueidis_adapter v0.9.7
-	github.com/zakonnic/memstash/l2/valkey_adapter v0.9.7
+	github.com/zakonnic/memstash v0.9.8
+	github.com/zakonnic/memstash/l2/gomemcache_adapter v0.9.8
+	github.com/zakonnic/memstash/l2/goredis_adapter v0.9.8
+	github.com/zakonnic/memstash/l2/mc_adapter v0.9.8
+	github.com/zakonnic/memstash/l2/rainycape_adapter v0.9.8
+	github.com/zakonnic/memstash/l2/redigo_adapter v0.9.8
+	github.com/zakonnic/memstash/l2/redispipe_adapter v0.9.8
+	github.com/zakonnic/memstash/l2/rueidis_adapter v0.9.8
+	github.com/zakonnic/memstash/l2/valkey_adapter v0.9.8
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -30,5 +30,5 @@ require (
 	github.com/joomcode/errorx v1.2.0 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
 	go.uber.org/atomic v1.12.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	go.yaml.in/yaml/v3 v3.0.6 // indirect
 )

@@ -10,5 +10,5 @@ require (
 
 require (
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	go.yaml.in/yaml/v3 v3.0.6 // indirect
 )
