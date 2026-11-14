@@ -554,6 +554,46 @@ func TestGetBatchedStartsWorkersLazily(t *testing.T) {
 	assert.Zero(t, readWorkers(), "Close must stop the read pool")
 }
 
+// singleGetL2 is coalesceL2 as a SingleCallL2 whose multi-get answer the test picks.
+type singleGetL2 struct {
+	*coalesceL2
+	multiGet bool
+}
+
+func (s singleGetL2) ConcurrentCalls() int { return 1 }
+func (s singleGetL2) HasMultiGet() bool    { return s.multiGet }
+
+// TestGetBatchedReadsLikeGetWithoutMultiGet: a SingleCallL2 whose BatchGet is no cheaper than its Gets gets a Get per
+// read from the caller's goroutine, and the read pool never starts; with a multi-get the reads go through the pool as
+// before. A lone key leaves the pool as a Get too, so the pool is what tells the two apart.
+func TestGetBatchedReadsLikeGetWithoutMultiGet(t *testing.T) {
+	for _, multiGet := range []bool{false, true} {
+		t.Run("HasMultiGet="+strconv.FormatBool(multiGet), func(t *testing.T) {
+			l2 := newCoalesceL2(map[string]string{"a": "1"})
+			l2.release()
+			cache := newBatchedCache(t, singleGetL2{coalesceL2: l2, multiGet: multiGet})
+			defer cache.Close()
+
+			value, found, err := cache.GetBatched(context.Background(), "a")
+			require.NoError(t, err)
+			assert.True(t, found)
+			assert.Equal(t, "1", value)
+			_, found, err = cache.GetBatched(context.Background(), "missing")
+			require.NoError(t, err)
+			assert.False(t, found)
+
+			gets, batches := l2.readCalls()
+			assert.Equal(t, []string{"a", "missing"}, gets)
+			assert.Empty(t, batches)
+			if multiGet {
+				assert.Equal(t, memstash.DefaultGetBatchedWorkers, readWorkers(), "the reads went through the pool")
+			} else {
+				assert.Zero(t, readWorkers(), "a cache that reads like Get has no read pool to start")
+			}
+		})
+	}
+}
+
 // readWorkers counts the goroutines running a read pool's loop: the process's total moves with whatever else runs.
 func readWorkers() int {
 	buf := make([]byte, 1<<20)

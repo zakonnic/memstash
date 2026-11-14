@@ -154,7 +154,10 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 }
 
 // memstash.SingleCallL2, spelled out so the module still builds against a core without it.
-var _ interface{ ConcurrentCalls() int } = (*Cache[string, []byte])(nil)
+var _ interface {
+	ConcurrentCalls() int
+	HasMultiGet() bool
+} = (*Cache[string, []byte])(nil)
 
 // ConcurrentCalls is the constructor's wbConcurrentCalls, or DefaultWriteBackWorkers without one. The client's pool is
 // a channel of Config.PoolSize connections, and a call past it waits in the same queue as the reads, so each
@@ -165,3 +168,6 @@ func (c *Cache[K, V]) ConcurrentCalls() int {
 	}
 	return memstash.DefaultWriteBackWorkers
 }
+
+// HasMultiGet is false: the client has no multi-get, and BatchGet is single Gets.
+func (c *Cache[K, V]) HasMultiGet() bool { return false }

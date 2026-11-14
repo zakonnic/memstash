@@ -229,7 +229,8 @@ an L1 miss that should go to L2 joins a queue shared by all callers, and a worke
 there in a single `BatchGet` — so a key several goroutines want right then is read once. The caller waits longer,
 but total throughput goes up. Worth it where the client has no pipelining of its own (go-redis, `database/sql`).
 With an auto-pipelining client (rueidis, valkey), plain `Get` stays ahead — it already packs concurrent commands
-onto one connection. The worker pool starts lazily on first call.
+onto one connection. The worker pool starts lazily on first call. On memcached, gomemcache batches through `GetMulti`;
+mc and rainycape gain nothing from a batch, so `GetBatched` reads like `Get` with them.
 
 ```go
 u, ok, err := c.GetBatched(ctx, "user:42") // L1 hit → instant; a miss rides one BatchGet with other misses
@@ -416,7 +417,12 @@ half: write-back takes half the client's idle connections (`memcache.Client.MaxI
 `SetMaxIdleConnsPerAddr`), at least 4. mc hides its pool size and queues calls past it, reads and writes alike, so 0
 gives it 4: pass about half of its `PoolSize`. Past the idle pool, gomemcache and rainycape dial a connection for a
 call and close it after. The [write-back table](#batching-and-write-back) measures all three with
-`wbConcurrentCalls` = 128 (half the client's pool of 256).
+`wbConcurrentCalls` = 128 (half the client's pool of 256). `SingleCallL2` also says whether `BatchGet` is a real
+multi-get (`HasMultiGet`): gomemcache's `GetMulti` is, so `GetBatched` coalesces its reads. mc has no multi-get, and
+rainycape's reads its reply key by key off an unbuffered connection, so with them `GetBatched` reads like `Get`.
+Wrapping one of these adapters, say for metrics, embed its own type (`*gomemcache_adapter.Cache[K, V]`) or forward
+`ConcurrentCalls` and `HasMultiGet`: a wrapper that embeds `memstash.L2Cache` hides them, and the cache treats it as a
+plain store.
 
 | Module | Backend / client | context |
 |---|---|---|
@@ -595,12 +601,12 @@ with the queue full. Negative is faster, `~` is no significant difference.
 |  | 192 | 3.5 | 1.6 (-54%) | 7.4 | 1.4 (-81%) | 7.6 | ~9.5 (+25%)* |
 | valkey | 24 | 8.4 | 1.0 (-88%) | 8.2 | 0.3 (-96%) | 8.7 | 10.3 (+18%) |
 |  | 192 | 2.1 | 2.1 (~) | 1.9 | 1.6 (-17%) | 2.1 | ~2.4 (+13%)* |
-| gomemcache** | 24 | 13.1 | 4.0 (-69%) | 12.7 | 3.7 (-71%) | 12.9 | 10.3 (-20%) |
-|  | 192 | 3.3 | 3.8 (+18%) | 3.0 | 3.6 (+20%) | 3.3 | 3.0 (-8%) |
-| mc** | 24 | 12.8 | 4.3 (-67%) | 12.8 | 4.0 (-69%) | 12.6 | 22.7 (+80%) |
-|  | 192 | 3.6 | 4.2 (+18%) | 3.3 | 3.9 (+20%) | 3.6 | 13.9 (+283%) |
-| rainycape** | 24 | 12.9 | 5.1 (-60%) | 12.6 | 3.8 (-70%) | 12.8 | 12.0 (-6%) |
-|  | 192 | 4.8 | 5.2 (+7%) | 3.1 | 3.7 (+22%) | 3.2 | 4.8 (+50%) |
+| gomemcache** | 24 | 13.0 | 3.9 (-70%) | 12.9 | 3.7 (-71%) | 12.7 | 10.3 (-19%) |
+|  | 192 | 3.2 | 3.9 (+21%) | 3.0 | 3.6 (+23%) | 3.2 | 2.9 (-8%) |
+| mc** | 24 | 12.8 | 4.3 (-66%) | 12.8 | 4.1 (-68%) | 12.9 | 12.6 (~) |
+|  | 192 | 3.5 | 4.2 (+17%) | 3.2 | 3.9 (+19%) | 3.6 | 3.5 (-2%) |
+| rainycape** | 24 | 12.9 | 5.2 (-60%) | 12.8 | 3.8 (-70%) | 12.9 | 12.6 (~) |
+|  | 192 | 4.8 | 5.1 (+6%) | 3.0 | 3.7 (+22%) | 3.2 | 3.2 (~) |
 | pgx | 24 | 19.2 | 3.5 (-82%) | 17.4 | 0.5 (-97%) | 18.2 | 14.9 (-18%) |
 |  | 192 | 14.4 | 4.2 (-71%) | 12.4 | 1.7 (-87%) | 12.5 | 2.7 (-78%) |
 | sql (PostgreSQL) | 24 | 19.3 | 3.5 (-82%) | 17.6 | 0.6 (-97%) | 18.4 | 15.3 (-17%) |

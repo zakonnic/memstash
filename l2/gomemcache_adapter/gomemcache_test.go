@@ -127,5 +127,6 @@ func TestConcurrentCalls(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, tc.calls, adapter.ConcurrentCalls(),
 			"MaxIdleConns %d, wbConcurrentCalls %d", tc.maxIdle, tc.wbCalls)
+		assert.True(t, adapter.HasMultiGet(), "GetMulti is one request a server: GetBatched batches")
 	}
 }

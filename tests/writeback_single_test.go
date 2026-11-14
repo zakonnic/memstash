@@ -22,6 +22,7 @@ type singleCallStub struct {
 }
 
 func (s *singleCallStub) ConcurrentCalls() int { return s.calls }
+func (s *singleCallStub) HasMultiGet() bool    { return true }
 
 func (s *singleCallStub) BatchSet(ctx context.Context, items memstash.List[string, string], ttl time.Duration) error {
 	s.batches.Add(1)
@@ -91,6 +92,7 @@ func newGatedSingleCall() *gatedSingleCall {
 }
 
 func (g *gatedSingleCall) ConcurrentCalls() int { return 1 }
+func (g *gatedSingleCall) HasMultiGet() bool    { return true }
 
 func (g *gatedSingleCall) Set(_ context.Context, key, value string, _ time.Duration) error {
 	if value == "gate" {

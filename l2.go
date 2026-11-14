@@ -32,6 +32,10 @@ type L2Cache[K comparable, V any] interface {
 // underneath, like memcached's: the protocol has no multi-set or multi-delete. The WriteBack pool then sends single
 // calls: each worker has one in flight and sends each key of its run as its own call, the key's last task only. Wait
 // passes a marker through every worker. WriteBackWorkers must not be set (ErrWorkersSetByL2).
+//
+// A wrapper around such an adapter, for metrics or tracing, must embed the adapter's own type or forward both methods.
+// One that embeds L2Cache hides them, and the cache then takes it for a plain store: the pool loses its size and
+// GetBatched batches again.
 type SingleCallL2 interface {
 	// ConcurrentCalls is how many write-back calls, Sets and Deletes alike, the client should get at once, and so the
 	// pool size, at least 1. Reads and synchronous writes share the client on top of these calls, so leave them room:
@@ -39,6 +43,10 @@ type SingleCallL2 interface {
 	// per-server limit may be reported as is; a client over several servers then gets fewer workers than it could
 	// serve.
 	ConcurrentCalls() int
+	// HasMultiGet reports whether BatchGet reads its keys at less than the cost of one Get each, so that GetBatched
+	// gains by coalescing reads. Without it GetBatched reads like Get: a batch would only make its callers wait for one
+	// another.
+	HasMultiGet() bool
 }
 
 // KeyError is an L2 failure confined to one key of a batch, such as a value the codec rejects. The cache reports and

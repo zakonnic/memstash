@@ -169,6 +169,7 @@ type Cache[K comparable, V any] struct {
 	fills             atomic.Bool
 	writeBackBatching WriteBackBatching
 	writeBackSingle   bool // the L2 is a SingleCallL2 and sized the pool: runs go out through deliverEach
+	batchedGetsDirect bool // the L2 is a SingleCallL2 without a multi-get: GetBatched reads like Get
 	onL2Error         func(key K, err error)
 	onPanic           PanicHandler
 	// writeQueues is one buffer per write-back worker; a key always lands on the same one, so its L2 writes stay
@@ -319,6 +320,9 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		c.l2WritePolicy = WriteDisabled
 	} else {
 		c.fills.Store(true)
+	}
+	if store, ok := cfg.L2Cache.(SingleCallL2); ok {
+		c.batchedGetsDirect = !store.HasMultiGet()
 	}
 	c.life, c.endLife = context.WithCancel(context.Background())
 

@@ -197,7 +197,10 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 }
 
 // memstash.SingleCallL2, spelled out so the module still builds against a core without it.
-var _ interface{ ConcurrentCalls() int } = (*Cache[string, []byte])(nil)
+var _ interface {
+	ConcurrentCalls() int
+	HasMultiGet() bool
+} = (*Cache[string, []byte])(nil)
 
 // ConcurrentCalls is the constructor's wbConcurrentCalls. Without one it is half the client's MaxIdleConnsPerAddr, so
 // reads keep the other half; at least DefaultWriteBackWorkers. Past the idle connections memcache.Client dials one for
@@ -208,3 +211,7 @@ func (c *Cache[K, V]) ConcurrentCalls() int {
 	}
 	return max(c.client.MaxIdleConnsPerAddr()/2, memstash.DefaultWriteBackWorkers)
 }
+
+// HasMultiGet is false: GetMulti reads its replies key by key off the unbuffered connection, so a large batch costs no
+// less than its single Gets.
+func (c *Cache[K, V]) HasMultiGet() bool { return false }

@@ -231,6 +231,9 @@ func TestConcurrentCalls(t *testing.T) {
 			t.Errorf("MaxIdleConnsPerAddr %d, wbConcurrentCalls %d: ConcurrentCalls %d, want %d",
 				tc.maxIdle, tc.wbCalls, got, tc.calls)
 		}
+		if adapter.HasMultiGet() {
+			t.Error("HasMultiGet is true: GetBatched would batch reads its GetMulti makes no cheaper")
+		}
 	}
 	client, err := memcache.New("localhost:11211")
 	if err != nil {

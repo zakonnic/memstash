@@ -179,7 +179,10 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 }
 
 // memstash.SingleCallL2, spelled out so the module still builds against a core without it.
-var _ interface{ ConcurrentCalls() int } = (*Cache[string, []byte])(nil)
+var _ interface {
+	ConcurrentCalls() int
+	HasMultiGet() bool
+} = (*Cache[string, []byte])(nil)
 
 // ConcurrentCalls is the constructor's wbConcurrentCalls. Without one it is half the client's MaxIdleConns, a
 // per-server limit, so reads keep the other half; at least DefaultWriteBackWorkers. Past MaxIdleConns memcache.Client
@@ -194,3 +197,6 @@ func (c *Cache[K, V]) ConcurrentCalls() int {
 	}
 	return max(idle/2, memstash.DefaultWriteBackWorkers)
 }
+
+// HasMultiGet is true: BatchGet is one GetMulti a server, its replies read through a buffer.
+func (c *Cache[K, V]) HasMultiGet() bool { return true }

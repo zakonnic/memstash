@@ -19,7 +19,9 @@ the loading layers and the adapters.
   calls underneath implements the optional `SingleCallL2`, which says how many calls write-back keeps in flight, one
   per worker; `WithWriteBackWorkers` next to it is an error (`ErrWorkersSetByL2`). The gomemcache, mc and rainycape
   adapters implement it and take that number as a new `wbConcurrentCalls` argument of every constructor. 0 leaves
-  reads half the client's idle connections, and gives mc, whose client hides its pool size, 4.
+  reads half the client's idle connections, and gives mc, whose client hides its pool size, 4. `SingleCallL2` also
+  says whether `BatchGet` is a real multi-get (`HasMultiGet`): gomemcache's is, mc and rainycape say no, and
+  `GetBatched` then reads like `Get`.
 
 ### Changed
 

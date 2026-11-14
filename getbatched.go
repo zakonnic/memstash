@@ -66,8 +66,9 @@ type getBatch[K comparable, V any] struct {
 // BatchGet. The caller blocks as in Get, but L2 sees batches instead of a request per goroutine, and a key several
 // callers want is fetched once.
 //
-// It pays off only under heavy load, and only when the L2 adapter has no pipelining of its own. Once Close begins, a
-// caller still waiting reads L2 itself; if a worker was already fetching its key, L2 is read and counted twice.
+// It pays off only under heavy load, and only when the L2 adapter has no pipelining of its own. With a SingleCallL2
+// whose HasMultiGet is false it reads like Get. Once Close begins, a caller still waiting reads L2 itself; if a worker
+// was already fetching its key, L2 is read and counted twice.
 func (c *Cache[K, V]) GetBatched(ctx context.Context, key K) (V, bool, error) {
 	if value, ok := c.getMemory(key); ok {
 		c.stats.addMemHits(1)
@@ -76,12 +77,16 @@ func (c *Cache[K, V]) GetBatched(ctx context.Context, key K) (V, bool, error) {
 	return c.getBatchedFromL2(ctx, key)
 }
 
-// getBatchedFromL2 queues the read and waits for the answer, or reads L2 here when there is no pool to wait on.
+// getBatchedFromL2 queues the read and waits for the answer, or reads L2 here when there is no pool to wait on or no
+// multi-get to gain from.
 func (c *Cache[K, V]) getBatchedFromL2(ctx context.Context, key K) (V, bool, error) {
 	var zero V
 	if c.l2Cache == nil {
 		c.stats.addMemMisses(1)
 		return zero, false, nil
+	}
+	if c.batchedGetsDirect {
+		return c.getFromL2(ctx, key)
 	}
 	pool := &c.batchedGets
 	queueCh := pool.getQueueCh(c)
