@@ -211,7 +211,6 @@ jobs:
       - name: vet (core from this checkout)
         run: go -C l2/${{ matrix.adapter }} vet ./...
       # Catches an adapter calling a core API newer than the version it requires: broken for consumers, green in-repo.
-      # -mod=mod: a release commit may need the go.sum entry for a core tag pushed alongside it.
       - name: build (core from the version go.mod requires)
         run: go -C l2/${{ matrix.adapter }} build ./...
         env:

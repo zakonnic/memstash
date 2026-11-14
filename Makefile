@@ -25,6 +25,18 @@ TAGS = v$(V) $(addsuffix /v$(V), $(PUBLISHED))
 # memstash_requires prints "module version" for every in-repo module the go.mod in $(1) requires.
 memstash_requires = awk '$$1 ~ /^github\.com\/zakonnic\/memstash/ && $$2 ~ /^v[0-9]/ {print $$1, $$2} $$1 == "require" && $$2 ~ /^github\.com\/zakonnic\/memstash/ {print $$2, $$3}' $(1)/go.mod
 MODULES = . benchmarks benchmarks/load_generator tests/integration $(ADAPTERS)
+# local_proxy points the go command at a throwaway clone of HEAD in $$tmp/repo for this repository's modules, so a
+# version can be tagged there before it exists. Its throwaway module cache keeps those stand-ins out of the real one.
+local_proxy = native() { cygpath -m "$$1" 2>/dev/null || echo "$$1"; }; \
+	tmp=$$(native "$$(mktemp -d)"); trap 'rm -rf "$$tmp"' EXIT; \
+	cache=$$(native "$$(go env GOMODCACHE)" | sed 's|^/||'); \
+	git clone -q . "$$tmp/repo"; \
+	export GIT_CONFIG_COUNT=2 \
+		GIT_CONFIG_KEY_0="url.$$tmp/repo.insteadOf" \
+		GIT_CONFIG_VALUE_0=https://github.com/zakonnic/memstash \
+		GIT_CONFIG_KEY_1=protocol.file.allow GIT_CONFIG_VALUE_1=always \
+		GOPRIVATE=github.com/zakonnic/memstash GOWORK=off GOFLAGS=-modcacherw \
+		GOMODCACHE="$$tmp/mod" GOPROXY="file:///$$cache/cache/download,https://proxy.golang.org"
 
 .PHONY: help
 help: ## Show help message
@@ -126,13 +138,36 @@ check-new-libs: ## Checks for new versions of libraries
 		echo "All dependencies are up to date"; \
 	fi
 
-.PHONY: require-core tag
-require-core: ## Make every published module require the core and adapters v$(V): the release commit (make require-core V=1.2.3)
+.PHONY: require-core release-sums tag
+require-core: ## Make every published module require the core and adapters v$(V), sums included: the release commit (make require-core V=1.2.3)
 	@test -n "$(V)" || { echo "V is required, e.g. make require-core V=1.2.3"; exit 1; }
 	@for m in $(PUBLISHED); do \
 		for dep in $$($(call memstash_requires,$$m) | cut -d" " -f1); do \
 			go -C $$m mod edit -require=$$dep@v$(V) || exit 1; \
 		done; \
+	done
+	"$(MAKE)" release-sums V=$(V)
+
+# release-sums runs go mod tidy against v$(V) before the tags exist. The core is tagged in the local_proxy clone, and
+# every published module is committed and tagged there as soon as its go.sum is final, in PUBLISHED order. A module's
+# zip holds only its own files, so the go command computes the same sums the proxy will from the real tags.
+release-sums: ## Fill every published module's go.sum for v$(V) before the tags exist (run by require-core)
+	@test -n "$(V)" || { echo "V is required, e.g. make release-sums V=1.2.3"; exit 1; }
+	@for f in $$(git status --porcelain --untracked-files=no | cut -c4-); do \
+		case " $(addsuffix /go.mod,$(PUBLISHED)) $(addsuffix /go.sum,$(PUBLISHED)) " in \
+			*" $$f "*) ;; \
+			*) echo "Error: commit $$f first: the core is cut from HEAD."; exit 1;; \
+		esac; \
+	done
+	@set -e; $(local_proxy); \
+	git -C "$$tmp/repo" tag -f v$(V) >/dev/null; \
+	for m in $(PUBLISHED); do \
+		echo "==> $$m"; \
+		go -C $$m mod tidy; \
+		cp $$m/go.mod $$m/go.sum "$$tmp/repo/$$m/"; \
+		git -C "$$tmp/repo" -c core.safecrlf=false -c user.name=release-sums -c user.email=release-sums@localhost \
+			commit -qam "$$m"; \
+		git -C "$$tmp/repo" tag -f $$m/v$(V) >/dev/null; \
 	done
 
 tag: ## Tag the root module and every published module with the given version (make tag V=1.2.3), then 'make push'
@@ -187,7 +222,7 @@ release: ## Full release: check, tag every module, push, verify from the proxy (
 	"$(MAKE)" push
 	"$(MAKE)" release-verify V=$(V)
 
-release-check: ## Build every published module the way a consumer resolves it - no workspace, no replace (run before 'make tag')
+release-check: ## Build every published module the way a consumer resolves it - no workspace, no replace, its own go.sum (run before 'make tag')
 	@status=0; \
 	for m in $(PUBLISHED); do \
 		if grep -q '^replace' $$m/go.mod; then \
@@ -205,19 +240,22 @@ release-check: ## Build every published module the way a consumer resolves it - 
 	fi; \
 	if [ $$remote -eq 0 ]; then \
 		echo "adapters require core $$core (published)"; \
-		for m in . $(PUBLISHED); do \
-			echo "==> $$m"; \
-			GOWORK=off GOFLAGS=-mod=mod go -C $$m build ./... || status=1; \
-			GOWORK=off GOFLAGS=-mod=mod go -C $$m vet ./... || status=1; \
-		done; \
+		export GOWORK=off; \
 	else \
 		echo "adapters require core $$core, which is not pushed yet - this is the release commit."; \
-		echo "Nothing to resolve against until the tag lands: run 'make release-verify V=$${core#v}' after 'make push'."; \
-		GOWORK=off go build ./... || status=1; \
+		echo "Resolving it from a clone of HEAD that carries every tag of the release, as 'make tag' will set them."; \
+		$(local_proxy); \
+		for t in $$core $(addsuffix /$$core,$(PUBLISHED)); do git -C "$$tmp/repo" tag -f $$t >/dev/null; done; \
 	fi; \
+	for m in . $(PUBLISHED); do \
+		echo "==> $$m"; \
+		GOFLAGS="$$GOFLAGS -mod=readonly" go -C $$m build ./... || status=1; \
+		GOFLAGS="$$GOFLAGS -mod=readonly" go -C $$m vet ./... || status=1; \
+	done; \
 	exit $$status
 
-release-verify: ## Install every published module at V from the proxy into a throwaway module and build it (run after 'make push')
+# A sum release-sums got wrong fails the second build as a checksum mismatch against the proxy.
+release-verify: ## Install every published module at V from the proxy and build it, then build each from its own go.sum (run after 'make push')
 	@test -n "$(V)" || { echo "V is required, e.g. make release-verify V=1.2.3"; exit 1; }
 	@dir=$$(mktemp -d); status=0; \
 	(cd $$dir && go mod init release-verify >/dev/null 2>&1); \
@@ -226,7 +264,9 @@ release-verify: ## Install every published module at V from the proxy into a thr
 		echo "==> $$pkg@v$(V)"; \
 		(cd $$dir && GOWORK=off go get $$pkg@v$(V) >/dev/null 2>&1 && GOWORK=off go build $$pkg) \
 			|| { echo "FAILED: $$pkg@v$(V) does not build as published"; status=1; }; \
+		GOWORK=off GOFLAGS=-mod=readonly go -C $$m build ./... \
+			|| { echo "FAILED: $$m does not build from its own go.sum"; status=1; }; \
 	done; \
 	rm -rf $$dir; \
-	if [ $$status -eq 0 ]; then echo "every published module builds from the proxy at v$(V)"; fi; \
+	if [ $$status -eq 0 ]; then echo "every published module builds from the proxy at v$(V) and from its own go.sum"; fi; \
 	exit $$status

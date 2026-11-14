@@ -94,10 +94,10 @@ Every published module is tagged together - root, adapters and the load generato
 the adapters of the same release:
 
 ```sh
-make require-core V=1.2.3   # then commit: the release commit
-make tag V=1.2.3
-make push
+make require-core V=1.2.3   # on a clean tree, then commit: the release commit
+make release V=1.2.3        # check, tag, push, verify from the proxy
 ```
 
-The adapters' go.sum gets the new core's hashes only once the tag is published: run `go mod tidy` in them after the
-push, or `GOWORK=off` builds report a missing go.sum entry.
+`require-core` also fills every published module's go.sum for the new version before its tags exist: it tags a
+throwaway clone of HEAD and runs `go mod tidy` against it. The release commit builds with `GOWORK=off` as it is, and
+`make release` checks that its sums match what the proxy serves.
