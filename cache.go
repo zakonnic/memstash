@@ -520,10 +520,7 @@ func (c *Cache[K, V]) getMemory(key K) (V, bool) {
 	for pos := home; ; {
 		item := storage.At(pos)
 		metaWord := item.Metadata()
-		for {
-			if metaWord&itemstore.DeadOrTag != tagged {
-				break // dead, or a foreign tag
-			}
+		for metaWord&itemstore.DeadOrTag == tagged { // a dead slot or a foreign tag ends it
 			if !item.SnapshotInto(&entry, metaWord) {
 				metaWord = item.Metadata()
 				continue // the copy raced a recycle or an overwrite: retry against the fresh meta word
@@ -575,10 +572,7 @@ func (c *Cache[K, V]) getMoved(sh *shard[K, V], keyHash uint64, key K) (V, bool)
 	for pos := home; ; {
 		item := storage.At(pos)
 		metaWord := item.Metadata()
-		for {
-			if metaWord&itemstore.DeadOrTag != tagged {
-				break
-			}
+		for metaWord&itemstore.DeadOrTag == tagged {
 			if !item.SnapshotInto(&entry, metaWord) {
 				metaWord = item.Metadata()
 				continue
@@ -875,10 +869,7 @@ func (c *Cache[K, V]) livePresent(sh *shard[K, V], keyHash uint64, key K) bool {
 		for pos := home; ; {
 			item := storage.At(pos)
 			metaWord := item.Metadata()
-			for {
-				if metaWord&itemstore.DeadOrTag != tagged {
-					break
-				}
+			for metaWord&itemstore.DeadOrTag == tagged {
 				if !item.SnapshotInto(&entry, metaWord) {
 					metaWord = item.Metadata()
 					continue

@@ -174,10 +174,7 @@ func (c *Cache[K, V]) peekMemory(key K) (V, bool) {
 		for pos := home; ; {
 			item := storage.At(pos)
 			metaWord := item.Metadata()
-			for {
-				if metaWord&itemstore.DeadOrTag != tagged {
-					break
-				}
+			for metaWord&itemstore.DeadOrTag == tagged {
 				if !item.SnapshotInto(&entry, metaWord) {
 					metaWord = item.Metadata()
 					continue
