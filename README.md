@@ -387,8 +387,8 @@ at the items themselves.
 | `WithShardsCount(n)` | Number of eviction shards (default: auto by GOMAXPROCS). |
 | `WithL2Cache(l2)` | Attach a second level directly. |
 | `WithWritePolicy(p)` | How writes reach L2, ignored when no L2 is attached: `WriteBack` (default) hands `Set` to the background worker pool, `WriteThrough` writes on `Set` and returns the L2 error, `WriteDisabled` makes L2 read-only. Deletes follow the same policy as writes. |
-| `WithWriteBackBuffer(n)` | Size of the async write-back buffer for every worker (default: 500, or 64 for the memcached adapters, see below). A write that finds it full waits for room, so the writes of one key reach L2 in order. |
-| `WithWriteBackWorkers(n)` | Number of goroutines draining the write-back buffers (default: 4, or the client's connection pool for the memcached adapters, see below). Each key belongs to one worker, so its L2 writes keep their order; each worker has its own buffer, and batching happens within it. A worker sends one batch at a time, and up to four at once when its buffer holds more than a batch. |
+| `WithWriteBackBuffer(n)` | Size of the async write-back buffer for every worker (default: 500, or an even share of 2000, at least 64, for the memcached adapters, see below). A write that finds it full waits for room, so the writes of one key reach L2 in order. |
+| `WithWriteBackWorkers(n)` | Number of goroutines draining the write-back buffers (default: 4, or half the client's idle connections for the memcached adapters, see below). Each key belongs to one worker, so its L2 writes keep their order; each worker has its own buffer, and batching happens within it. A worker sends one batch at a time, and up to four at once when its buffer holds more than a batch; for the memcached adapters it sends one call at a time. |
 | `WithBatchingForWriteBack()` / `WithNoBatchingForWriteBack()` / `WithAdaptiveBatchingForWriteBack()` | How a write-back worker drains its buffer share to L2: coalesced into `BatchSet`/`BatchDelete` (default), one `Set` or `Delete` per task, or adaptive. |
 | `WithGetBatchedBuffer(n)` | Size of the worker pool buffer queue `GetBatched` coalesces L2 reads through (default: 1024). |
 | `WithGetBatchedWorkers(n)` | Number of goroutines resolving the coalesced reads (default: 4), and with that the number of `BatchGet` calls in flight. A batch only forms while every worker is busy, so fewer workers mean fuller batches. |
@@ -409,10 +409,12 @@ The write path favors throughput by default: instead of one round trip per key, 
 write-back worker coalesces the Sets into the adapter's native `BatchSet` call (an `MSET` or a pipeline).
 
 memcached has no multi-set or multi-delete, so the memcached adapters implement `SingleCallL2` and write-back skips
-batches for them: it runs a worker per connection the client keeps idle (`memcache.Client.MaxIdleConns`, rainycape's
-`SetMaxIdleConnsPerAddr`, at least 128; mc queues calls itself and gets 512), each sending one call at a time. Size
-the client's idle pool for your concurrency: past it, a call dials a connection and closes it after.
-`WithWriteBackWorkers` turns this off and sizes the batched pool instead.
+batches for them: each worker sends one Set or Delete at a time, so `WithWriteBackWorkers` is how many calls
+write-back keeps in flight. Reads and synchronous writes share the client on top of them, so by default write-back
+takes half its idle connections (`memcache.Client.MaxIdleConns`, rainycape's `SetMaxIdleConnsPerAddr`), at least 4.
+mc hides its pool size and queues calls past it, reads and writes alike, so it gets 4: set `WithWriteBackWorkers` to
+about half of its `PoolSize`. Past the idle pool, gomemcache and rainycape dial a connection for a call and close it
+after.
 
 | Module | Backend / client | context |
 |---|---|---|

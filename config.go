@@ -118,12 +118,13 @@ type Config[K comparable, V any] struct {
 	// 0 means choose automatically: MemoryCapacity (but no more than 1<<20) when CostFunc == nil, otherwise 8192.
 	GhostSize int
 
-	// WriteBackBufferSize is the buffer size of each WriteBack worker. 0 means 500, or 64 in a SingleCallL2 pool. A
-	// write that finds the buffer full waits for room.
+	// WriteBackBufferSize is the buffer size of each WriteBack worker. 0 means 500, or in a SingleCallL2 pool an even
+	// share of 2000, at least 64. A write that finds the buffer full waits for room.
 	WriteBackBufferSize int
 
 	// WriteBackWorkers is the number of goroutines draining the WriteBack buffer. 0 means DefaultWriteBackWorkers, or
-	// the client's call limit when L2Cache is a SingleCallL2.
+	// what ConcurrentCalls allows when L2Cache is a SingleCallL2. For a SingleCallL2 it is how many calls write-back
+	// keeps in flight, so it also sets the share of the client left to reads.
 	// A key always goes to the same worker, so the L2 writes of one key keep their order; the workers themselves
 	// write to L2 concurrently, and batching happens within a worker's own share of the buffer. A worker has one
 	// batch in flight, and up to four once its share holds more than a batch; a SingleCallL2 worker has one call.
@@ -225,11 +226,14 @@ func (c *Config[K, V]) ghostSize() int {
 	return 8192
 }
 
+// defaultWriteBackBuffer is a batched WriteBack worker's buffer when WriteBackBufferSize is not set.
+const defaultWriteBackBuffer = 500
+
 func (c *Config[K, V]) writeBackBuffer() int {
 	if c.WriteBackBufferSize > 0 {
 		return c.WriteBackBufferSize
 	}
-	return 500
+	return defaultWriteBackBuffer
 }
 
 func (c *Config[K, V]) writeBackWorkers() int {

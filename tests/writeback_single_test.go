@@ -33,18 +33,23 @@ func (s *singleCallStub) BatchDelete(context.Context, []string) error {
 	return nil
 }
 
-// TestSingleCallPoolSize: a SingleCallL2 gets one worker per call its client serves at once, at least 128, and 512
-// when the client queues calls itself; every worker reaches L2 at the same time, and no batch is sent.
+// TestSingleCallPoolSize: a SingleCallL2 gets one worker per call ConcurrentCalls allows, at least one, and
+// WriteBackWorkers overrides that count without leaving single calls; every worker reaches L2 at the same time, and
+// no batch is sent.
 func TestSingleCallPoolSize(t *testing.T) {
-	for _, tc := range []struct{ calls, workers int }{{300, 300}, {2, 128}, {0, 512}} {
-		t.Run(fmt.Sprintf("%d calls", tc.calls), func(t *testing.T) {
+	for _, tc := range []struct{ calls, set, workers int }{{300, 0, 300}, {2, 0, 2}, {0, 0, 1}, {300, 7, 7}} {
+		t.Run(fmt.Sprintf("%d calls, %d set", tc.calls, tc.set), func(t *testing.T) {
 			l2 := &singleCallStub{blockingL2Stub: newBlockingL2Stub(tc.workers), calls: tc.calls}
-			c, err := memstash.New[string, string](
+			opts := []memstash.Option{
 				memstash.WithMemoryCapacity(1000),
 				memstash.WithL2Cache[string, string](l2),
 				memstash.WithWritePolicy(memstash.WriteBack),
 				memstash.WithWriteBackBuffer(256), // a queue gets 32 keys on average: Set never waits for room
-			)
+			}
+			if tc.set > 0 {
+				opts = append(opts, memstash.WithWriteBackWorkers(tc.set))
+			}
+			c, err := memstash.New[string, string](opts...)
 			require.NoError(t, err)
 			defer c.Close()
 
@@ -138,29 +143,4 @@ func TestSingleCallCollapsesRepeats(t *testing.T) {
 	_, values := l2.snapshot()
 	assert.Equal(t, []string{"gate", "v-099", deleted, "last"}, values["k"])
 	assert.Zero(t, l2.batches.Load())
-}
-
-// TestSingleCallYieldsToWriteBackWorkers: an explicit WriteBackWorkers keeps the batched pool even for a
-// SingleCallL2, so a backlog still goes out as a BatchSet.
-func TestSingleCallYieldsToWriteBackWorkers(t *testing.T) {
-	ctx := context.Background()
-	l2 := newGatedSingleCall()
-	c, err := memstash.New[string, string](
-		memstash.WithMemoryCapacity(1000),
-		memstash.WithL2Cache[string, string](l2),
-		memstash.WithWritePolicy(memstash.WriteBack),
-		memstash.WithWriteBackWorkers(1),
-	)
-	require.NoError(t, err)
-	defer c.Close()
-
-	require.NoError(t, c.Set(ctx, "k", "gate"))
-	<-l2.entered
-	for i := range 10 {
-		require.NoError(t, c.Set(ctx, fmt.Sprintf("k-%d", i), "v"))
-	}
-	close(l2.open)
-	c.Wait(ctx)
-
-	assert.Equal(t, int32(1), l2.batches.Load())
 }

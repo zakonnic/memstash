@@ -101,3 +101,15 @@ func TestNewCache(t *testing.T) {
 	require.NoError(t, err)
 	cacheBytes.Close()
 }
+
+// TestConcurrentCalls: write-back takes half the idle connections and leaves reads the rest, but never fewer than
+// DefaultWriteBackWorkers calls, the default of 2 idle connections included.
+func TestConcurrentCalls(t *testing.T) {
+	for _, tc := range []struct{ maxIdle, calls int }{{0, 4}, {2, 4}, {32, 16}, {300, 150}} {
+		client := memcache.New("localhost:11211")
+		client.MaxIdleConns = tc.maxIdle
+		adapter, err := gomemcache_adapter.NewBytes[string](client)
+		require.NoError(t, err)
+		assert.Equal(t, tc.calls, adapter.ConcurrentCalls(), "MaxIdleConns %d", tc.maxIdle)
+	}
+}

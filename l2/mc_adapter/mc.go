@@ -146,6 +146,7 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 // memstash.SingleCallL2, spelled out so the module still builds against a core without it.
 var _ interface{ ConcurrentCalls() int } = (*Cache[string, []byte])(nil)
 
-// ConcurrentCalls is 0: the client's pool is a channel of Config.PoolSize connections, so a call past it waits for one,
-// and the client does not expose the size. It makes the adapter a memstash.SingleCallL2.
-func (c *Cache[K, V]) ConcurrentCalls() int { return 0 }
+// ConcurrentCalls is DefaultWriteBackWorkers. The client's pool is a channel of Config.PoolSize connections it does
+// not expose, and a call past it waits in the same queue as the reads, so each write-back worker takes a turn from
+// them. Set memstash.WithWriteBackWorkers to about half of PoolSize. It makes the adapter a memstash.SingleCallL2.
+func (c *Cache[K, V]) ConcurrentCalls() int { return memstash.DefaultWriteBackWorkers }

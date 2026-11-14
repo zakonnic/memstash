@@ -16,9 +16,10 @@ the loading layers and the adapters.
   Docker Desktop port relay that capped the L2 scenarios. It logs what `Set`, `GetFromMemory` and `Get` cost on the
   live cache, and `-config` repeats, a later file overriding the fields it sets.
 - Write-back sends single calls to stores without batches. An adapter whose `BatchSet` and `BatchDelete` are single
-  calls underneath implements the optional `SingleCallL2`. Unless `WriteBackWorkers` is set, write-back then runs a
-  worker per call its client serves at once, each sending one call at a time. The gomemcache, mc and rainycape
-  adapters implement it.
+  calls underneath implements the optional `SingleCallL2`, and each write-back worker then sends one call at a time,
+  so `WriteBackWorkers` is how many calls write-back keeps in flight. By default the adapter picks that number and
+  leaves the client room for reads. The gomemcache, mc and rainycape adapters implement it: `WithWriteBackWorkers(n)`
+  now means n calls at once there, where in 0.9.8 it meant up to 8n.
 
 ### Changed
 

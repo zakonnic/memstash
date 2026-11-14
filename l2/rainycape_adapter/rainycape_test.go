@@ -210,3 +210,22 @@ func replyStatus(conn net.Conn, op byte, status uint16) error {
 	_, err := conn.Write(packet)
 	return err
 }
+
+// TestConcurrentCalls: write-back takes half the idle connections and leaves reads the rest, but never fewer than
+// DefaultWriteBackWorkers calls, a client keeping no idle connections (maxIdle < 0) included.
+func TestConcurrentCalls(t *testing.T) {
+	for _, tc := range []struct{ maxIdle, calls int }{{0, 4}, {-1, 4}, {32, 16}, {300, 150}} {
+		client, err := memcache.New("localhost:11211")
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.SetMaxIdleConnsPerAddr(tc.maxIdle)
+		adapter, err := rainycape_adapter.NewBytes[string](client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := adapter.ConcurrentCalls(); got != tc.calls {
+			t.Errorf("MaxIdleConnsPerAddr %d: ConcurrentCalls %d, want %d", tc.maxIdle, got, tc.calls)
+		}
+	}
+}

@@ -29,15 +29,15 @@ type L2Cache[K comparable, V any] interface {
 }
 
 // SingleCallL2 is an optional L2Cache extension for a store whose BatchSet and BatchDelete are single calls
-// underneath, like memcached's: the protocol has no multi-set or multi-delete. Unless WriteBackWorkers is set, the
-// WriteBack pool then runs one worker per call the client serves at once, and a worker sends each key of its run as
-// its own call, the key's last task only. A worker's buffer defaults to 64 tasks, and Wait passes a marker through
-// every worker.
+// underneath, like memcached's: the protocol has no multi-set or multi-delete. The WriteBack pool then sends single
+// calls: each of its WriteBackWorkers workers has one in flight and sends each key of its run as its own call, the
+// key's last task only. Wait passes a marker through every worker.
 type SingleCallL2 interface {
-	// ConcurrentCalls is how many calls the client serves at once without dialing extra connections, read from the
-	// client. The pool takes at least 128 workers whatever it says, and 512 when it is 0: the client queues extra
-	// calls itself. A per-server limit may be reported as is; a client over several servers then gets fewer workers
-	// than it could serve.
+	// ConcurrentCalls is how many write-back calls, Sets and Deletes alike, the client should get at once: the pool
+	// size when WriteBackWorkers is not set, at least 1. Reads and synchronous writes share the client on top of these
+	// calls, so leave them room: a client that queues calls past its pool serves the queue in turn, and a big pool
+	// there crowds the reads out. A per-server limit may be reported as is; a client over several servers then gets
+	// fewer workers than it could serve.
 	ConcurrentCalls() int
 }
 

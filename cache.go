@@ -365,14 +365,13 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 
 	if c.l2WritePolicy == WriteBack {
 		workers, buffer := cfg.writeBackWorkers(), cfg.writeBackBuffer()
-		if store, ok := cfg.L2Cache.(SingleCallL2); ok && cfg.WriteBackWorkers == 0 {
+		if store, ok := cfg.L2Cache.(SingleCallL2); ok {
 			c.writeBackSingle = true
-			workers = queuedCallWorkers
-			if calls := store.ConcurrentCalls(); calls > 0 {
-				workers = max(calls, singleCallWorkersMin)
+			if cfg.WriteBackWorkers == 0 {
+				workers = max(store.ConcurrentCalls(), 1)
 			}
 			if cfg.WriteBackBufferSize == 0 {
-				buffer = singleCallBuffer
+				buffer = max(singleCallBufferTotal/workers, singleCallBufferMin)
 			}
 		}
 		c.writeQueues = make([]chan l2Write[K, V], workers)
@@ -1326,18 +1325,13 @@ const writeBackFanout = 4
 // WriteBackBatchMax, which costs it a second batch, is nearly 4 deviations out.
 const writeBackRunMax = writeBackFanout * WriteBackBatchMax * 3 / 4
 
-// singleCallWorkersMin is the smallest WriteBack pool for a SingleCallL2: the calls the batched pool could keep in
-// flight on the memcached adapters, DefaultWriteBackWorkers × writeBackFanout × their 8 batch goroutines. A client
-// whose idle pool is smaller gets dialed past.
-const singleCallWorkersMin = 128
+// singleCallBufferTotal is what a SingleCallL2 pool buffers by default, shared by its workers: as much as the batched
+// pool's default workers do.
+const singleCallBufferTotal = DefaultWriteBackWorkers * defaultWriteBackBuffer
 
-// queuedCallWorkers is the WriteBack pool for a SingleCallL2 whose client queues extra calls itself. Workers past its
-// connection pool only wait in it, so the count bounds goroutines, not calls.
-const queuedCallWorkers = 512
-
-// singleCallBuffer is a SingleCallL2 worker's default buffer. With hundreds of workers, 500 each would hold over 100k
-// tasks; 64 still collapses that many queued writes of a hot key into one call.
-const singleCallBuffer = 64
+// singleCallBufferMin is the smallest default share: 64 tasks still collapse many queued writes of a hot key into one
+// call.
+const singleCallBufferMin = 64
 
 // flushWrite hands one write-back task to L2, coalescing the tasks already queued behind it in the same worker's
 // queue into batches.
