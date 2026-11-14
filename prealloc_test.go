@@ -52,7 +52,6 @@ func TestPreallocatedTableFillsWithoutRebuild(t *testing.T) {
 	assert.Equal(t, settled, slotCounts(c), "the table must hold its size once churn has settled")
 	assert.Equal(t, growths, after.TableGrowths(), "a settled table must not keep growing")
 	assert.Zero(t, after.TableGrowths(), "the target load is below the growth line: a preallocated table never grows")
-	assert.Zero(t, after.TablePurges(), "a deletion compacts its run on the spot: nothing is ever purged")
 }
 
 // TestPreallocatedTableSurvivesEarlyChurn is the regression that first forced preallocSlots to account for
@@ -120,7 +119,7 @@ func TestPreallocatedTableSurvivesEarlyChurn(t *testing.T) {
 func TestPreallocatedTableNeverGrows(t *testing.T) {
 	const capacity = 4096
 
-	rebuildAtFullLive := func(t *testing.T, opts ...Option) (before, after int, growths, purges int64) {
+	rebuildAtFullLive := func(t *testing.T, opts ...Option) (before, after int, growths int64) {
 		t.Helper()
 		ctx := context.Background()
 		c, err := New[int, int](append(
@@ -130,40 +129,30 @@ func TestPreallocatedTableNeverGrows(t *testing.T) {
 		for i := range capacity {
 			require.NoError(t, c.Set(ctx, i, i))
 		}
-
-		// Stats counters share their storage with the snapshot they came from, so the numbers have to be read out
-		// on the spot rather than kept as two snapshots to diff.
-		counts := func() (int64, int64) {
-			s := c.Stats()
-			return s.TableGrowths(), s.TablePurges()
-		}
-		grownBefore, purgedBefore := counts()
+		grownBefore := c.Stats().TableGrowths()
 
 		sh := &c.shards[0]
 		sh.mu.Lock()
 		storage := sh.items.GetStorage()
 		before = storage.Len()
-		sh.live = before // over the line, so the rebuild has to choose between growing and purging
+		sh.live = before // over the growth line
 		c.maybeGrow(sh, storage)
 		after = sh.items.GetStorage().Len()
 		sh.mu.Unlock()
 
-		grownAfter, purgedAfter := counts()
-		return before, after, grownAfter - grownBefore, purgedAfter - purgedBefore
+		return before, after, c.Stats().TableGrowths() - grownBefore
 	}
 
 	t.Run("preallocated", func(t *testing.T) {
-		before, after, growths, purges := rebuildAtFullLive(t, WithPreallocatedSize())
+		before, after, growths := rebuildAtFullLive(t, WithPreallocatedSize())
 		assert.Equal(t, before, after, "a preallocated table is never grown, whatever its live count")
 		assert.Zero(t, growths)
-		assert.Zero(t, purges)
 	})
 
 	t.Run("grown", func(t *testing.T) {
-		before, after, growths, purges := rebuildAtFullLive(t)
+		before, after, growths := rebuildAtFullLive(t)
 		assert.Greater(t, after, before, "without preallocation the same live count takes the table up a step")
 		assert.Equal(t, int64(1), growths)
-		assert.Zero(t, purges)
 	})
 }
 
@@ -172,7 +161,7 @@ func TestPreallocatedTableNeverGrows(t *testing.T) {
 func TestGrowthThresholdMovesTheRebuildLine(t *testing.T) {
 	const capacity = 4096
 
-	rebuildAtSevenTenths := func(t *testing.T, threshold float64) (before, after int, growths, purges int64) {
+	rebuildAtSevenTenths := func(t *testing.T, threshold float64) (before, after int, growths int64) {
 		t.Helper()
 		ctx := context.Background()
 		c, err := New[int, int](WithMemoryCapacity(capacity), WithShardsCount(1), WithStats(),
@@ -182,11 +171,7 @@ func TestGrowthThresholdMovesTheRebuildLine(t *testing.T) {
 		for i := range capacity {
 			require.NoError(t, c.Set(ctx, i, i))
 		}
-		counts := func() (int64, int64) {
-			s := c.Stats()
-			return s.TableGrowths(), s.TablePurges()
-		}
-		grownBefore, purgedBefore := counts()
+		grownBefore := c.Stats().TableGrowths()
 
 		sh := &c.shards[0]
 		sh.mu.Lock()
@@ -197,22 +182,19 @@ func TestGrowthThresholdMovesTheRebuildLine(t *testing.T) {
 		after = sh.items.GetStorage().Len()
 		sh.mu.Unlock()
 
-		grownAfter, purgedAfter := counts()
-		return before, after, grownAfter - grownBefore, purgedAfter - purgedBefore
+		return before, after, c.Stats().TableGrowths() - grownBefore
 	}
 
 	t.Run("over a 0.6 line", func(t *testing.T) {
-		before, after, growths, purges := rebuildAtSevenTenths(t, 0.6)
+		before, after, growths := rebuildAtSevenTenths(t, 0.6)
 		assert.Greater(t, after, before, "live past the line has to take the table up a step")
 		assert.Equal(t, int64(1), growths)
-		assert.Zero(t, purges)
 	})
 
 	t.Run("under a 0.8 line", func(t *testing.T) {
-		before, after, growths, purges := rebuildAtSevenTenths(t, 0.8)
+		before, after, growths := rebuildAtSevenTenths(t, 0.8)
 		assert.Equal(t, before, after, "seven tenths is below the line: no rebuild at all")
 		assert.Zero(t, growths)
-		assert.Zero(t, purges)
 	})
 }
 

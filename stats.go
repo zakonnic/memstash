@@ -145,10 +145,6 @@ func (s Stats) TableGrowths() int64 { return s.tableGrowths }
 // with one free slot left.
 func (s Stats) Rejected() int64 { return s.rejected }
 
-// TablePurges is always 0: a deletion compacts its probe run on the spot, so a table is never rebuilt at the same
-// size. Kept for callers that read it.
-func (s Stats) TablePurges() int64 { return 0 }
-
 // Gets returns the total number of read keys: Hits() + Misses().
 func (s Stats) Gets() int64 { return s.Hits() + s.Misses() }
 

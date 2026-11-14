@@ -210,7 +210,7 @@ func runChurn(t *testing.T, opts []Option) {
 	cold := uint64(1) << 32 // disjoint from the hot range
 	hotOps, inserts, deletes, ops := 0, 0, 0, 0
 	milestones := []int{1, 2, 5, 10, 20, 30, statsTurnovers}
-	t.Log("turn |    ops |    live |   slots | load |   dead  dead% | hit(all) p50 p99 max | grow purge")
+	t.Log("turn |    ops |    live |   slots | load |   dead  dead% | hit(all) p50 p99 max | grow")
 	for next := 0; next < len(milestones); {
 		ops++
 		var key uint64
@@ -234,12 +234,12 @@ func runChurn(t *testing.T, opts []Option) {
 			st := scanTables(c, last)
 			as := replay(c, rng, &cold)
 			s := c.Stats()
-			t.Logf("%4d | %5.1fM | %7d | %7d | %.2f | %6d %5.1f%% | %8.2f %3d %3d %3d | %4d %5d",
+			t.Logf("%4d | %5.1fM | %7d | %7d | %.2f | %6d %5.1f%% | %8.2f %3d %3d %3d | %4d",
 				milestones[next], float64(ops)/1e6, st.live, st.slots,
 				float64(st.live+st.dead)/float64(st.slots), st.dead, 100*float64(st.dead)/float64(st.slots),
 				mean(st.probeSum, st.live),
 				percentile(st.hist, st.live, 0.5), percentile(st.hist, st.live, 0.99), st.probeMax,
-				s.TableGrowths(), s.TablePurges())
+				s.TableGrowths())
 			t.Logf("     | structural: hot=%.2f (%d items) cold=%.2f (%d items)",
 				mean(st.hotSum, st.hotLive), st.hotLive, mean(st.coldSum, st.coldLive), st.coldLive)
 			t.Logf("     | walk: hit(hot)=%.2f miss=%.2f | dead per walk: hit=%.2f miss=%.2f | grpExit=%.0f%% "+
@@ -254,7 +254,6 @@ func runChurn(t *testing.T, opts []Option) {
 				t.Logf("  evictions=%d other removals=%d", evicted, invalidated)
 				t.Logf("  shard counters: live=%d | scanned dead=%d", st.shLive, st.dead)
 				require.Zero(t, st.dead, "a deletion reclaims its slot on the spot: no dead slot may survive")
-				require.Zero(t, s.TablePurges(), "nothing is ever purged")
 				t.Logf("  hasNext set on %d slots (%.1f%%)", st.hasNext, 100*float64(st.hasNext)/float64(st.slots))
 				t.Logf("  miss walk: p50=%d p99=%d max=%d | hit walk: p99=%d max=%d",
 					percentile(as.missHist, as.misses, 0.5), percentile(as.missHist, as.misses, 0.99), as.missMax,
@@ -304,10 +303,10 @@ func TestPreallocatedGrowthAt100M(t *testing.T) {
 		}
 		s := c.Stats()
 		t.Logf("%-8s %4.0fM inserts | live %5.1fM | dirty %5.2fM (%4.1f%% of live) | slots %d (%d/shard) "+
-			"| load %.2f | growths %d purges %d | %s",
+			"| load %.2f | growths %d | %s",
 			stage, float64(inserts)/1e6, float64(live)/1e6, float64(dirty)/1e6, 100*float64(dirty)/float64(live),
 			slots, slots/len(c.shards), float64(live+dirty)/float64(slots),
-			s.TableGrowths(), s.TablePurges(), time.Since(start).Round(time.Second))
+			s.TableGrowths(), time.Since(start).Round(time.Second))
 	}
 
 	key := func(i int64) uint64 { return uint64(i) * 0x9E3779B97F4A7C15 }
@@ -369,8 +368,8 @@ func TestPreallocatedFillTime100M(t *testing.T) {
 	wg.Wait()
 	filled := time.Since(fill)
 	s := c.Stats()
-	t.Logf("fill: %s for %d items on %d workers (%.0f ns/set wall, %.1fM sets/s), live %d, growths %d purges %d",
+	t.Logf("fill: %s for %d items on %d workers (%.0f ns/set wall, %.1fM sets/s), live %d, growths %d",
 		filled.Round(time.Millisecond), capacity, workers, float64(filled.Nanoseconds())/capacity,
-		capacity/filled.Seconds()/1e6, c.Len(), s.TableGrowths(), s.TablePurges())
+		capacity/filled.Seconds()/1e6, c.Len(), s.TableGrowths())
 	t.Logf("total to a warm cache: %s", (allocated + filled).Round(time.Millisecond))
 }
