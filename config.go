@@ -150,6 +150,8 @@ type Config[K comparable, V any] struct {
 	// OnDeletion is an optional handler called once for every item that leaves the first level, whatever the cause,
 	// with the value the item held. It runs after the shard mutex is released, in the order the items died, on the
 	// goroutine whose operation removed them - so a slow handler slows that caller down, not the whole shard.
+	// That goroutine may be the cache's own. On the TTL clock, which sweeps out expired items, a slow handler holds
+	// back expiry for the whole cache. On a GetBatched worker it holds up the reads still waiting in its batch.
 	// Filter with DeletionCause.Automatic to see only the removals the cache decided on its own.
 	OnDeletion func(key K, value V, cause DeletionCause)
 

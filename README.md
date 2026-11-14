@@ -40,7 +40,7 @@ v, ok, err := c.Get(ctx, "hello") // faster than a sync.Map lookup
 - **Second-level cache out of the box.** Put a shared store such as Redis behind the in-memory cache, or memory in
   front of the Redis you already use. It is one call either way, and you get a cache that is as fast as memory,
   shared between nodes and warm after a restart.
-- **Adapters included.** Ready-made L2 adapters for Redis, memcached, SQL/PostgreSQL, MongoDB,
+- **Adapters included.** Ready-made L2 adapters for Redis, Valkey, memcached, SQL/PostgreSQL, MongoDB,
   DynamoDB, Badger, Tarantool and Aerospike — each in its own module so the core stays clean. With
   **write-back** and **auto-batching**.
 - **Singleflight built in.** `GetOrLoad` collapses a stampede of concurrent misses on one key into a
@@ -252,8 +252,8 @@ for key, value := range c.Iterator() {
 ```
 
 **Removal events** — get told when an item leaves memory, and why. Handlers run after the shard lock
-is released, so they may take their time and may call back into the cache; a small cost per removal
-when a handler is set, otherwise zero overhead:
+is released, so they may call back into the cache; a small cost per removal when a handler is set,
+otherwise zero overhead. A handler runs on the goroutine that removed the item:
 
 ```go
 c, _ := memstash.New[string, *Conn](

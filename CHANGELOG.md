@@ -3,369 +3,159 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org).
 
-Every module - the root and each `l2/*_adapter` - is tagged with the same version.
+Every module - the root, each `l2/*_adapter` and `benchmarks/load_generator` - is tagged with the same version.
 
-## [Unreleased]
+## [0.10.0] - 2026-11-14
+
+An in-memory level (L1) without tombstones, eviction queues threaded through its table, and fixes across the core,
+the loading layers and the adapters.
 
 ### Added
 
-- **The load generator runs next to its L2 servers.** `make load-generator-docker` runs it as the compose service
-  `load-generator` (profile `load`, so `make up` never starts it), and its L2 traffic skips the Docker Desktop port
-  relay, which capped the L2 scenarios far below their target. `-config` now repeats, a later file overriding the
-  fields it sets.
-- **Write-back sends single calls to stores without batches.** An adapter whose `BatchSet` and `BatchDelete` are
-  single calls underneath implements the optional `SingleCallL2` and reports how many calls its client serves at
-  once. Unless `WriteBackWorkers` is set, write-back then runs that many workers (at least 128, 512 for a client that
-  queues calls itself), each sending one call at a time, the last task of a key per run. On the memcached adapters
-  the batched pool kept at most 4 workers × 4 batches × 8 goroutines of calls in flight, however many goroutines
-  wrote, and each batch waited for its slowest call. The gomemcache, mc and rainycape adapters implement it, reading
-  `MaxIdleConns`, nothing (mc queues calls) and `MaxIdleConnsPerAddr`.
+- The load generator runs next to its L2 servers: `make load-generator-docker` runs it in compose, away from the
+  Docker Desktop port relay that capped the L2 scenarios. It logs what `Set`, `GetFromMemory` and `Get` cost on the
+  live cache, and `-config` repeats, a later file overriding the fields it sets.
+- Write-back sends single calls to stores without batches. An adapter whose `BatchSet` and `BatchDelete` are single
+  calls underneath implements the optional `SingleCallL2`. Unless `WriteBackWorkers` is set, write-back then runs a
+  worker per call its client serves at once, each sending one call at a time. The gomemcache, mc and rainycape
+  adapters implement it.
 
 ### Changed
 
-- **The first level never holds a tombstone.** A deletion - `Delete`, an eviction, a lazy TTL removal - compacts its
-  probe run on the spot with backward-shift deletion (Knuth's Algorithm R, with the fewest moves that close the
-  hole), so the table always holds exactly what inserting the live keys into a fresh table would:
-  probe walks stay at their fresh-table values however long the cache churns, and dead slots never eat into the free
-  space.
-- **No same-size rebuilds.** With nothing to purge, a preallocated table is never allocated again after `New`, and a
-  non-preallocated one only grows; the transient second table of a purge is gone. `Stats.TablePurges` is always 0
-  and will be removed with the next stats revision.
-- **The eviction queues run through the table.** Every slot carries its place in its eviction queue - `prev`/`next`,
-  8 bytes in an array beside the items - and a compaction that moves an item moves its place along, so a policy
-  names its victim by slot index and the cache reads it directly, with no lookup. The cache enqueues every new item
-  at the back of queue 0 and removes every departing one on the spot: nothing is left behind for a sweep, a
-  delete-then-set leaves no duplicate, and no item can drop out of the queues and become unevictable. A policy moves
-  items between the `EvictionQueues` queues (`Items.Oldest`, `Newer`, `Requeue`, the `ItemInMainQueue` bit, and a
-  scan `Hand` that follows its item through moves and removals). `EvictionPolicy` is
-  `Add`/`Remove`/`Reweigh`/`Evict`/`Bytes`: `QNode{Idx, Cost}`, `Add` and `Evict` are as in 0.9.8; `Len`, `Sweep`
-  and `Rebuild` are gone; `Remove` hears of every departing item while it is still queued and `Reweigh` of every
-  overwrite that changes a weight, so S3-FIFO's small and W-TinyLFU's window weigh exactly what they hold. `Items`
-  also gives `Cost` and `Fingerprint` - a key's home slot and tag bits, which S3-FIFO's ghost table keys on without
-  hashing the key; W-TinyLFU's sketch hashes the key as in 0.9.8, since
-  a fingerprint changes when the table grows and the sketch's history must not. The links take 8 bytes per slot, so
-  every item costs more memory, and a table that is not preallocated, which runs at a lower load, pays for them on
-  more slots per item. SIEVE drops its own 16-byte node array and comes out smaller.
-- **The item's meta word carries its distance from its home slot**, so a compaction reads the run it moves instead of
-  rehashing every key it passes, which makes a delete cheaper the costlier the key is to hash. It costs
-  the six generation bits the seqlock had to spare (22 left, 2M writes to one slot before a stalled reader could
-  validate against a stale word).
-- **The slot tag carries all 13 hash bits.** A tag must never be 0, or an empty slot would pass the candidate compare;
-  that used to be a forced top bit, leaving 4096 distinct tags. Now only a zero tag is remapped, so 8191 stay distinct:
-  a foreign key in the probe path costs a key compare half as often, and S3-FIFO's ghost fingerprints collide half as
-  often.
-- **A shard's read line carries nothing a writer touches.** The table pointer and the move sequence share the first
-  cache line and the mutex opens the second, where before a `Set` taking the mutex invalidated the line every reader
-  loads on every probe. Mixed read/write workloads gain the most.
-- Lock-free reads stay exact across the compaction: a miss that overlapped moves is re-probed (a per-shard move
-  sequence on the line every read loads anyway), the third time under the shard mutex; hits are unchanged.
-  `Iterator` and `SaveTo` may skip an item a concurrent deletion slid toward its home - the same weak consistency the
-  documentation already claims for concurrent writes - and never yield a key that stays in the cache twice.
-- `WithPreallocationRatio` is now a pure memory-for-latency dial, and `WithGrowthThreshold` only means growth; the
-  rule that the ratio must stay below the threshold is gone.
-- **Meta words are written plainly under the shard mutex on amd64.** One writer holds the mutex, so a meta write
-  needs release ordering, not a locked instruction, and on amd64 a plain aligned store is release-ordered; a locked
-  write costs far more than a plain one, and an insert that evicts issues a dozen. Readers keep their
-  atomic loads and compare-and-swaps; the race detector, which cannot see the ordering argument, builds the atomic
-  variant (`internal/itemstore/write_generic.go`).
-- **The hot paths inline in user programs too.** A generic method of this package is compiled where it is
-  instantiated - in the user's module - and there a plain helper from `internal/itemstore` or `internal/eviction`
-  inlines only if its body is in this package's export data, which the compiler writes only for helpers it inlined
-  in this package's own build. Every such helper was a call in every program but this repository's own tests: the
-  tag, the overflow bucket and the empty test on every read; the meta-word and weight stores, the generation and
-  distance encoders, the queue node accessors and the policies' own helpers on every write. The package now
-  instantiates the cache once inside itself, which inlines them all there; the calls left go to functions that are
-  not inlinable anywhere. The instance adds nothing to a program's binary and little to this package's compile time.
-  Reads gain the most; `Set` and `Delete` gain less.
-- **What the compaction costs.** Against the tombstone design, reads are faster, and so is every mixed workload: the
-  shard read line no longer bounces on every `Set`. Writes that remove pay for a table that never holds a tombstone:
-  `Set` at capacity costs more, and so does a `Delete`+`Set` pair on one hot key, which the old design resurrected in
-  place. Filling a cache that is not preallocated costs more too, on the inserts and on the growth under them. A growth
-  after the first eviction carries the eviction queues over in order; one before it, while the queues hold nothing
-  but insertion order, queues the items in their new slot order and spares that pass. Hit rates are unchanged.
-- **A compaction reads its run once.** It used to walk the run again for every item it moved, sort its notes of the
-  run after the moves and rewrite the chain bits of the whole run. It now copies where the keys from the hole to the
-  first slot nothing is chained past are homed, picks the moves on that copy and clears only the chain bits the
-  deletion uncovered. An insert that evicts gets cheaper under every policy (the new single-threaded
-  `MemstashSetEvictSerial` shows it). The parallel `Set` and `Delete` benchmarks do not move: the shard mutex and cache
-  misses bound them. The test for a key past its group's edge is two compares on the position, so the overflow
-  counters inline into the moves.
-- **A probe asks about its group's edge only once a slot has sent it on.** Every probe loop tested for the edge of
-  the home group before it loaded a slot, the home slot included, and for some key types the compiler kept the
-  answer in a stack slot. The test now follows the chain-bit test, so a hit in the home slot never runs it. Serial
-  hits get cheaper, `uuid` and `string` keys among them, and so do `GetAndRefresh`, `BatchGetOrLoad` on a warm cache
-  and `BatchGetAndRefresh`. The parallel Zipf `GetHit` and `GetMiss` do not move.
-- **The aerospike, badger, goredis, mongo, pgx, rueidis and valkey adapters require Go 1.26.** The current releases
-  of go-redis, golang.org/x/*, grpc and OpenTelemetry need it. The core and the other adapters stay on Go 1.24.
-- **The core depends on xsync v4.** `WithStats` counters are `xsync.Counter` from v4 instead of v3. v4 needs Go 1.24,
-  like the core.
-- **Per-item write-back covers deletes.** `BatchingNone` sends every queued delete as its own `Delete`, and
-  `BatchingAdaptive` does so below half a buffer, as both already did for writes. Before, deletes always went through
-  `BatchDelete`. On memcached that is single calls on 8 goroutines per batch, so many write-back workers turned into
-  several times more concurrent calls than workers, each one past the client's idle pool dialing a connection.
+- **The in-memory level never holds a tombstone.** A deletion (`Delete`, an eviction, a lazy TTL removal)
+  compacts its probe run on the spot with backward-shift deletion. The table always holds what inserting the live keys
+  into a fresh table would: probe walks do not grow with churn, and dead slots never eat into the free space.
+- No same-size rebuilds. With nothing to purge, a preallocated table is never allocated again after `New`, and a
+  growable one only grows. `Stats.TableGrowths` counts the growths.
+- **The eviction queues run through the table.** Every slot carries its place in its queue, 8 bytes beside the item,
+  and a compaction that moves an item moves its place along. A policy names its victim by slot index. The cache
+  enqueues every new item and dequeues every departing one on the spot, so nothing is left for a sweep and no item can
+  become unevictable. `EvictionPolicy` is `Add`/`Remove`/`Reweigh`/`Evict`/`Bytes` (`Len`, `Sweep` and `Rebuild` are
+  gone), and a policy moves items between the `EvictionQueues` queues through `Items`. SIEVE drops its own node array.
+- The item's meta word carries its distance from its home slot, so a compaction reads the run it moves instead of
+  rehashing the keys it passes. It takes the six generation bits the seqlock had to spare, leaving 22.
+- The slot tag keeps all 13 hash bits: only a zero tag is remapped, where a top bit used to be forced. A foreign key in
+  the probe path costs a key compare half as often, and so do S3-FIFO ghost collisions.
+- A shard's read line carries nothing a writer touches. The mutex moved to the next cache line, so a `Set` no longer
+  invalidates the line every read loads.
+- Lock-free reads stay exact across a compaction: a miss that overlapped moves re-probes, the third time under the
+  shard mutex. `Iterator` and `SaveTo` may skip an item a concurrent deletion moved, and never yield a key twice.
+- `WithPreallocationRatio` sets how full a preallocated table sits at capacity and preallocates on its own.
+  `WithGrowthThreshold` sets the occupancy a growable table grows at.
+- **Meta words are written with plain stores under the shard mutex on amd64.** One writer holds the mutex, and on
+  amd64 a plain aligned store is already release-ordered, so it needs no locked instruction. Readers keep their atomic
+  loads and compare-and-swaps; race builds use the atomic variant.
+- The hot paths inline in user programs. A generic method is compiled in the user's module, where a helper from
+  `internal/` inlined only if this package's own build had inlined it. The package now instantiates the cache once
+  itself, so every hot helper inlines everywhere.
+- What the compaction costs. Reads and mixed workloads get faster. A `Set` at capacity, a `Delete`+`Set` on one hot
+  key and filling a cache that is not preallocated get slower. Hit rates are unchanged.
+- A compaction reads its run once and picks its moves on a copy of the homes, instead of walking the run again for
+  every move. An insert that evicts gets cheaper under every policy.
+- A probe checks its group's edge only once a slot has sent it on, so a hit in the home slot never does.
+- The aerospike, badger, goredis, mongo, pgx, rueidis and valkey adapters require Go 1.26, as the current releases of
+  their clients do. The core and the other adapters stay on Go 1.24.
+- The core depends on xsync v4, for the `WithStats` counters.
+- Per-item write-back covers deletes. `BatchingNone`, and `BatchingAdaptive` below half a buffer, send every queued
+  delete as its own `Delete`, as they already did writes.
 
 ### Fixed
 
-- **A key in a table with one free slot left could be lost to reads.** A table that cannot grow, under a policy that
-  evicts nothing, fills up to its last free slot, and a key can then walk around the whole table and settle in its
-  home group, before its home. The group's overflow counters counted only the keys in another group, so a probe
-  stopped at the group's edge: `Get` missed the key, and `Delete` left it in place until a `Set` overwrote it. Such a
-  key is counted now. `TestFullTableKeepsASlotFree` caught it as an intermittent failure.
-- **A lock-free read could return a torn multi-word value on arm64 and other weakly ordered CPUs.** An in-place
-  overwrite of a value wider than a word marks the item's generation odd, writes the value, then marks it even; the
-  odd mark is an atomic store, which on arm64 is a release (`STLR`) and orders nothing after it, so the value stores
-  could become visible first, and a reader copying in that window validated against the old, even generation. The
-  odd mark is now followed by the same acquire+release pivot the read side already uses. amd64 is unaffected - its
-  stores never pass one another.
-- **A lock-free read could return a value that an in-place overwrite wrote with several stores, half old and half
-  new.** The overwrite skipped the generation bracket for any value of up to 8 bytes, and size does not say how many
-  stores gc emits. On 386, arm and mips an 8-byte string, interface, int64 or float64 is two stores, so a reader could
-  pair one string's pointer with another's length, and 0.9.8 on 386 did return such strings. On every
-  platform a `struct{A, B uint32}` is stored field by field, and so is a `struct{_ [0]uint64; A, B uint32}`, which
-  is word-sized and word-aligned like a `uint64`. `New` now classifies the value type once with reflect: only a
-  single scalar no wider than a word, possibly wrapped in one-element arrays and structs whose other fields take no
-  space, skips the bracket. Bracketing every overwrite instead would slow down the overwrite of a plain `uint64`; the
-  classified path is no slower than before.
-- **32-bit platforms are supported again.** On a 32-bit int the growth test overflowed past ~524k items in a shard,
-  and the shard then grew on every insert until it ran out of memory. It is
-  computed in int64 now, the table size cap fits an int, and the shard's cache-line padding follows the word size.
-  New CI jobs run the suite on 386 and arm64, under qemu on s390x and riscv64, and vet every other port.
-- **An in-place overwrite of a pointer value had no release ordering off amd64.** A reader on arm64 could get the new
-  pointer and still see the old contents of what it points to. The overwrite now issues the same acquire+release
-  pivot the seqlock uses before the store.
-- **A write-back write could overtake the writes its key had already queued.** When a worker's buffer was full, the
-  write ran synchronously on the caller's goroutine, ahead of everything still in the queue: `Set(v1)`, `Set(v2)`,
-  `Set(v3)` could leave `v2` in L2, and a `Delete` could land before the queued `Set` that resurrected the key. A write
-  that finds the buffer full now waits for room, so the writes of one key reach L2 in order; after `Close` it still
-  runs synchronously. `OnL2Error` receives write-back errors on the worker goroutine and must not write to the cache.
-  The callers no longer write to L2 beside the pool, so a worker that falls behind makes up for it itself: once its
-  buffer holds more than a batch it sends up to four batches at once, split by key so that the writes of one key
-  never travel side by side. While the pool keeps up, a worker has one batch in flight, as before. A panic in
-  `OnL2Error` now costs the reports of its own batch only: the tasks the worker took along with it are still sent.
-- **`sql_adapter.DefaultTable` and `tarantool_adapter.DefaultSpace` were `"github.com/zakonnic/memstash_cache"`.** A
-  module-path rename had rewritten both names, so an adapter built with an empty table or space name failed on every
-  call (a SQL syntax error, a missing space). Both are `"memstash_cache"` again, the name the docker setup and the
-  documented schema create.
-- **A batch that repeated a key could leave an older value in L2.** Write-back coalesces a key's queued writes into
-  one `BatchSet`, so a hot key can appear in it twice, and `L2Cache.BatchSet` relied on the adapter to keep the
-  last value. The memcached adapters (gomemcache, mc, rainycape) sent the batch as concurrent `Set`s, Aerospike ran it
-  in no fixed order outside inline processing, Tarantool's connection shards and redispipe on a cluster could send
-  its commands out of order: any of them could land `v1` after `v2`. They now collapse a repeated key to its last
-  value first (the new `l2.LastValues`), and the `BatchSet` contract says a key may repeat.
-- **A batch loader that reordered its keys handed other callers the wrong values.** The keys a `BatchGetOrLoad` or
-  `BatchGetAndRefresh` loader receives may be the very list the flights were registered from, and the loaded values
-  were matched to the flights by position in it: a loader that sorted its keys for the query, as most do, answered the calls
-  waiting on `a` with the value of `c`. Flights are now matched by their own key. A loader may reorder the slice; for
-  `BatchGetOrLoad` that reorders the caller's `keys`, which it may alias.
-- **The Badger adapter's `Get` could hand out memory Badger later unmaps.** It decoded the value inside
-  `item.Value`, whose slice points into Badger's own memory and is valid only for the transaction; with a
-  pass-through codec (`NewBytes`, `BytesCodec`) that slice went into the first level, and for a value in the
-  value log a later GC or `Close` unmapped it - the next read of the cached value crashed the process. `Get` copies
-  the value first, as `BatchGet` already did.
-- **The rueidis and valkey adapters panicked on a one-master cluster.** They told a single server from a cluster by
-  `len(client.Nodes()) <= 1`, and a cluster client with one master (a single-shard cluster, a local node with
-  `cluster-enabled yes`) has one node: the adapters then took the ordered-MGET and dedicated-pipeline paths, where
-  the client panics on keys from different slots - in `BatchGet`, in every `BatchSet` with a TTL, and in large
-  `BatchDelete`s. They now ask the client's `Mode()`.
-- **`NewBatchLoadable`'s `GetOrLoad` cached a zero value for a key the loader did not return.** Its single-key
-  loader turned "the batch loader omitted the key" into `(zero, nil)`, which `GetOrLoad` stored in memory and wrote
-  to L2, where it outlived restarts; `GetAndRefresh` did the same. The new `ErrKeyNotFound` is how a loader says the
-  source has no such key: nothing is cached and `GetOrLoad` returns it. `NewBatchLoadable` answers an omitted key
-  with it, `NewLoadable`'s synthesized batch loader leaves a key its loader reports that way out of the batch instead
-  of failing it, and a `GetOrLoad` waiting on a batch load that omitted its key gets it instead of a zero value.
-- **`NewWithConfig` wrote into the caller's `Config`.** A budget filled in `CostFunc` and moved itself into
-  `MemoryCapacity`, and a `PreallocationRatio` set `PreallocateMap`, so a second cache built from the same `Config`
-  failed with `ErrBudgetAndCapacity`. The constructor now works on its own copy.
-- **An out-of-range `WritePolicy` passed validation and made `Set` panic.** `WritePolicy(3)` built a cache with no
-  write-back workers that still took the write-back path, dividing by zero workers on the first `Set`, while
-  `Delete` silently skipped L2; an unknown `WriteBackBatching` quietly behaved as `BatchingFull`. The constructor now
-  rejects both, with the new `ErrUnknownWritePolicy` and `ErrUnknownBatching`.
-- **A write-back batch that panicked in the adapter was reported for one key, sometimes the wrong one, and could
-  take the next task down with it.** The worker recovered once per drain with the key of the drain's first task:
-  `OnL2Error` heard of that key only - one that may already have reached L2 - and never of the rest of the failed
-  batch, and a task taken off the queue to end the batch's run, a `Delete` for instance, was never sent. Every L2 call
-  of the write-back now recovers on its own: the batch's keys all get the `ErrPanic`, and the worker goes on with the
-  task it already holds.
-- **A panic while a `GetBatched` worker filed a read took the worker down and left the reads it held waiting.** The
-  memory check a worker makes before queuing a key for L2 can reclaim an expired item, and an `OnDeletion` handler
-  that panicked there escaped the batch's recovery: the reads already collected and the one in hand were never
-  answered, and the pool lost a worker for good - with all of them gone, every `GetBatched` miss waited for its
-  context. The recovery now covers the whole batch: its callers get `ErrPanic` and the worker goes on.
-- **`BatchGetOrLoad` could load a key that a concurrent load had just stored.** A flight that ended between the
-  batch's memory pass and its claim on the key left the key in memory with its flight gone, so the batch owned it
-  anew and sent it to L2 and the loader again. It now checks memory once more for the keys it owns, as `GetOrLoad`
-  always did, and loads only those still missing.
-- **`DeletionCause` values shifted with unrelated constants.** The causes shared an `iota` block with the
-  `ItemDead`/`ItemChanceMask`/`ItemInMainQueue` bits, so they were 2..6 in 0.9.8 and 3..7 once a bit was added, and a
-  cause stored or exported as a number meant something else after an upgrade. They have their own block now and stay
-  at 1..5 (`CauseInvalidation` to `CauseOverflow`); the zero value is no cause.
-- **A "forever" TTL overflowed.** `WithTTL(math.MaxInt64)` rounded the TTL up past the int64 range, and every item
-  was expired the moment it was written; `SetWithTTL` with such a lifetime handed L2 a negative TTL;
-  `l2.RedisMillis` turned it into one millisecond and `l2.MemcacheExpiration` into a negative expiration, both of
-  which expire the key at once; the Aerospike adapter wrapped TTLs of 2^32 seconds or more into its reserved values
-  (keep the old TTL, the namespace default). The roundings no longer overflow, a TTL is capped at ~146 years, and
-  the Aerospike adapter stores anything past its range as "never expire".
-- **`LoadFrom` with `LoadWithTTL` and `LoadToL2` gave L2 a different lifetime than memory.** Memory capped a
-  restored item at the loading cache's TTL, L2 got the uncapped remainder from the snapshot - an hour where memory
-  kept a minute - and a cache without a TTL kept the item forever while L2 expired it. L2 now gets the lifetime
-  memory ended up with, rounded and capped the same way, and none from a cache without a TTL.
-- **A call waiting on another's load got that caller's cancellation.** `GetOrLoad` and `BatchGetOrLoad` coalesce
-  concurrent loads of a key, and the load runs under the context of whoever started it: when that context was
-  canceled or timed out, every call waiting on the key received `context.Canceled` or `DeadlineExceeded`, though its
-  own context was live. A waiter now loads the key itself when the load failed after the starter's context ended and
-  its own context is fine. An error the loader hits on its own, its own timeout included, still reaches every waiter
-  once.
-- **L2 items with a TTL expired up to a second early in the SQL, pgx, Badger, DynamoDB and Tarantool adapters.**
-  They stored the deadline as `time.Now().Add(ttl).Unix()`, rounded down, and read it back as expired once the
-  clock's second reached it: every item lived somewhere in (ttl-1s, ttl], and one with a TTL under a second was
-  usually gone before anyone read it. The new `l2.ExpiresAt` rounds the deadline up, and all five use it.
-- **The redigo adapter failed every single command on a pool whose connections have no `DoContext`.** Its fallback
-  to the plain `Do` tested the pooled connection, which always has `DoContext`, and never the connection that
-  connection wraps: with a `Dial` that wraps the connection for tracing or metrics, `Get`, `Set`, `Delete` and the
-  MGET/MSET batch paths all returned "connection does not support ConnWithContext". The fallback now runs on the
-  answer redigo gives for exactly that case.
-- **One failed item cancelled the rest of an L2 batch write in the adapters built on the `l2` batch helpers.**
-  `l2.BatchSetConcurrent`/`BatchDeleteConcurrent` (gomemcache, mc, rainycape) and `BatchSetSequential`/
-  `BatchDeleteSequential` (sql, aerospike fallbacks) stopped at the first error. A write-back batch carries up to 128
-  unrelated keys, so one value too large for memcached, or one illegal key, cost every other write in it - and a
-  lost delete leaves a key in L2 that the cache already dropped. Every item is tried now and the failures come back
-  joined; only a canceled context ends the run early. `BatchGet*` still stop at the first error.
-- **The rainycape adapter's `BatchGet` turned every failure into misses.** The client's `GetMulti` drops the errors
-  of its per-server reads - an unreachable server, a batch that runs past the connection's deadline, an illegal
-  key - and just answers with fewer items, so a failing memcached read as an empty one: no error, no `OnL2Error`,
-  and the loaders ran for everything. `BatchGet` now asks again, with `Get`, for every key missing from the
-  `GetMulti` answer: a `Get` reports its error, so a failure no longer reads as a miss. A batch the server answers
-  in full is still one round trip; the keys it does not hold cost a `Get` each on top.
-- **The memcached adapters failed on keys memcached rejects.** A key with a space or a control character, or longer
-  than 250 bytes, made every gomemcache call on it fail with `ErrMalformedKey` - a `Get` included, which should have
-  been a miss - and one such key failed a whole `GetMulti`, so every caller sharing a `GetBatched` batch with it got
-  the error; mc and rainycape failed on the long ones. The new `l2.MemcacheKey` stores such a key under a stand-in
-  derived from its SHA-256, and all three adapters use it, so they agree on it and any key reads back.
-- **Keys and values some backends reject failed whole batches.** Badger refuses the empty key, keys with its internal
-  `!badger!` prefix and keys over 65000 bytes; DynamoDB refuses an empty partition key and one over 2048 bytes, and a
-  nil value, which its SDK sends as `{"B":null}`; Tarantool's varbinary field refuses the nil a `[]byte(nil)` encodes
-  to. Each failed on its own and took down the batch around it - every other key of a write-back batch, a DynamoDB
-  chunk of 25. The Badger and DynamoDB adapters now store such keys under `l2.HashedKey`, the stand-in the memcached
-  adapters already use (`l2.MemcacheKey`), and a nil value goes out as an empty one.
-- **The DynamoDB adapter gave up on a throttled batch after one immediate retry.** Unprocessed items were re-sent
-  once, straight away, and the batch then failed: under throttling that lost the write - or the delete, leaving a
-  key in L2 the cache had dropped - and a `BatchGet` whose answer passes the service's 16 MB page limit failed every
-  time, since each page used up the retry. A round that makes progress now goes again at once, and one that does not
-  waits first, doubling from 25 ms with jitter and within the context, five times in a row at most.
-- **`Stats()` returned a live view, not the snapshot it was documented as.** Copying the struct copied the counters'
-  shared stripes, so a value taken earlier kept counting and two of them could not be subtracted, and its methods on
-  a pointer receiver made `c.Stats().Hits()` fail to compile. `Stats` is now a plain snapshot with value-receiver
-  methods, read once from the counters, whose own shape - and the read and write paths - is unchanged.
-- **`Close` did not wait for `GetAndRefresh` loads.** They ran on goroutines of their own with a context stripped of
-  cancellation, so one started before `Close` wrote to memory and L2 - and could call `OnDeletion`, `OnL2Error` and
-  `OnPanic` - after `Close` had returned, against an L2 client the caller had shut down by then. `Close` now cancels
-  their context and waits for them; a refresh that would start once `Close` has begun does not start.
-- **A shard table could grow, or be preallocated, to 2^32 slots, whose count wrapped to 0 in the table's uint32
-  size.** The table then read its chunk directory as items. It takes a single shard of over 3.2 billion items to get
-  there; the largest table is now the last whole chunk below 2^32.
-- **`Wait` could block forever, and could not tell a finished checkpoint from a cache that was closing.** A stuck L2
-  holds the write-back queue - and with it the checkpoint - up indefinitely, and `Wait` took no context; it also
-  returned silently when `Close` began. It is now `Wait(ctx) error`: nil once everything enqueued before the call
-  reached L2, `ctx.Err()` when the context ends first, and the new `ErrClosed` once the cache is closing. This changes
-  its signature.
-  own context was live. A waiter now loads the key itself when the error is a context error and its own context is
-  fine.
-- **A value read from L2 or loaded could overwrite a newer `Set`.** `Get`, `BatchGet`, `GetBatched`, `GetOrLoad`
-  and `BatchGetOrLoad` put what L2 or the loader returned into memory; a `Set` that landed while that read was out
-  was overwritten by the older value, which then stayed in memory until its TTL or eviction while L2 held the new
-  one - and a loaded value went to L2 as well, over the `Set`. Such a value now only fills a key that memory holds no
-  live value for, and a loaded value that loses that way does not go to L2 either. The call that read it still
-  returns the value it read, as of that read. A value that loses is not counted in `Sets()`, replaces nothing (no
-  `CauseReplacement`) and leaves the TTL of the one in memory alone. `GetAndRefresh` still replaces: that is its job.
-- **A table that could not grow was filled to the last slot and then written past its end.** `EvictionPolicy.Evict`
-  may answer "nothing to evict", and a custom policy that did so kept the shard over capacity; a preallocated table
-  (or one at the size cap) then filled up, and the next new key walked past the last slot and was published outside
-  the table - memory corruption, or an index panic. A table that can grow now grows before its last free slot is
-  needed, whatever the growth threshold; one that cannot drops a new key silently while only one free slot is left,
-  so every probe still has an empty slot to end at. An overwrite or a delete works as before.
-- **A write could be expired at birth once every 2^18 clock units.** An expiry offset that wrapped onto 0 ("no TTL")
-  was moved to 1, one unit later than asked. For a lifetime at the cap - a cache TTL of 131070-131071 s, or any
-  `SetWithTTL` of 36 hours and more on a 1 s-unit cache - that put the offset past `ExpireMax`, which reads as
-  expired: every such write during that one clock unit (once every ~73 hours at the 1 s unit) was lost at once. The
-  wrap now moves the offset one unit earlier.
-- **`RefreshTTLOnGet` skipped hits served by the slow read paths.** A read that overlaps a deletion's compaction
-  re-probes, and after a second overlap reads under the shard mutex; both fallbacks granted the reference but left the
-  expiry alone, so under steady deletes a hot key could expire while being read. Every hit path now extends the TTL.
-- **A NaN key could lose other keys.** A key unequal to itself (a NaN float, or a struct or interface holding one)
-  hashes differently on every call. Each `Set` stored another copy nobody could read; worse, when such an item sat
-  far enough from its home that the table rehashes it to find the home, its removal decremented the overflow counter
-  of a random group, and a live key there became unreachable. Such a key no longer enters memory, and its load is not
-  registered for coalescing either, where a full bucket's overflow map could never delete it. Whether the key type
-  can hold a NaN at all is decided once, at construction.
-- **An expired item nothing read or evicted came back to life.** Expiry offsets sit on an 18-bit wrapping scale and
-  expired items were removed only by a read that found them or by eviction, which runs only over capacity. An item
-  left alone for `ExpireMax+2` clock units past its deadline (about 36 hours at the 1 s unit every TTL up to 36 hours
-  gets) read as live again: `Get` served it, `Iterator` and `SaveTo` yielded it, and it flipped between dead and live
-  every 36 hours from then on. The clock goroutine now sweeps each table for expired items, a small slice per clock
-  unit: a lap takes under 32768 units, a quarter of the wrap. A process suspended for longer than the wrap can still
-  meet such an item: 18 bits cannot tell.
-- **A value too heavy for memory vanished from it without a trace.** An item heavier than its shard's share of
-  `MemoryCapacity`/`MemoryBudget` (the limit is per shard, not per cache) was not stored, and for a new key nothing
-  said so: no handler call, counted in `Sets()`, while every `Get` fetched it from L2, promoted it and dropped it again.
-  `Stats.Rejected()` now counts the values memory did not take - these, and new keys refused by a table that cannot
-  grow - and the capacity docs name the per-shard limit. `OnDeletion` still hears only about values that were in
-  memory: the refused one is the caller's.
-- **One value the codec rejected failed a whole L2 batch, and the error did not say which.** Every adapter returned
-  from `BatchGet` at the first stored value that did not decode, and from `BatchSet` at the first value that did not
-  encode - go-redis then sent nothing at all, redigo and Tarantool part of it. One bad entry in L2 (a changed value
-  type, a corrupt write) failed every batch it was in, for every key; through `GetBatched` it failed unrelated
-  concurrent reads, and a write-back batch lost the writes of up to 127 other keys. An adapter now leaves such an
-  item out, carries on with the rest, and reports it as a `KeyError` naming the key (`l2.KeyErr`), joined with any
-  others; Aerospike does the same for a single record's failure. The cache uses what a `BatchGet` did read alongside
-  its error, and fails or reports only the keys a batch error names: a `GetBatched` caller whose key L2 read gets the
-  value, one whose key is absent gets a plain miss, and `OnL2Error` hears only about the keys that failed. An error
-  that names no key still concerns every key of the batch. **Contract change for adapters outside this repository:**
-  values returned alongside a `BatchGet` error are now used, so return only keys that were read.
-- **A value read from L2 or loaded could bring back a key deleted while it was read.** `Get`, `BatchGet`,
-  `GetBatched`, `GetOrLoad`, `BatchGetOrLoad` and `GetAndRefresh` stored what L2 or the loader returned even when a
-  `Delete` of that key landed while the read was out: the deleted value came back into memory and stayed until its
-  TTL or eviction, while L2 no longer had it (a stress test resurrected about one in 2000 racing reads). Each shard now
-  counts Deletes in eight stripes; a read notes its key's count before it goes out and stores its answer only while
-  the count holds. A write-through `Delete` clears L2 before memory, so a read that starts after it cannot find the old
-  value there either. With WriteBack the L2 delete is asynchronous: a read that reaches L2 before the worker does can
-  still bring the old value back into memory. The count costs a `Delete` one atomic add, paid only once the cache
-  can fill at all: from the start with an L2, from the first load without one.
-- **An adapter that answered a key twice inflated the L2 counters.** `BatchGet` and `BatchGetOrLoad` counted every
-  item the adapter returned as an L2 hit, so a duplicate or unasked item made `Gets()` exceed the keys read. The
-  `L2Cache.BatchGet` contract now says so explicitly - only keys asked for, each at most once - and the counters no
-  longer trust the answer's length: `BatchGetOrLoad` counts by key, `BatchGet` never more than the keys it asked for.
-- **A custom eviction policy that named a bad victim could crash the process or corrupt its shard.** The cache
-  trusted the index `Evict` returned: one past the table was dereferenced unchecked (a fault that kills the process,
-  or a panic under the shard mutex that leaves the shard locked for good), and an empty slot was killed as if it held
-  an item, so the shard undercounted its items and held more than its capacity. An index that names no live item now
-  ends the eviction round, as "nothing to evict" does.
-- **A corrupt snapshot could make `LoadFrom` allocate a gigabyte, and a long load could not be stopped.** A chunk
-  length is bounded at 1 GiB, and `LoadFrom` allocated whatever the length claimed before reading a byte: a
-  23-byte truncated file cost 1 GiB, two chunks per item twice that. Chunks past 64 KiB now grow as their bytes
-  arrive. `ctx` now ends a load between items (before, it reached only the L2 writes), and an L2 write error comes
-  back wrapped; the doc names every reason a load stops early, the items before it staying in the cache.
-- **Three options did not do what their docs said.** `WithPreallocationRatio(0)` was documented to preallocate at
-  the default ratio but did not preallocate at all; a `GrowthThreshold` below 1/8192 rounded to zero and grew the
-  table on every insert, towards gigabytes; and a negative `ShardsCount`, `GhostSize` or buffer size quietly meant
-  the default while negative worker counts were rejected. The ratio option now preallocates by itself, the growth
-  line never rounds below one item in 4096 slots, and negative values are rejected (`ErrBadShardsCount`,
-  `ErrBadGhostSize`, `ErrBadBufferSize`). `RefreshTTLOnGet` without a TTL is documented as having nothing to extend.
-- **The load generator's hit rates were totals since start, not per interval.** `hit_rate_pct`, `mem_hit_rate_pct`
-  and `l2_hit_rate_pct` came straight from the cache's counters while `ops_per_sec` and the CPU figures covered the
-  interval since the previous line, and the snapshot kept for that window went unused; a shift in the working set
-  showed up in the rates only as a slow drift. The rates now cover the interval too.
-- **The load generator's stats counted its own probe.** The timing probe runs through the cache's own counters, half
-  of its reads on keys nothing writes, so on a coarse clock it skewed the hit rates and totals of slow scenarios. The
-  probe's window is now cut out of every figure taken from those counters; `ops_per_sec` and `errors_total` still
-  cover the whole interval.
-- **A load generator worker that stalled lost those ops for good.** A ticker drops the ticks a busy worker misses, so
-  `ops_per_sec` could fall short of the target with capacity to spare. A worker now catches up on up to a second of
-  backlog, and the start line carries the target as `target_rps`. An L1-only scenario no longer logs an `l2_client`.
-- **The release targets left the load generator behind, and `release-check` passed without asking origin.** The
-  importable `benchmarks/load_generator` module was neither tagged nor moved to the released core by
-  `make require-core`, so after a release it would pin v0.9.7 forever; it is now tagged with every release and
-  required at the same version as its core and adapters. `release-check` took "cannot reach origin" for "core not
-  pushed yet" and passed; it now fails. `make push` refuses to run from any branch but main.
+- A lock-free read could return a torn multi-word value on arm64 and other weakly ordered CPUs. The seqlock's odd
+  mark is a release store and did not keep the value stores after it; it is now followed by the pivot the read side
+  uses. amd64 is unaffected.
+- **A lock-free read could return a value half old and half new.** An in-place overwrite skipped the seqlock for
+  values up to 8 bytes, but on a 32-bit platform an 8-byte string, interface or int64 is two stores, and a two-field
+  struct is stored field by field everywhere. `New` now classifies the value type once: only a single scalar store
+  skips the seqlock.
+- An in-place overwrite of a pointer value had no release ordering off amd64: a reader could get the new pointer and
+  the old contents of what it points to.
+- **A write-back write could overtake the writes its key had already queued.** A write that found its worker's buffer
+  full ran on the caller's goroutine, ahead of the queue, so L2 could end with an older value or a resurrected key. It
+  now waits for room. A worker that falls behind sends up to four key-split batches at once. `OnL2Error` runs on the
+  worker and must not write to the cache.
+- `sql_adapter.DefaultTable` and `tarantool_adapter.DefaultSpace` were `"github.com/zakonnic/memstash_cache"`, so an
+  adapter left on the default failed on every call. Both are `"memstash_cache"` again.
+- **A batch that repeated a key could leave an older value in L2.** Write-back coalesces a hot key's writes into one
+  `BatchSet`, and the memcached adapters, Aerospike, Tarantool and redispipe on a cluster could apply them out of
+  order. They keep the last value now (`l2.LastValues`), and the `BatchSet` contract allows repeats.
+- **A batch loader that reordered its keys handed other callers the wrong values.** Loaded values were matched to the
+  waiting calls by position, so a loader that sorted its keys answered the call for `a` with the value of `c`. They are
+  matched by key now.
+- **The Badger adapter's `Get` could hand out memory Badger later unmaps.** With a pass-through codec the cached value
+  pointed into Badger's memory, and reading it after a value-log GC or `Close` crashed the process. `Get` copies the
+  value.
+- **The rueidis and valkey adapters panicked on a one-master cluster.** They took it for a single server and sent
+  cross-slot batches. They now ask the client's `Mode()`.
+- `NewBatchLoadable`'s `GetOrLoad` cached a zero value, in memory and in L2, for a key the loader did not return. The
+  new `ErrKeyNotFound` is a loader's answer for a missing key: nothing is cached, and `GetOrLoad` returns it.
+- `NewWithConfig` wrote into the caller's `Config`, so a second cache built from it failed.
+- An out-of-range `WritePolicy` passed validation and made `Set` panic, and an unknown `WriteBackBatching` acted as
+  `BatchingFull`. Both are rejected now (`ErrUnknownWritePolicy`, `ErrUnknownBatching`).
+- A write-back batch that panicked in the adapter was reported for one key, sometimes the wrong one, and could lose
+  the next task. Every key of the batch now gets the `ErrPanic`, and nothing else is lost.
+- A panic while a `GetBatched` worker filed a read killed the worker and left its callers waiting. They get `ErrPanic`
+  now, and the worker goes on.
+- `BatchGetOrLoad` could load again a key that a concurrent load had just stored.
+- `DeletionCause` values shifted with unrelated constants: they were 2..6 in 0.9.8. They have their own block now and
+  stay at 1..5; the zero value is no cause.
+- A "forever" TTL (`WithTTL(math.MaxInt64)`) overflowed and expired every item at once, and the L2 TTL conversions
+  and the Aerospike adapter overflowed the same way. A TTL is capped now, and Aerospike stores anything past its range
+  as "never expire".
+- `LoadFrom` with `LoadWithTTL` and `LoadToL2` gave L2 a different lifetime than memory. L2 now gets the one memory
+  ended up with.
+- A call waiting on another's load got that caller's cancellation. A waiter whose own context is live now loads the
+  key itself.
+- L2 items with a TTL expired up to a second early in the SQL, pgx, Badger, DynamoDB and Tarantool adapters, which
+  rounded the deadline down. `l2.ExpiresAt` rounds it up.
+- The redigo adapter failed every single command on a pool whose connections have no `DoContext`. The fallback to
+  `Do` works now.
+- One failed item cancelled the rest of a batch write in the `l2` batch helpers (gomemcache, mc, rainycape, and the
+  SQL and Aerospike fallbacks). Every item is tried now, and the failures come back joined.
+- The rainycape adapter's `BatchGet` turned every failure into misses, since the client's `GetMulti` drops its
+  errors. Keys missing from its answer are read again with `Get`, which reports them.
+- The memcached adapters failed on keys memcached rejects: a space, a control character, over 250 bytes.
+  `l2.MemcacheKey` stores such a key under a hashed stand-in.
+- Keys and values some backends reject failed whole batches: Badger's and DynamoDB's key limits, a nil value in
+  DynamoDB and Tarantool. Such keys go under `l2.HashedKey`, and a nil value goes out as an empty one.
+- The DynamoDB adapter gave up on a throttled batch after one immediate retry, and a `BatchGet` past the service's
+  page limit always failed. It retries with backoff now.
+- `Stats()` returned a live view whose copies kept counting. It is now a snapshot with value-receiver methods.
+- `Close` did not wait for `GetAndRefresh` loads, which could write to memory and L2 after it returned. It now cancels
+  and waits for them.
+- A shard table could grow to 2^32 slots, whose count wrapped to 0 in the table's uint32 size. The largest table is
+  now the last whole chunk below 2^32.
+- `Wait` could block forever and could not tell a finished checkpoint from a closing cache. It is now
+  `Wait(ctx) error`, returning `ctx.Err()` or the new `ErrClosed`. This changes its signature.
+- **A value read from L2 or loaded could overwrite a newer `Set`.** It now fills only a key memory holds no live value
+  for, and a loaded value that loses does not go to L2 either. `GetAndRefresh` still replaces.
+- A write could be expired at birth once every 2^18 clock units: an expiry offset that wrapped onto 0 moved one unit
+  later, past the end of the scale. It now moves one unit earlier.
+- A NaN key could lose other keys. Each `Set` stored an unreachable copy, and removing one could decrement the
+  overflow counter of another key's group. Such a key no longer enters memory.
+- **An expired item nothing read or evicted came back to life** once the 18-bit expiry scale wrapped, about 36 hours
+  past its deadline at the 1 s unit. The clock goroutine now sweeps the tables for expired items.
+- A value too heavy for memory vanished from it without a trace. `Stats.Rejected()` now counts the values memory did
+  not take, and the docs name the per-shard limit.
+- One value the codec rejected failed a whole L2 batch, without saying which. An adapter now skips such an item and
+  reports it as a `KeyError`, and the cache fails or reports only the keys a batch error names. For adapters outside
+  this repository: values returned alongside a `BatchGet` error are now used, so return only keys that were read.
+- **A value read from L2 or loaded could bring back a key deleted while it was read.** A read now stores its answer
+  only if no `Delete` came in between. With write-back, a read that reaches L2 before the queued delete can still
+  bring the value back.
+- An adapter that answered a key twice inflated the L2 counters. They count by key now, and the `BatchGet` contract
+  says each key at most once.
+- A custom eviction policy that named a bad victim could crash the process or corrupt its shard. Such an index now
+  ends the eviction round.
+- A corrupt snapshot could make `LoadFrom` allocate a gigabyte, and `ctx` did not stop a long load. Large chunks grow
+  as their bytes arrive, and `ctx` ends a load between items.
+- Negative `ShardsCount`, `GhostSize` and buffer sizes quietly meant the default, while negative worker counts were
+  rejected. They are rejected now (`ErrBadShardsCount`, `ErrBadGhostSize`, `ErrBadBufferSize`).
+- The load generator's hit rates were totals since start. They cover the interval since the previous line now.
+- A load generator worker that stalled lost those ops for good. It catches up on up to a second of backlog, and the
+  start line carries `target_rps`.
+- The release targets left the load generator behind. It is now tagged with every release and requires the core of
+  the same release, and `release-check` fails when it cannot reach origin.
 
 ## [0.9.8] - 2026-08-13
 
@@ -554,6 +344,8 @@ Rearchitected core, pluggable eviction, faster L2 adapters.
 
 First tagged release.
 
+[0.10.0]: https://github.com/zakonnic/memstash/compare/v0.9.8...v0.10.0
+[0.9.8]: https://github.com/zakonnic/memstash/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/zakonnic/memstash/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/zakonnic/memstash/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/zakonnic/memstash/compare/v0.9.4...v0.9.5
