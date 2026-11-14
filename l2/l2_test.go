@@ -51,6 +51,9 @@ func TestResolveKeyFunc(t *testing.T) {
 }
 
 func TestMemcacheExpiration(t *testing.T) {
+	isTimestamp := func(t *testing.T, got int32) {
+		assert.GreaterOrEqual(t, int64(got), time.Now().Unix(), "expected a unix timestamp, not a relative count")
+	}
 	cases := []struct {
 		name string
 		ttl  time.Duration
@@ -60,17 +63,13 @@ func TestMemcacheExpiration(t *testing.T) {
 	}{
 		{name: "zero keeps no-expiration", ttl: 0, want: 0},
 		{name: "negative is treated as no-expiration", ttl: -time.Second, want: 0},
-		{name: "sub-second rounds up to one second", ttl: 300 * time.Millisecond, want: 1},
-		{name: "whole seconds pass through", ttl: 90 * time.Second, want: 90},
-		{name: "exactly 30 days stays relative", ttl: 30 * 24 * time.Hour, want: 30 * 24 * 60 * 60},
+		{name: "sub-second rounds up and gains a second", ttl: 300 * time.Millisecond, want: 2},
+		{name: "whole seconds gain a second", ttl: 90 * time.Second, want: 91},
+		{name: "30 days less a second stays relative", ttl: 30*24*time.Hour - time.Second, want: 30 * 24 * 60 * 60},
+		// Sent as a relative count, 30 days plus the extra second would read as a 1970 timestamp: expired at once.
+		{name: "exactly 30 days becomes an absolute unix timestamp", ttl: 30 * 24 * time.Hour, check: isTimestamp},
+		{name: "beyond 30 days becomes an absolute unix timestamp", ttl: 31 * 24 * time.Hour, check: isTimestamp},
 		{name: "forever clamps to the int32 horizon", ttl: math.MaxInt64, want: math.MaxInt32},
-		{
-			name: "beyond 30 days becomes an absolute unix timestamp",
-			ttl:  31 * 24 * time.Hour,
-			check: func(t *testing.T, got int32) {
-				assert.GreaterOrEqual(t, int64(got), time.Now().Unix(), "expected a unix timestamp, not a relative count")
-			},
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

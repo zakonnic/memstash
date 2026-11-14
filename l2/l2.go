@@ -371,14 +371,15 @@ func (stringCodec) Unmarshal(data []byte) (string, error) { return string(data),
 // anything larger is interpreted by the server as an absolute unix timestamp.
 const memcachedRelativeMax = 30 * 24 * 60 * 60
 
-// MemcacheExpiration converts a TTL to the memcached expiration field: 0 stays "no expiration", sub-second TTLs are
-// rounded up to one second (the protocol resolution), and TTLs beyond 30 days are encoded as an absolute unix
-// timestamp as the protocol requires (clamped to the int32 horizon, year 2038).
+// MemcacheExpiration converts a TTL to the memcached expiration field: 0 stays "no expiration", anything else is the
+// TTL in whole seconds rounded up, plus one. memcached's clock ticks once a second, so an item stored for N seconds
+// lives somewhere in (N-1, N], and the extra second keeps it for at least ttl. Past 30 days the value is an absolute
+// unix timestamp, as the protocol requires (clamped to the int32 horizon, year 2038).
 func MemcacheExpiration(ttl time.Duration) int32 {
 	if ttl <= 0 {
 		return 0
 	}
-	secs := int64(ttl / time.Second) // rounded up below; ttl+time.Second-1 would overflow near math.MaxInt64
+	secs := int64(ttl/time.Second) + 1 // rounded up below; ttl+time.Second-1 would overflow near math.MaxInt64
 	if ttl%time.Second > 0 {
 		secs++
 	}

@@ -111,6 +111,9 @@ the loading layers and the adapters.
   key itself.
 - L2 items with a TTL expired up to a second early in the SQL, pgx, Badger, DynamoDB and Tarantool adapters, which
   rounded the deadline down. `l2.ExpiresAt` rounds it up.
+- The memcached adapters' items expired up to a second early too, and one with a TTL of a second or less could be
+  gone right after the write. memcached counts a relative expiration on its own clock, which ticks once a second, so N
+  seconds last somewhere in (N-1, N]. `l2.MemcacheExpiration` adds a second to the rounded-up TTL.
 - The redigo adapter failed every single command on a pool whose connections have no `DoContext`. The fallback to
   `Do` works now.
 - One failed item cancelled the rest of a batch write in the `l2` batch helpers (gomemcache, mc, rainycape, and the
