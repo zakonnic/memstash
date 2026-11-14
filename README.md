@@ -388,7 +388,7 @@ at the items themselves.
 | `WithL2Cache(l2)` | Attach a second level directly. |
 | `WithWritePolicy(p)` | How writes reach L2, ignored when no L2 is attached: `WriteBack` (default) hands `Set` to the background worker pool, `WriteThrough` writes on `Set` and returns the L2 error, `WriteDisabled` makes L2 read-only. Deletes follow the same policy as writes. |
 | `WithWriteBackBuffer(n)` | Size of the async write-back buffer for every worker (default: 500, or an even share of 2000, at least 64, for the memcached adapters, see below). A write that finds it full waits for room, so the writes of one key reach L2 in order. |
-| `WithWriteBackWorkers(n)` | Number of goroutines draining the write-back buffers (default: 4, or half the client's idle connections for the memcached adapters, see below). Each key belongs to one worker, so its L2 writes keep their order; each worker has its own buffer, and batching happens within it. A worker sends one batch at a time, and up to four at once when its buffer holds more than a batch; for the memcached adapters it sends one call at a time. |
+| `WithWriteBackWorkers(n)` | Number of goroutines draining the write-back buffers (default: 4). The memcached adapters reject it: their constructors' `wbConcurrentCalls` sets it, see below. Each key belongs to one worker, so its L2 writes keep their order; each worker has its own buffer, and batching happens within it. A worker sends one batch at a time, and up to four at once when its buffer holds more than a batch; for the memcached adapters it sends one call at a time. |
 | `WithBatchingForWriteBack()` / `WithNoBatchingForWriteBack()` / `WithAdaptiveBatchingForWriteBack()` | How a write-back worker drains its buffer share to L2: coalesced into `BatchSet`/`BatchDelete` (default), one `Set` or `Delete` per task, or adaptive. |
 | `WithGetBatchedBuffer(n)` | Size of the worker pool buffer queue `GetBatched` coalesces L2 reads through (default: 1024). |
 | `WithGetBatchedWorkers(n)` | Number of goroutines resolving the coalesced reads (default: 4), and with that the number of `BatchGet` calls in flight. A batch only forms while every worker is busy, so fewer workers mean fuller batches. |
@@ -409,12 +409,14 @@ The write path favors throughput by default: instead of one round trip per key, 
 write-back worker coalesces the Sets into the adapter's native `BatchSet` call (an `MSET` or a pipeline).
 
 memcached has no multi-set or multi-delete, so the memcached adapters implement `SingleCallL2` and write-back skips
-batches for them: each worker sends one Set or Delete at a time, so `WithWriteBackWorkers` is how many calls
-write-back keeps in flight. Reads and synchronous writes share the client on top of them, so by default write-back
-takes half its idle connections (`memcache.Client.MaxIdleConns`, rainycape's `SetMaxIdleConnsPerAddr`), at least 4.
-mc hides its pool size and queues calls past it, reads and writes alike, so it gets 4: set `WithWriteBackWorkers` to
-about half of its `PoolSize`. Past the idle pool, gomemcache and rainycape dial a connection for a call and close it
-after.
+batches for them: each worker sends one Set or Delete at a time. How many calls write-back keeps in flight is the
+`wbConcurrentCalls` argument of the adapter's constructors (`New`, `NewCache`, ...), and `WithWriteBackWorkers` is
+rejected next to these adapters. Reads and synchronous writes share the client on top of those calls, so 0 leaves them
+half: write-back takes half the client's idle connections (`memcache.Client.MaxIdleConns`, rainycape's
+`SetMaxIdleConnsPerAddr`), at least 4. mc hides its pool size and queues calls past it, reads and writes alike, so 0
+gives it 4: pass about half of its `PoolSize`. Past the idle pool, gomemcache and rainycape dial a connection for a
+call and close it after. The [write-back table](#batching-and-write-back) measures all three with
+`wbConcurrentCalls` = 128 (half the client's pool of 256).
 
 | Module | Backend / client | context |
 |---|---|---|
@@ -593,12 +595,12 @@ with the queue full. Negative is faster, `~` is no significant difference.
 |  | 192 | 3.5 | 1.6 (-54%) | 7.4 | 1.4 (-81%) | 7.6 | ~9.5 (+25%)* |
 | valkey | 24 | 8.4 | 1.0 (-88%) | 8.2 | 0.3 (-96%) | 8.7 | 10.3 (+18%) |
 |  | 192 | 2.1 | 2.1 (~) | 1.9 | 1.6 (-17%) | 2.1 | ~2.4 (+13%)* |
-| gomemcache | 24 | 13.3 | 3.4 (-74%) | 12.6 | 2.9 (-77%) | 13.1 | ~10.4 (-20%)* |
-|  | 192 | 3.3 | 3.2 (~) | 3.1 | 2.9 (-7%) | 3.3 | 3.0 (-7%) |
-| mc | 24 | 12.8 | 3.3 (-74%) | 12.8 | 2.8 (-78%) | 12.7 | 22.7 (+79%) |
-|  | 192 | 3.4 | 3.1 (-8%) | 3.1 | 2.8 (-13%) | 3.2 | 13.7 (+326%) |
-| rainycape | 24 | 13.0 | 5.0 (-61%) | 12.6 | 2.8 (-78%) | 12.8 | 12.1 (-6%) |
-|  | 192 | 5.1 | 4.9 (~) | 3.2 | ~2.8 (-10%)* | 3.2 | 5.1 (+59%) |
+| gomemcache** | 24 | 13.1 | 4.0 (-69%) | 12.7 | 3.7 (-71%) | 12.9 | 10.3 (-20%) |
+|  | 192 | 3.3 | 3.8 (+18%) | 3.0 | 3.6 (+20%) | 3.3 | 3.0 (-8%) |
+| mc** | 24 | 12.8 | 4.3 (-67%) | 12.8 | 4.0 (-69%) | 12.6 | 22.7 (+80%) |
+|  | 192 | 3.6 | 4.2 (+18%) | 3.3 | 3.9 (+20%) | 3.6 | 13.9 (+283%) |
+| rainycape** | 24 | 12.9 | 5.1 (-60%) | 12.6 | 3.8 (-70%) | 12.8 | 12.0 (-6%) |
+|  | 192 | 4.8 | 5.2 (+7%) | 3.1 | 3.7 (+22%) | 3.2 | 4.8 (+50%) |
 | pgx | 24 | 19.2 | 3.5 (-82%) | 17.4 | 0.5 (-97%) | 18.2 | 14.9 (-18%) |
 |  | 192 | 14.4 | 4.2 (-71%) | 12.4 | 1.7 (-87%) | 12.5 | 2.7 (-78%) |
 | sql (PostgreSQL) | 24 | 19.3 | 3.5 (-82%) | 17.6 | 0.6 (-97%) | 18.4 | 15.3 (-17%) |
@@ -616,9 +618,11 @@ with the queue full. Negative is faster, `~` is no significant difference.
 
 \* The medians differ, but the rounds overlap (some match Direct), so the difference is not significant.
 
+\*\* Write-back with `wbConcurrentCalls` = 128 (half the client's pool of 256), see [L2 Adapters](#l2-adapters).
+
 Measured on one machine (Ryzen 9 9900X, 24 threads) against the servers of `docker/docker-compose.yml` on the same
-host, connection pools of 512 (40 for PostgreSQL and 64 for MySQL, within the servers' limits), 256-byte values,
-medians of 6 rounds.
+host, connection pools of 512 (256 for memcached, 40 for PostgreSQL and 64 for MySQL, within the servers' limits),
+256-byte values, medians of 6 rounds.
 
 ### Load generator
 

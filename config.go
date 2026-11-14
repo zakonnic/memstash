@@ -40,6 +40,8 @@ var (
 	ErrPanic                 = fmt.Errorf("%w: panic recovered", Error)
 	ErrLoaderPanic           = fmt.Errorf("%w: loader panicked", ErrPanic)
 	ErrClosed                = fmt.Errorf("%w: cache closed", Error)
+	ErrWorkersSetByL2        = fmt.Errorf("%w: WriteBackWorkers must not be set with a SingleCallL2: "+
+		"its adapter's constructor sets the write-back concurrency", Error)
 )
 
 // PanicHandler is called with whatever recover() returned when the cache swallows a panic. Runs on the goroutine that
@@ -122,9 +124,9 @@ type Config[K comparable, V any] struct {
 	// share of 2000, at least 64. A write that finds the buffer full waits for room.
 	WriteBackBufferSize int
 
-	// WriteBackWorkers is the number of goroutines draining the WriteBack buffer. 0 means DefaultWriteBackWorkers, or
-	// what ConcurrentCalls allows when L2Cache is a SingleCallL2. For a SingleCallL2 it is how many calls write-back
-	// keeps in flight, so it also sets the share of the client left to reads.
+	// WriteBackWorkers is the number of goroutines draining the WriteBack buffer. 0 means DefaultWriteBackWorkers. With
+	// a SingleCallL2 it must stay 0 (ErrWorkersSetByL2): the pool is what ConcurrentCalls reports, set through the
+	// adapter's constructor.
 	// A key always goes to the same worker, so the L2 writes of one key keep their order; the workers themselves
 	// write to L2 concurrently, and batching happens within a worker's own share of the buffer. A worker has one
 	// batch in flight, and up to four once its share holds more than a batch; a SingleCallL2 worker has one call.

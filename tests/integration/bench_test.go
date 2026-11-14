@@ -248,7 +248,7 @@ func benchBackends(b *testing.B) []benchBackend {
 			if err != nil {
 				b.Fatal(err)
 			}
-			store, aerr := gomemcache_adapter.New[string, []byte](client, l2.BytesCodec(), l2.WithKeyFunc(l2.PrefixedString(prefix)))
+			store, aerr := gomemcache_adapter.New[string, []byte](client, l2.BytesCodec(), 0, l2.WithKeyFunc(l2.PrefixedString(prefix)))
 			return adapterCache(b, store, aerr, opts)
 		}},
 		{name: "memcached/mc", addr: memcachedAddr(), factory: func(b *testing.B, prefix string, opts ...memstash.Option) *memstash.Cache[string, []byte] {
@@ -260,7 +260,7 @@ func benchBackends(b *testing.B) []benchBackend {
 			if err != nil {
 				b.Fatal(err)
 			}
-			store, aerr := mc_adapter.New[string, []byte](client, l2.BytesCodec(), l2.WithKeyFunc(l2.PrefixedString(prefix)))
+			store, aerr := mc_adapter.New[string, []byte](client, l2.BytesCodec(), 8, l2.WithKeyFunc(l2.PrefixedString(prefix))) // half its PoolSize
 			return adapterCache(b, store, aerr, opts)
 		}},
 		{name: "memcached/rainycape", addr: memcachedAddr(), factory: func(b *testing.B, prefix string, opts ...memstash.Option) *memstash.Cache[string, []byte] {
@@ -274,7 +274,7 @@ func benchBackends(b *testing.B) []benchBackend {
 			if err != nil {
 				b.Fatal(err)
 			}
-			store, aerr := rainycape_adapter.New[string, []byte](client, l2.BytesCodec(), l2.WithKeyFunc(l2.PrefixedString(prefix)))
+			store, aerr := rainycape_adapter.New[string, []byte](client, l2.BytesCodec(), 0, l2.WithKeyFunc(l2.PrefixedString(prefix)))
 			return adapterCache(b, store, aerr, opts)
 		}},
 		{name: "postgres/pgx", addr: postgresAddr(), factory: func(b *testing.B, prefix string, opts ...memstash.Option) *memstash.Cache[string, []byte] {

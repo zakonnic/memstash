@@ -276,6 +276,9 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 	if cfg.WriteBackWorkers < 0 {
 		return nil, ErrBadWorkers
 	}
+	if _, single := cfg.L2Cache.(SingleCallL2); single && cfg.WriteBackWorkers > 0 {
+		return nil, ErrWorkersSetByL2
+	}
 	if cfg.GetBatchedWorkers < 0 {
 		return nil, ErrBadGetBatchedWorkers
 	}
@@ -367,9 +370,7 @@ func NewWithConfig[K comparable, V any](cfg *Config[K, V]) (*Cache[K, V], error)
 		workers, buffer := cfg.writeBackWorkers(), cfg.writeBackBuffer()
 		if store, ok := cfg.L2Cache.(SingleCallL2); ok {
 			c.writeBackSingle = true
-			if cfg.WriteBackWorkers == 0 {
-				workers = max(store.ConcurrentCalls(), 1)
-			}
+			workers = max(store.ConcurrentCalls(), 1)
 			if cfg.WriteBackBufferSize == 0 {
 				buffer = max(singleCallBufferTotal/workers, singleCallBufferMin)
 			}

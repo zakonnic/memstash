@@ -24,7 +24,7 @@ func TestBatchGetReportsAnUnreachableServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := rainycape_adapter.New[string, string](client, l2.StringCodec())
+	c, err := rainycape_adapter.New[string, string](client, l2.StringCodec(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func newAdapter(t *testing.T, server *fakeMemcached) *rainycape_adapter.Cache[st
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	c, err := rainycape_adapter.New[string, string](client, l2.StringCodec())
+	c, err := rainycape_adapter.New[string, string](client, l2.StringCodec(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,21 +211,32 @@ func replyStatus(conn net.Conn, op byte, status uint16) error {
 	return err
 }
 
-// TestConcurrentCalls: write-back takes half the idle connections and leaves reads the rest, but never fewer than
-// DefaultWriteBackWorkers calls, a client keeping no idle connections (maxIdle < 0) included.
+// TestConcurrentCalls: wbConcurrentCalls is reported as given. Without it write-back takes half the idle connections
+// and leaves reads the rest, but never fewer than DefaultWriteBackWorkers calls, a client keeping no idle connections
+// (maxIdle < 0) included. A negative wbConcurrentCalls is rejected.
 func TestConcurrentCalls(t *testing.T) {
-	for _, tc := range []struct{ maxIdle, calls int }{{0, 4}, {-1, 4}, {32, 16}, {300, 150}} {
+	for _, tc := range []struct{ maxIdle, wbCalls, calls int }{
+		{0, 0, 4}, {-1, 0, 4}, {32, 0, 16}, {300, 0, 150}, {300, 7, 7}, {2, 100, 100},
+	} {
 		client, err := memcache.New("localhost:11211")
 		if err != nil {
 			t.Fatal(err)
 		}
 		client.SetMaxIdleConnsPerAddr(tc.maxIdle)
-		adapter, err := rainycape_adapter.NewBytes[string](client)
+		adapter, err := rainycape_adapter.NewBytes[string](client, tc.wbCalls)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := adapter.ConcurrentCalls(); got != tc.calls {
-			t.Errorf("MaxIdleConnsPerAddr %d: ConcurrentCalls %d, want %d", tc.maxIdle, got, tc.calls)
+			t.Errorf("MaxIdleConnsPerAddr %d, wbConcurrentCalls %d: ConcurrentCalls %d, want %d",
+				tc.maxIdle, tc.wbCalls, got, tc.calls)
 		}
+	}
+	client, err := memcache.New("localhost:11211")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rainycape_adapter.NewBytes[string](client, -1); !errors.Is(err, l2.ErrBadConcurrentCalls) {
+		t.Errorf("wbConcurrentCalls -1: error %v, want %v", err, l2.ErrBadConcurrentCalls)
 	}
 }

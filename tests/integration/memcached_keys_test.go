@@ -28,13 +28,13 @@ func TestMemcachedAwkwardKeys(t *testing.T) {
 	t.Cleanup(mc.Quit)
 	adapters := map[string]func(opts ...memstash.Option) (*memstash.Cache[string, string], error){
 		"gomemcache": func(opts ...memstash.Option) (*memstash.Cache[string, string], error) {
-			return gomemcache_adapter.NewCache[string, string](gomemcache.New(memcachedAddr()), l2.StringCodec(), opts...)
+			return gomemcache_adapter.NewCache[string, string](gomemcache.New(memcachedAddr()), l2.StringCodec(), 0, opts...)
 		},
 		"mc": func(opts ...memstash.Option) (*memstash.Cache[string, string], error) {
-			return mc_adapter.NewCache[string, string](mc, l2.StringCodec(), opts...)
+			return mc_adapter.NewCache[string, string](mc, l2.StringCodec(), 0, opts...)
 		},
 		"rainycape": func(opts ...memstash.Option) (*memstash.Cache[string, string], error) {
-			return rainycape_adapter.NewCache[string, string](rc, l2.StringCodec(), opts...)
+			return rainycape_adapter.NewCache[string, string](rc, l2.StringCodec(), 0, opts...)
 		},
 	}
 	for name, newCache := range adapters {

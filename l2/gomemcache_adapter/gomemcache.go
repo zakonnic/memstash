@@ -21,18 +21,26 @@ type Cache[K comparable, V any] struct {
 	client  *memcache.Client
 	codec   memstash.Codec[V]
 	keyFunc func(K) string
+	wbCalls int
 }
 
 var _ memstash.L2Cache[string, string] = (*Cache[string, string])(nil)
 
 // New creates the adapter with an explicit value codec. By default keys must be strings (identity mapping); for other
 // key types pass l2.WithKeyFunc. A key memcached rejects is stored under a stand-in (see l2.MemcacheKey).
-func New[K comparable, V any](client *memcache.Client, codec memstash.Codec[V], opts ...memstash.Option) (*Cache[K, V], error) {
+//
+// wbConcurrentCalls is how many write-back calls the client gets at once (see ConcurrentCalls), and with that the
+// cache's WriteBack pool: memstash.WithWriteBackWorkers is rejected with this adapter. 0 means half the client's
+// MaxIdleConns, at least memstash.DefaultWriteBackWorkers, so reads keep the other half.
+func New[K comparable, V any](client *memcache.Client, codec memstash.Codec[V], wbConcurrentCalls int, opts ...memstash.Option) (*Cache[K, V], error) {
 	if client == nil {
 		return nil, l2.ErrNilClient
 	}
 	if codec == nil {
 		return nil, l2.ErrNilCodec
+	}
+	if wbConcurrentCalls < 0 {
+		return nil, l2.ErrBadConcurrentCalls
 	}
 	keyFunc, err := l2.ExtractKeyFunc[K](opts)
 	if err != nil {
@@ -40,23 +48,24 @@ func New[K comparable, V any](client *memcache.Client, codec memstash.Codec[V], 
 	}
 	storageKey := keyFunc
 	keyFunc = func(key K) string { return l2.MemcacheKey(storageKey(key)) }
-	return &Cache[K, V]{client: client, codec: codec, keyFunc: keyFunc}, nil
+	return &Cache[K, V]{client: client, codec: codec, keyFunc: keyFunc, wbCalls: wbConcurrentCalls}, nil
 }
 
-// NewJSON creates the adapter that marshals values with encoding/json.
-func NewJSON[K comparable, V any](client *memcache.Client, opts ...memstash.Option) (*Cache[K, V], error) {
-	return New[K, V](client, l2.JSONCodec[V](), opts...)
+// NewJSON creates the adapter that marshals values with encoding/json (wbConcurrentCalls: see New).
+func NewJSON[K comparable, V any](client *memcache.Client, wbConcurrentCalls int, opts ...memstash.Option) (*Cache[K, V], error) {
+	return New[K, V](client, l2.JSONCodec[V](), wbConcurrentCalls, opts...)
 }
 
-// NewBytes creates the adapter that passes []byte values through unchanged.
-func NewBytes[K comparable](client *memcache.Client, opts ...memstash.Option) (*Cache[K, []byte], error) {
-	return New[K, []byte](client, l2.BytesCodec(), opts...)
+// NewBytes creates the adapter that passes []byte values through unchanged (wbConcurrentCalls: see New).
+func NewBytes[K comparable](client *memcache.Client, wbConcurrentCalls int, opts ...memstash.Option) (*Cache[K, []byte], error) {
+	return New[K, []byte](client, l2.BytesCodec(), wbConcurrentCalls, opts...)
 }
 
 // NewCache builds a two-level cache in one call: a new memstash.Cache backed by this adapter as its L2. The single
 // option list is shared: the memstash.With* options configure the cache, l2.WithKeyFunc configures the adapter.
-func NewCache[K comparable, V any](client *memcache.Client, codec memstash.Codec[V], opts ...memstash.Option) (*memstash.Cache[K, V], error) {
-	adapter, err := New[K, V](client, codec, opts...)
+// wbConcurrentCalls sizes the cache's WriteBack pool (see New).
+func NewCache[K comparable, V any](client *memcache.Client, codec memstash.Codec[V], wbConcurrentCalls int, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+	adapter, err := New[K, V](client, codec, wbConcurrentCalls, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -67,18 +76,18 @@ func NewCache[K comparable, V any](client *memcache.Client, codec memstash.Codec
 }
 
 // NewJSONCache builds a two-level cache with the JSON value codec (see NewCache).
-func NewJSONCache[K comparable, V any](client *memcache.Client, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
-	return NewCache[K, V](client, l2.JSONCodec[V](), opts...)
+func NewJSONCache[K comparable, V any](client *memcache.Client, wbConcurrentCalls int, opts ...memstash.Option) (*memstash.Cache[K, V], error) {
+	return NewCache[K, V](client, l2.JSONCodec[V](), wbConcurrentCalls, opts...)
 }
 
 // NewBytesCache builds a two-level cache that passes []byte values through unchanged (see NewCache).
-func NewBytesCache[K comparable](client *memcache.Client, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
-	return NewCache[K, []byte](client, l2.BytesCodec(), opts...)
+func NewBytesCache[K comparable](client *memcache.Client, wbConcurrentCalls int, opts ...memstash.Option) (*memstash.Cache[K, []byte], error) {
+	return NewCache[K, []byte](client, l2.BytesCodec(), wbConcurrentCalls, opts...)
 }
 
 // NewStringCache builds a two-level cache that passes string values through unchanged (see NewCache).
-func NewStringCache[K comparable](client *memcache.Client, opts ...memstash.Option) (*memstash.Cache[K, string], error) {
-	return NewCache[K, string](client, l2.StringCodec(), opts...)
+func NewStringCache[K comparable](client *memcache.Client, wbConcurrentCalls int, opts ...memstash.Option) (*memstash.Cache[K, string], error) {
+	return NewCache[K, string](client, l2.StringCodec(), wbConcurrentCalls, opts...)
 }
 
 // Get returns the value; a missing key is (zero, false, nil). The context is ignored: the client has no context
@@ -172,10 +181,13 @@ func (c *Cache[K, V]) BatchDelete(ctx context.Context, keys []K) error {
 // memstash.SingleCallL2, spelled out so the module still builds against a core without it.
 var _ interface{ ConcurrentCalls() int } = (*Cache[string, []byte])(nil)
 
-// ConcurrentCalls is half the client's MaxIdleConns, a per-server limit, so reads keep the other half; at least
-// DefaultWriteBackWorkers. Past MaxIdleConns memcache.Client dials a connection for one call and closes it after. It
-// makes the adapter a memstash.SingleCallL2.
+// ConcurrentCalls is the constructor's wbConcurrentCalls. Without one it is half the client's MaxIdleConns, a
+// per-server limit, so reads keep the other half; at least DefaultWriteBackWorkers. Past MaxIdleConns memcache.Client
+// dials a connection for one call and closes it after. It makes the adapter a memstash.SingleCallL2.
 func (c *Cache[K, V]) ConcurrentCalls() int {
+	if c.wbCalls > 0 {
+		return c.wbCalls
+	}
 	idle := c.client.MaxIdleConns
 	if idle <= 0 {
 		idle = memcache.DefaultMaxIdleConns

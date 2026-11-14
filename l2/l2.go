@@ -27,6 +27,9 @@ var (
 	ErrNilClient = fmt.Errorf("%w: client must not be nil", memstash.Error)
 	// ErrNilCodec is returned by adapter constructors when the codec is nil.
 	ErrNilCodec = fmt.Errorf("%w: codec must not be nil", memstash.Error)
+	// ErrBadConcurrentCalls is returned by the constructors of the memstash.SingleCallL2 adapters when
+	// wbConcurrentCalls is negative.
+	ErrBadConcurrentCalls = fmt.Errorf("%w: wbConcurrentCalls must not be negative", memstash.Error)
 )
 
 // ResolveKeyFunc returns the cache-key to storage-key mapping for an adapter: the custom function when given, the

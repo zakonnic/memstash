@@ -33,23 +33,18 @@ func (s *singleCallStub) BatchDelete(context.Context, []string) error {
 	return nil
 }
 
-// TestSingleCallPoolSize: a SingleCallL2 gets one worker per call ConcurrentCalls allows, at least one, and
-// WriteBackWorkers overrides that count without leaving single calls; every worker reaches L2 at the same time, and
-// no batch is sent.
+// TestSingleCallPoolSize: a SingleCallL2 gets one worker per call ConcurrentCalls allows, at least one; every worker
+// reaches L2 at the same time, and no batch is sent.
 func TestSingleCallPoolSize(t *testing.T) {
-	for _, tc := range []struct{ calls, set, workers int }{{300, 0, 300}, {2, 0, 2}, {0, 0, 1}, {300, 7, 7}} {
-		t.Run(fmt.Sprintf("%d calls, %d set", tc.calls, tc.set), func(t *testing.T) {
+	for _, tc := range []struct{ calls, workers int }{{300, 300}, {2, 2}, {0, 1}} {
+		t.Run(fmt.Sprintf("%d calls", tc.calls), func(t *testing.T) {
 			l2 := &singleCallStub{blockingL2Stub: newBlockingL2Stub(tc.workers), calls: tc.calls}
-			opts := []memstash.Option{
+			c, err := memstash.New[string, string](
 				memstash.WithMemoryCapacity(1000),
 				memstash.WithL2Cache[string, string](l2),
 				memstash.WithWritePolicy(memstash.WriteBack),
 				memstash.WithWriteBackBuffer(256), // a queue gets 32 keys on average: Set never waits for room
-			}
-			if tc.set > 0 {
-				opts = append(opts, memstash.WithWriteBackWorkers(tc.set))
-			}
-			c, err := memstash.New[string, string](opts...)
+			)
 			require.NoError(t, err)
 			defer c.Close()
 
@@ -62,6 +57,19 @@ func TestSingleCallPoolSize(t *testing.T) {
 			assert.Equal(t, tc.workers, peak)
 			assert.Zero(t, l2.batches.Load())
 		})
+	}
+}
+
+// TestSingleCallRejectsWriteBackWorkers: the adapter's constructor sizes a SingleCallL2's pool, so WriteBackWorkers
+// next to one is a conflict New reports, with any write policy, rather than a setting it quietly ignores.
+func TestSingleCallRejectsWriteBackWorkers(t *testing.T) {
+	for _, policy := range []memstash.WritePolicy{memstash.WriteBack, memstash.WriteThrough} {
+		_, err := memstash.New[string, string](
+			memstash.WithL2Cache[string, string](&singleCallStub{blockingL2Stub: newBlockingL2Stub(1), calls: 8}),
+			memstash.WithWritePolicy(policy),
+			memstash.WithWriteBackWorkers(4),
+		)
+		require.ErrorIs(t, err, memstash.ErrWorkersSetByL2)
 	}
 }
 

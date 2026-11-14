@@ -125,7 +125,7 @@ func openL2[K comparable, V any](server ServerType, addrs []string, codec memsta
 	case Gomemcache:
 		client := gomemcachelib.New(addrs...)
 		client.MaxIdleConns = 32 // the default is 2: too few for concurrent batch (GetMulti) traffic
-		cache, err := gomemcache_adapter.NewCache[K, V](client, codec, opts...)
+		cache, err := gomemcache_adapter.NewCache[K, V](client, codec, 0, opts...)
 		return withClient(cache, func() { client.Close() }, err)
 
 	case Rainycape:
@@ -134,13 +134,13 @@ func openL2[K comparable, V any](server ServerType, addrs []string, codec memsta
 			return nil, nil, err
 		}
 		client.SetMaxIdleConnsPerAddr(32) // more room for concurrent batch (GetMulti) traffic
-		cache, err := rainycape_adapter.NewCache[K, V](client, codec, opts...)
+		cache, err := rainycape_adapter.NewCache[K, V](client, codec, 0, opts...)
 		return withClient(cache, func() { client.Close() }, err)
 
 	case Mc:
 		// Plain binary protocol, no SASL: the empty credentials are what a stock memcached expects.
 		client := mclib.NewMC(strings.Join(addrs, ","), "", "")
-		cache, err := mc_adapter.NewCache[K, V](client, codec, opts...)
+		cache, err := mc_adapter.NewCache[K, V](client, codec, 0, opts...)
 		return withClient(cache, client.Quit, err)
 	}
 	return nil, nil, fmt.Errorf("unknown l2 server type %q, want one of %v", server, ServerTypes())
