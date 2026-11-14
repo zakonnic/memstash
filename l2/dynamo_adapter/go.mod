@@ -5,7 +5,7 @@ go 1.24
 require (
 	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.74.0
-	github.com/zakonnic/memstash v0.9.8
+	github.com/zakonnic/memstash v0.10.0
 )
 
 require (
@@ -14,5 +14,5 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.25 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.13.12 // indirect
 	github.com/aws/smithy-go v1.28.9 // indirect
-	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
+	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
 )

@@ -4,11 +4,11 @@ go 1.26.0
 
 require (
 	github.com/aerospike/aerospike-client-go/v7 v7.10.2
-	github.com/zakonnic/memstash v0.9.8
+	github.com/zakonnic/memstash v0.10.0
 )
 
 require (
-	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
+	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
 	github.com/yuin/gopher-lua v1.1.2 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
