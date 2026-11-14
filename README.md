@@ -1,6 +1,7 @@
 # Memstash
 
 [![CI](https://github.com/zakonnic/memstash/actions/workflows/ci.yml/badge.svg)](https://github.com/zakonnic/memstash/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zakonnic/memstash/badges/coverage.json)](https://github.com/zakonnic/memstash/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/zakonnic/memstash.svg)](https://pkg.go.dev/github.com/zakonnic/memstash)
 [![Release](https://img.shields.io/github/v/tag/zakonnic/memstash?filter=v*&sort=semver&label=release)](https://github.com/zakonnic/memstash/tags)
 [![Go](https://img.shields.io/github/go-mod/go-version/zakonnic/memstash)](go.mod)

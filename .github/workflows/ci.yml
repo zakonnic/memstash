@@ -37,6 +37,46 @@ jobs:
         run: go test -race -count=1 ./...
         timeout-minutes: 20
 
+  # The README badge. shields.io renders coverage.json from the badges branch, a single commit this job replaces on
+  # every push to main; a pull request only gets the number in its job summary.
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GOWORK: off
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - name: coverage
+        id: cover
+        run: |
+          make cover-gen
+          pct=$(go tool cover -func=var/coverage.out | awk '/^total:/ {sub(/%/, "", $NF); print $NF}')
+          echo "pct=$pct" >> "$GITHUB_OUTPUT"
+          echo "Coverage: $pct%" >> "$GITHUB_STEP_SUMMARY"
+        timeout-minutes: 20
+      - name: publish the badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          PCT: ${{ steps.cover.outputs.pct }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          color=$(awk -v p="$PCT" 'BEGIN {
+            print (p >= 90 ? "brightgreen" : p >= 80 ? "green" : p >= 70 ? "yellowgreen" : p >= 60 ? "yellow" : "red") }')
+          dir=$(mktemp -d)
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$PCT" "$color" \
+            > "$dir/coverage.json"
+          cd "$dir"
+          git init -q -b badges
+          git add coverage.json
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -qm "coverage $PCT%"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
+
   # A 32-bit word: a string or an int64 takes two stores, and int overflows where a 64-bit build never gets near.
   # The runner executes 386 binaries natively. No -race: the race detector does not support 386.
   test-386:
