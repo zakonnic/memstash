@@ -1,3 +1,9 @@
+# On Windows make may run Cygwin's sh, whose HOME is its own: git there misses the user's ~/.gitconfig, identity and
+# credentials included. The Windows profile is the home Git for Windows uses.
+ifeq ($(OS),Windows_NT)
+export HOME := $(USERPROFILE)
+endif
+
 DC = docker compose
 DC_FILES = -f docker/docker-compose.yml
 ifneq (,$(wildcard docker/docker-compose.override.yml))
@@ -205,13 +211,46 @@ untag: ## Delete the root module and every l2 adapter module tag with the given 
 		echo "Some tags were missing, but remaining tags deleted."; \
 	fi
 
-push: ## Push main and the release tags (a release is cut from main)
+push: ## Push main and the release tags, all or nothing (a release is cut from main)
 	@test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "Error: release from main, not $$(git rev-parse --abbrev-ref HEAD)."; exit 1; }
-	git push origin main --tags
+	git push --atomic origin main --tags
 
-.PHONY: release release-check release-verify
-release: ## Full release: check, tag every module, push, verify from the proxy (make release V=1.2.3)
+.PHONY: release release-prepare release-publish release-check release-verify
+# release undoes whatever stopped short of the push: a version origin never got can be cut again. Whether the push
+# happened is asked of origin, not inferred from the step that failed.
+release: ## Release in one go: release-prepare, then release-publish; undone if it stops before the push (make release V=1.2.3 [YES=1])
 	@test -n "$(V)" || { echo "V is required, e.g. make release V=1.2.3"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "Error: the working tree is dirty: commit or stash it first."; exit 1; }
+	@start=$$(git rev-parse HEAD); \
+	"$(MAKE)" release-prepare V=$(V) && "$(MAKE)" release-publish V=$(V) YES=$(YES) && exit 0; \
+	git ls-remote --exit-code --tags origin v$(V) >/dev/null 2>&1; remote=$$?; \
+	if [ $$remote -eq 0 ]; then \
+		echo "v$(V) is on origin. If only release-verify failed, run it again in a minute; anything else needs the next version."; \
+	elif [ $$remote -eq 2 ]; then \
+		echo "==> v$(V) was not pushed: undoing it, main back at $$(git rev-parse --short $$start)"; \
+		"$(MAKE)" untag V=$(V) >/dev/null; \
+		git reset -q --hard $$start; \
+	else \
+		echo "Cannot ask origin whether v$(V) was pushed (git ls-remote exit $$remote): nothing undone."; \
+	fi; \
+	exit 1
+
+release-prepare: ## Make the release commit on a clean main: require-core, a check that nothing else changed, commit (make release-prepare V=1.2.3)
+	@test -n "$(V)" || { echo "V is required, e.g. make release-prepare V=1.2.3"; exit 1; }
+	@test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "Error: release from main, not $$(git rev-parse --abbrev-ref HEAD)."; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "Error: the working tree is dirty: commit or stash it first."; exit 1; }
+	@grep -q '^## \[$(V)\]' CHANGELOG.md || { echo "Error: CHANGELOG.md has no '## [$(V)]' section."; exit 1; }
+	"$(MAKE)" require-core V=$(V)
+	@changed=$$(git status --porcelain | cut -c4- | sort); \
+	want=$$(printf '%s/go.mod\n%s/go.sum\n' $(foreach m,$(PUBLISHED),$(m) $(m)) | sort); \
+	[ "$$changed" = "$$want" ] || { \
+		echo "Error: require-core must change exactly the published go.mod and go.sum files. It changed:"; \
+		echo "$$changed"; exit 1; \
+	}
+	git commit -q -am "chore: release v$(V)"
+
+release-publish: ## Publish the release commit: check, tag every module, confirm, push, verify from the proxy (make release-publish V=1.2.3 [YES=1])
+	@test -n "$(V)" || { echo "V is required, e.g. make release-publish V=1.2.3"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { \
 		echo "Error: the working tree is dirty. Tags would point at the last commit, not at what you see."; \
 		exit 1; \
@@ -219,7 +258,12 @@ release: ## Full release: check, tag every module, push, verify from the proxy (
 	@echo "==> release v$(V)"
 	"$(MAKE)" release-check
 	"$(MAKE)" tag V=$(V)
-	"$(MAKE)" push
+	@if [ "$(YES)" != 1 ]; then \
+		printf 'Push %s and its $(words $(TAGS)) tags v$(V) to origin? [y/N] ' "$$(git log -1 --format='%h %s')"; \
+		read answer || answer=; \
+		case "$$answer" in y|Y|yes) ;; *) echo "Not pushed: deleting the tags."; "$(MAKE)" untag V=$(V) >/dev/null; exit 1;; esac; \
+	fi
+	@"$(MAKE)" push || { echo "The push failed, and being atomic it sent nothing: deleting the tags."; "$(MAKE)" untag V=$(V) >/dev/null; exit 1; }
 	"$(MAKE)" release-verify V=$(V)
 
 release-check: ## Build every published module the way a consumer resolves it - no workspace, no replace, its own go.sum (run before 'make tag')

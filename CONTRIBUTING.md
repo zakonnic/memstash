@@ -91,13 +91,19 @@ to `ADAPTERS` in the Makefile, to the matrix in `.github/workflows/ci.yml`, and 
 ## Releases
 
 Every published module is tagged together - root, adapters and the load generator - and each requires the core and
-the adapters of the same release:
+the adapters of the same release. From a clean main whose CHANGELOG.md has the version's section:
 
 ```sh
-make require-core V=1.2.3   # on a clean tree, then commit: the release commit
-make release V=1.2.3        # check, tag, push, verify from the proxy
+make release V=1.2.3
 ```
 
-`require-core` also fills every published module's go.sum for the new version before its tags exist: it tags a
-throwaway clone of HEAD and runs `go mod tidy` against it. The release commit builds with `GOWORK=off` as it is, and
-`make release` checks that its sums match what the proxy serves.
+It runs two steps, each of which can also be run alone:
+
+- `release-prepare` makes the release commit. `require-core` points every published module at the new version and
+  fills its go.sum before the tags exist: it tags a throwaway clone of HEAD and runs `go mod tidy` against it. The
+  step then checks that nothing but those go.mod and go.sum files changed.
+- `release-publish` runs `release-check`, tags every module, asks before the push (`YES=1` skips the question), pushes
+  main and the tags atomically and runs `release-verify`, which checks the sums against what the proxy serves.
+
+Anything that stops it before the push is undone: the tags are deleted and main goes back where it started. Once
+pushed, a version is final; a fix goes out as the next one.
