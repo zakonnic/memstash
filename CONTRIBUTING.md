@@ -36,7 +36,7 @@ Integration tests need backing services. They skip themselves when nothing is li
 until you touch an adapter:
 
 ```sh
-make up                 # docker compose, ports 43210-43220
+make up                 # docker compose, ports 43210-43221
 make test-integration
 make down
 ```

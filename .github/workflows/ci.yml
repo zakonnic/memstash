@@ -246,6 +246,10 @@ jobs:
       MEMSTASH_TEST_TARANTOOL_ADDR: 127.0.0.1:43220
       MEMSTASH_TEST_VALKEY_ADDR: 127.0.0.1:43221
     steps:
+      # The published ports sit in Linux's ephemeral range: a connection that holds one, an image pull's say, fails the
+      # container's bind. The kernel never hands a reserved port to connect(), so this goes before anything dials out.
+      - name: keep the published ports out of the ephemeral range
+        run: sudo sysctl -w net.ipv4.ip_local_reserved_ports=43210-43221
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
