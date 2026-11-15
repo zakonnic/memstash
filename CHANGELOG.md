@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 Every module - the root, each `l2/*_adapter` and `benchmarks/load_generator` - is tagged with the same version.
 
+## [0.10.1] - 2026-11-15
+
+The library code is the same as in 0.10.0.
+
+### Fixed
+
+- Flaky `GetBatched` tests on slow CI runners.
+- Release tooling: `make release-verify` waits for the proxy to serve the new version and shows why a module fails,
+  and the Makefile reads the module path from go.mod.
+
 ## [0.10.0] - 2026-11-14
 
 An in-memory level (L1) without tombstones, eviction queues threaded through its table, and fixes across the core,
