@@ -11,7 +11,7 @@ The library code is the same as in 0.10.0.
 
 ### Fixed
 
-- Flaky `GetBatched` tests on slow CI runners.
+- Flaky tests on small CI runners; `make test-starved` reproduces those conditions locally.
 - Release tooling: `make release-verify` waits for the proxy to serve the new version and shows why a module fails,
   and the Makefile reads the module path from go.mod.
 

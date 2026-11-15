@@ -52,7 +52,8 @@ standard than the rest:
 - **Measure, don't reason.** Post a `benchstat` comparison of several runs per side, not one timing. In-process
   drift alone is worth ~10%, so `-count=8` is a floor.
 - **Watch allocations.** `-benchmem` on every benchmark; the memory path is allocation-free and should stay that way.
-- **Any concurrency change runs under `-race`** before it is called done.
+- **Any concurrency change runs under `-race`** and `make test-starved` before it is called done. The second runs the
+  tests with GOMAXPROCS=1 and 2, the way a small CI runner schedules them.
 
 ```sh
 go test -run xxx -bench 'BenchmarkSet' -benchmem -count=8 ./tests/ > new.txt
