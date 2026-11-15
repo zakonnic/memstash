@@ -34,6 +34,15 @@ func newCache(t *testing.T, cfg memstash.Config[string, string]) *memstash.Cache
 	return c
 }
 
+// keepBusy calls step n times, then on until busy holds, for up to 10 seconds: a goroutine just started may not run
+// at all during a short fixed loop, and the test then races nothing.
+func keepBusy(n int, busy func() bool, step func(i int)) {
+	deadline := time.Now().Add(10 * time.Second)
+	for i := 0; i < n || !busy() && time.Now().Before(deadline); i++ {
+		step(i)
+	}
+}
+
 func TestSetGetDelete(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range policies {

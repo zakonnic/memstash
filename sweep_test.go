@@ -45,10 +45,11 @@ func TestSweepRemovesExpiredBeforeTheOffsetWraps(t *testing.T) {
 func TestSweepUnderConcurrentChurn(t *testing.T) {
 	ctx := context.Background()
 	const (
-		capacity = 20_000
-		pinned   = 10_000
-		writers  = 4
-		churnOps = 100_000
+		pinned    = 10_000
+		writers   = 4
+		churnKeys = 20_000 // per writer
+		churnOps  = 100_000
+		capacity  = pinned + writers*churnKeys // room for every key: an evicted pinned key would read as a false miss
 	)
 	var swept atomic.Int64
 	c, err := New[uint64, uint64](WithMemoryCapacity(capacity), WithTTL(24*time.Hour), WithShardsCount(1),
@@ -108,7 +109,7 @@ func TestSweepUnderConcurrentChurn(t *testing.T) {
 			defer writersWG.Done()
 			rng := rand.New(rand.NewSource(int64(base >> 32)))
 			for range churnOps {
-				k := base + uint64(rng.Intn(capacity))
+				k := base + uint64(rng.Intn(churnKeys))
 				_ = c.SetWithTTL(ctx, k, k, 2*time.Second)
 				if rng.Intn(4) == 0 {
 					_ = c.Delete(ctx, k)

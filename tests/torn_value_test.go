@@ -53,13 +53,13 @@ func overwriteNotTorn[V comparable](t *testing.T, a, b V) {
 			}
 		}()
 	}
-	for i := range 500_000 {
+	keepBusy(500_000, func() bool { return reads.Load() > 1000 }, func(i int) {
 		value := a
 		if i&1 == 0 {
 			value = b
 		}
 		_ = c.Set(ctx, 1, value)
-	}
+	})
 	stop.Store(true)
 	wg.Wait()
 

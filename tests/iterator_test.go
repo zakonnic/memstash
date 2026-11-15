@@ -251,14 +251,14 @@ func TestIteratorConcurrentWritesNotTorn(t *testing.T) {
 	}
 
 	yielded, torn := 0, iterPair{}
-	for range 2000 {
+	keepBusy(2000, func() bool { return writes.Load() > 1000 }, func(int) {
 		for _, v := range c.Iterator() {
 			yielded++
 			if v.A != v.B {
 				torn = v
 			}
 		}
-	}
+	})
 	stop.Store(true)
 	wg.Wait()
 
@@ -296,7 +296,9 @@ func TestIteratorConcurrentMutation(t *testing.T) {
 
 	footprintBefore := c.TotalSize()
 	badValue, dupKey := "", ""
-	for range 100 {
+	keepBusy(100, func() bool {
+		return writes.Load() > 1000 && deletes.Load() > 1000 && c.TotalSize() > footprintBefore
+	}, func(int) {
 		seen := make(map[string]struct{}, 8192)
 		for key, value := range c.Iterator() {
 			if value != "v" {
@@ -307,7 +309,7 @@ func TestIteratorConcurrentMutation(t *testing.T) {
 			}
 			seen[key] = struct{}{}
 		}
-	}
+	})
 	stop.Store(true)
 	wg.Wait()
 
