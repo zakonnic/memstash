@@ -215,8 +215,8 @@ services:
       timeout: 3s
       retries: 20
 
-  # The load generator next to its L2 servers, so its traffic skips the Docker Desktop port relay (several ms a round
-  # trip). Profile "load" keeps it out of `make up`; run it with `make load-generator-docker`.
+  # The load generator next to its L2 servers, so its traffic skips Docker's port relay. Profile "load" keeps it out of
+  # `make up`; run it with `make load-generator-docker`.
   # It joins redis-cluster's network namespace because the cluster announces 127.0.0.1. Service names still resolve
   # there: the container takes over redis-cluster's resolv.conf, which points at Docker's DNS.
   load-generator:

@@ -29,8 +29,8 @@ func envAddr(env, fallback string) string {
 	return fallback
 }
 
-// The defaults say 127.0.0.1, not localhost: clients that dial per request resolve localhost to ::1 first, and the
-// Docker Desktop port relay stalls those dials by ~50ms each.
+// The defaults say 127.0.0.1, not localhost: clients that dial per request resolve localhost to ::1 first, and
+// Docker's port relay can stall those dials.
 func redisAddr() string     { return envAddr("MEMSTASH_TEST_REDIS_ADDR", "127.0.0.1:43210") }
 func memcachedAddr() string { return envAddr("MEMSTASH_TEST_MEMCACHED_ADDR", "127.0.0.1:43214") }
 func postgresAddr() string  { return envAddr("MEMSTASH_TEST_POSTGRES_ADDR", "127.0.0.1:43215") }

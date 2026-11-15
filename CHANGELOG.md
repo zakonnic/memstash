@@ -13,7 +13,7 @@ the loading layers and the adapters.
 ### Added
 
 - The load generator runs next to its L2 servers: `make load-generator-docker` runs it in compose, away from the
-  Docker Desktop port relay that capped the L2 scenarios. It logs what `Set`, `GetFromMemory` and `Get` cost on the
+  Docker port relay that capped the L2 scenarios. It logs what `Set`, `GetFromMemory` and `Get` cost on the
   live cache, and `-config` repeats, a later file overriding the fields it sets.
 - Write-back sends single calls to stores without batches. An adapter whose `BatchSet` and `BatchDelete` are single
   calls underneath implements the optional `SingleCallL2`, which says how many calls write-back keeps in flight, one
