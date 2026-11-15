@@ -28,8 +28,11 @@ ADAPTERS = \
 # PUBLISHED are released with the core, each requiring the core and the adapters of that same release.
 PUBLISHED = $(ADAPTERS) benchmarks/load_generator
 TAGS = v$(V) $(addsuffix /v$(V), $(PUBLISHED))
-# memstash_requires prints "module version" for every in-repo module the go.mod in $(1) requires.
-memstash_requires = awk '$$1 ~ /^github\.com\/zakonnic\/memstash/ && $$2 ~ /^v[0-9]/ {print $$1, $$2} $$1 == "require" && $$2 ~ /^github\.com\/zakonnic\/memstash/ {print $$2, $$3}' $(1)/go.mod
+# MODULE is the root module's path, read from go.mod. An in-repo module is one whose path starts with it. The JSON
+# form starts with { "Module": { "Path": "...", comments or not; a "Deprecated" field puts a comma after the path.
+MODULE := $(firstword $(subst ", ,$(word 5,$(shell go mod edit -json))))
+# repo_requires prints "module version" for every in-repo module the go.mod in $(1) requires.
+repo_requires = awk -v m=$(MODULE) 'index($$1, m) == 1 && $$2 ~ /^v[0-9]/ {print $$1, $$2} $$1 == "require" && index($$2, m) == 1 {print $$2, $$3}' $(1)/go.mod
 MODULES = . benchmarks benchmarks/load_generator tests/integration $(ADAPTERS)
 # local_proxy points the go command at a throwaway clone of HEAD in $$tmp/repo for this repository's modules, so a
 # version can be tagged there before it exists. Its throwaway module cache keeps those stand-ins out of the real one.
@@ -39,9 +42,9 @@ local_proxy = native() { cygpath -m "$$1" 2>/dev/null || echo "$$1"; }; \
 	git clone -q . "$$tmp/repo"; \
 	export GIT_CONFIG_COUNT=2 \
 		GIT_CONFIG_KEY_0="url.$$tmp/repo.insteadOf" \
-		GIT_CONFIG_VALUE_0=https://github.com/zakonnic/memstash \
+		GIT_CONFIG_VALUE_0=https://$(MODULE) \
 		GIT_CONFIG_KEY_1=protocol.file.allow GIT_CONFIG_VALUE_1=always \
-		GOPRIVATE=github.com/zakonnic/memstash GOWORK=off GOFLAGS=-modcacherw \
+		GOPRIVATE=$(MODULE) GOWORK=off GOFLAGS=-modcacherw \
 		GOMODCACHE="$$tmp/mod" GOPROXY="file:///$$cache/cache/download,https://proxy.golang.org"
 
 .PHONY: help
@@ -148,7 +151,7 @@ check-new-libs: ## Checks for new versions of libraries
 require-core: ## Make every published module require the core and adapters v$(V), sums included: the release commit (make require-core V=1.2.3)
 	@test -n "$(V)" || { echo "V is required, e.g. make require-core V=1.2.3"; exit 1; }
 	@for m in $(PUBLISHED); do \
-		for dep in $$($(call memstash_requires,$$m) | cut -d" " -f1); do \
+		for dep in $$($(call repo_requires,$$m) | cut -d" " -f1); do \
 			go -C $$m mod edit -require=$$dep@v$(V) || exit 1; \
 		done; \
 	done
@@ -190,7 +193,7 @@ tag: ## Tag the root module and every published module with the given version (m
 	done
 	@# A module left on an older core ships without that release's core fixes: the l2 helpers live in the core.
 	@for m in $(PUBLISHED); do \
-		$(call memstash_requires,$$m) | while read dep got; do \
+		$(call repo_requires,$$m) | while read dep got; do \
 			if [ "$$got" != "v$(V)" ]; then \
 				echo "Error: $$m requires $$dep $$got, not v$(V). Run 'make require-core V=$(V)' and commit."; \
 				exit 1; \
@@ -273,9 +276,9 @@ release-check: ## Build every published module the way a consumer resolves it - 
 			echo "$$m: a replace directive must not ship in a published module"; status=1; \
 		fi; \
 	done; \
-	core=$$(grep -m1 -h 'zakonnic/memstash v' $(firstword $(ADAPTERS))/go.mod | grep -o 'v[0-9][^ ]*'); \
+	core=$$($(call repo_requires,$(firstword $(ADAPTERS))) | awk '$$1 == "$(MODULE)" {print $$2}'); \
 	for m in $(PUBLISHED); do \
-		got=$$(grep -m1 -h 'zakonnic/memstash v' $$m/go.mod | grep -o 'v[0-9][^ ]*'); \
+		got=$$($(call repo_requires,$$m) | awk '$$1 == "$(MODULE)" {print $$2}'); \
 		if [ "$$got" != "$$core" ]; then echo "$$m: requires core $$got, expected $$core"; status=1; fi; \
 	done; \
 	git ls-remote --exit-code --tags origin "$$core" >/dev/null 2>&1; remote=$$?; \
@@ -312,7 +315,7 @@ release-verify: ## Install every published module at V from the proxy and build 
 	(cd $$dir && go mod init release-verify >/dev/null 2>&1); \
 	deadline=$$(( $$(date +%s) + 300 )); \
 	for m in $(PUBLISHED); do \
-		pkg=github.com/zakonnic/memstash/$$m; \
+		pkg=$(MODULE)/$$m; \
 		echo "==> $$pkg@v$(V)"; \
 		until out=$$(cd $$dir && go get $$pkg@v$(V) 2>&1 && go build $$pkg 2>&1); do \
 			if ! echo "$$out" | grep -qE '404 Not Found|410 Gone|unknown revision' || [ $$(date +%s) -ge $$deadline ]; then \
