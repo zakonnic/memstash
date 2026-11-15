@@ -12,15 +12,15 @@ require (
 	github.com/redis/rueidis v1.0.79
 	github.com/stretchr/testify v1.12.1
 	github.com/valkey-io/valkey-go v1.0.79
-	github.com/zakonnic/memstash v0.10.0
-	github.com/zakonnic/memstash/l2/gomemcache_adapter v0.10.0
-	github.com/zakonnic/memstash/l2/goredis_adapter v0.10.0
-	github.com/zakonnic/memstash/l2/mc_adapter v0.10.0
-	github.com/zakonnic/memstash/l2/rainycape_adapter v0.10.0
-	github.com/zakonnic/memstash/l2/redigo_adapter v0.10.0
-	github.com/zakonnic/memstash/l2/redispipe_adapter v0.10.0
-	github.com/zakonnic/memstash/l2/rueidis_adapter v0.10.0
-	github.com/zakonnic/memstash/l2/valkey_adapter v0.10.0
+	github.com/zakonnic/memstash v0.10.1
+	github.com/zakonnic/memstash/l2/gomemcache_adapter v0.10.1
+	github.com/zakonnic/memstash/l2/goredis_adapter v0.10.1
+	github.com/zakonnic/memstash/l2/mc_adapter v0.10.1
+	github.com/zakonnic/memstash/l2/rainycape_adapter v0.10.1
+	github.com/zakonnic/memstash/l2/redigo_adapter v0.10.1
+	github.com/zakonnic/memstash/l2/redispipe_adapter v0.10.1
+	github.com/zakonnic/memstash/l2/rueidis_adapter v0.10.1
+	github.com/zakonnic/memstash/l2/valkey_adapter v0.10.1
 	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
 )

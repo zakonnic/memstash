@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/redis/rueidis v1.0.79
-	github.com/zakonnic/memstash v0.10.0
+	github.com/zakonnic/memstash v0.10.1
 )
 
 require (

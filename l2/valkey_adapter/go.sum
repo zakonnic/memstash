@@ -8,8 +8,8 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/valkey-io/valkey-go v1.0.79 h1:dryzYka/oOkSMOcNmOTjQI8zfu/4bUzDZNnFW9NlqNM=
 github.com/valkey-io/valkey-go v1.0.79/go.mod h1:gvC/r2m3eW4Hbj0YnjogTzNtFdPSM/D+NCqen+5OABM=
-github.com/zakonnic/memstash v0.10.0 h1:JNtKswZPBdyHzblx4UnlMv2SIwGztYiZdLK47AbwvKA=
-github.com/zakonnic/memstash v0.10.0/go.mod h1:NVmlfRj7ym8eAw8fKfdpOiBITfCfS9CrKXUeVhR9UJQ=
+github.com/zakonnic/memstash v0.10.1 h1:yT7/iFc9vOEj9P4htTnRCg46/DaEkb3m17C/4H6/ehY=
+github.com/zakonnic/memstash v0.10.1/go.mod h1:NVmlfRj7ym8eAw8fKfdpOiBITfCfS9CrKXUeVhR9UJQ=
 go.yaml.in/yaml/v3 v3.0.6 h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM=
 go.yaml.in/yaml/v3 v3.0.6/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
 golang.org/x/net v0.57.0 h1:K5+3DljvIuDG9/Jv9rvyMywYNFCQ9RSUY6OOTTkT+tE=

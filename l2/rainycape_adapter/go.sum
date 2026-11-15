@@ -4,7 +4,7 @@ github.com/rainycape/memcache v0.0.0-20150622160815-1031fa0ce2f2 h1:dq90+d51/hQR
 github.com/rainycape/memcache v0.0.0-20150622160815-1031fa0ce2f2/go.mod h1:7tZKcyumwBO6qip7RNQ5r77yrssm9bfCowcLEBcU5IA=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/zakonnic/memstash v0.10.0 h1:JNtKswZPBdyHzblx4UnlMv2SIwGztYiZdLK47AbwvKA=
-github.com/zakonnic/memstash v0.10.0/go.mod h1:NVmlfRj7ym8eAw8fKfdpOiBITfCfS9CrKXUeVhR9UJQ=
+github.com/zakonnic/memstash v0.10.1 h1:yT7/iFc9vOEj9P4htTnRCg46/DaEkb3m17C/4H6/ehY=
+github.com/zakonnic/memstash v0.10.1/go.mod h1:NVmlfRj7ym8eAw8fKfdpOiBITfCfS9CrKXUeVhR9UJQ=
 go.yaml.in/yaml/v3 v3.0.6 h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM=
 go.yaml.in/yaml/v3 v3.0.6/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
