@@ -103,7 +103,8 @@ It runs two steps, each of which can also be run alone:
   fills its go.sum before the tags exist: it tags a throwaway clone of HEAD and runs `go mod tidy` against it. The
   step then checks that nothing but those go.mod and go.sum files changed.
 - `release-publish` runs `release-check`, tags every module, asks before the push (`YES=1` skips the question), pushes
-  main and the tags atomically and runs `release-verify`, which checks the sums against what the proxy serves.
+  main and the tags atomically and runs `release-verify`, which waits up to 5 minutes for the proxy to serve the
+  version and checks the sums against it.
 
 Anything that stops it before the push is undone: the tags are deleted and main goes back where it started. Once
 pushed, a version is final; a fix goes out as the next one.

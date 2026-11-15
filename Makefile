@@ -225,7 +225,7 @@ release: ## Release in one go: release-prepare, then release-publish; undone if 
 	"$(MAKE)" release-prepare V=$(V) && "$(MAKE)" release-publish V=$(V) YES=$(YES) && exit 0; \
 	git ls-remote --exit-code --tags origin v$(V) >/dev/null 2>&1; remote=$$?; \
 	if [ $$remote -eq 0 ]; then \
-		echo "v$(V) is on origin. If only release-verify failed, run it again in a minute; anything else needs the next version."; \
+		echo "v$(V) is on origin. If release-verify gave up on a not found, run it again later; anything else needs the next version."; \
 	elif [ $$remote -eq 2 ]; then \
 		echo "==> v$(V) was not pushed: undoing it, main back at $$(git rev-parse --short $$start)"; \
 		"$(MAKE)" untag V=$(V) >/dev/null; \
@@ -298,19 +298,30 @@ release-check: ## Build every published module the way a consumer resolves it - 
 	done; \
 	exit $$status
 
-# A sum release-sums got wrong fails the second build as a checksum mismatch against the proxy.
+# Once origin has every tag, a not found is waited out for up to 5 minutes: the proxy serves a new version within a
+# minute, unless someone asked for it before its tag was pushed (then up to 30). A sum release-sums got wrong fails the
+# second build as a checksum mismatch against the proxy.
 release-verify: ## Install every published module at V from the proxy and build it, then build each from its own go.sum (run after 'make push')
 	@test -n "$(V)" || { echo "V is required, e.g. make release-verify V=1.2.3"; exit 1; }
-	@dir=$$(mktemp -d); status=0; \
+	@tags=$$(git ls-remote --tags origin v$(V)) || { echo "Error: cannot list origin's tags."; exit 1; }; \
+	for t in $(TAGS); do \
+		echo "$$tags" | grep -q "refs/tags/$$t$$" || { echo "Error: origin has no tag $$t: push the release first."; exit 1; }; \
+	done
+	@dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; status=0; \
+	export GOWORK=off GOPROXY=https://proxy.golang.org; \
 	(cd $$dir && go mod init release-verify >/dev/null 2>&1); \
+	deadline=$$(( $$(date +%s) + 300 )); \
 	for m in $(PUBLISHED); do \
 		pkg=github.com/zakonnic/memstash/$$m; \
 		echo "==> $$pkg@v$(V)"; \
-		(cd $$dir && GOWORK=off go get $$pkg@v$(V) >/dev/null 2>&1 && GOWORK=off go build $$pkg) \
-			|| { echo "FAILED: $$pkg@v$(V) does not build as published"; status=1; }; \
-		GOWORK=off GOFLAGS=-mod=readonly go -C $$m build ./... \
+		until out=$$(cd $$dir && go get $$pkg@v$(V) 2>&1 && go build $$pkg 2>&1); do \
+			if ! echo "$$out" | grep -qE '404 Not Found|410 Gone|unknown revision' || [ $$(date +%s) -ge $$deadline ]; then \
+				echo "$$out"; echo "FAILED: $$pkg@v$(V) does not build as published"; status=1; break; \
+			fi; \
+			echo "    not served yet, asking again in 30s"; sleep 30; \
+		done; \
+		GOFLAGS=-mod=readonly go -C $$m build ./... \
 			|| { echo "FAILED: $$m does not build from its own go.sum"; status=1; }; \
 	done; \
-	rm -rf $$dir; \
 	if [ $$status -eq 0 ]; then echo "every published module builds from the proxy at v$(V) and from its own go.sum"; fi; \
 	exit $$status
