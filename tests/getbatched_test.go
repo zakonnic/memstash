@@ -484,7 +484,9 @@ func TestGetBatchedAdapterPanicWakesCallers(t *testing.T) {
 	_, found, err := cache.GetBatched(context.Background(), "k")
 	require.ErrorIs(t, err, memstash.ErrPanic)
 	assert.False(t, found)
-	assert.True(t, handled.Load(), "the panic reached the caller, so it counts as handled")
+	// The worker calls the handler after it wakes the callers.
+	assert.Eventually(t, handled.Load, 3*time.Second, time.Millisecond,
+		"the panic reached the caller, so it counts as handled")
 
 	value, found, err := cache.GetBatched(context.Background(), "k")
 	require.NoError(t, err, "the pool must survive a panicking adapter")
@@ -594,10 +596,11 @@ func TestGetBatchedReadsLikeGetWithoutMultiGet(t *testing.T) {
 	}
 }
 
-// readWorkers counts the goroutines running a read pool's loop: the process's total moves with whatever else runs.
+// readWorkers counts the read pools' goroutines by their creator: one not scheduled yet shows only the go statement's
+// wrapper, not getBatchLoop. It goes by name because the process's total moves with whatever else runs.
 func readWorkers() int {
 	buf := make([]byte, 1<<20)
-	return strings.Count(string(buf[:runtime.Stack(buf, true)]), ").getBatchLoop(")
+	return strings.Count(string(buf[:runtime.Stack(buf, true)]), ".(*getWorkerPool[...]).start in goroutine ")
 }
 
 // TestGetBatchedStress exercises the slot hand-off the way the race detector needs it: readers that take their
