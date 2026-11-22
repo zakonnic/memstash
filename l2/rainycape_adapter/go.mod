@@ -1,6 +1,6 @@
 module github.com/zakonnic/memstash/l2/rainycape_adapter
 
-go 1.24
+go 1.26.0
 
 require github.com/zakonnic/memstash v0.10.1
 

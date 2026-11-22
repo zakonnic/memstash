@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/onsi/gomega v1.44.0 // indirect
 	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
 	github.com/yuin/gopher-lua v1.1.2 // indirect
 	golang.org/x/net v0.62.0 // indirect

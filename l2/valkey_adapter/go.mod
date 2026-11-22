@@ -3,7 +3,7 @@ module github.com/zakonnic/memstash/l2/valkey_adapter
 go 1.26.0
 
 require (
-	github.com/valkey-io/valkey-go v1.0.79
+	github.com/valkey-io/valkey-go v1.0.80
 	github.com/zakonnic/memstash v0.10.1
 )
 
