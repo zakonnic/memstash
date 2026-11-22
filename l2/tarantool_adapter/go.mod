@@ -1,6 +1,6 @@
 module github.com/zakonnic/memstash/l2/tarantool_adapter
 
-go 1.24
+go 1.26.0
 
 require (
 	github.com/tarantool/go-tarantool/v2 v2.4.2
@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
 	github.com/tarantool/go-iproto v1.1.0 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect

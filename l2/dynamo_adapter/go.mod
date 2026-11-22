@@ -1,10 +1,10 @@
 module github.com/zakonnic/memstash/l2/dynamo_adapter
 
-go 1.24
+go 1.26.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.48.0
-	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.74.0
+	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.74.1
 	github.com/zakonnic/memstash v0.10.1
 )
 

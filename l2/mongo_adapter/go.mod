@@ -4,7 +4,10 @@ go 1.26.0
 
 require github.com/zakonnic/memstash v0.10.1
 
-require github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
+require (
+	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
+)
 
 require (
 	github.com/golang/snappy v1.0.0 // indirect
